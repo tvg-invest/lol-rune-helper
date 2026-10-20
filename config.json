@@ -1,0 +1,8 @@
+{
+  "region": "GLOBAL",
+  "setRunes": true,
+  "setSpells": true,
+  "flashKey": "keep",
+  "setItemSet": true,
+  "pollMs": 1500
+}
