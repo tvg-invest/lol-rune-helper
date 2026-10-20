@@ -246,7 +246,32 @@ server.listen(0, '127.0.0.1', async () => {
     const zh = L.advice.find((a) => a.id === '3157');
     assert(zh, "Zhonya's foreslås mod fed AD-Zed");
     assert.strictEqual(zh.cost, items['3157'].gold.total - items[String(zhonyaPart)].gold.total, 'restpris trækker ejet del fra');
+    assert.strictEqual(zh.inProgress, items[String(zhonyaPart)].gold.total >= 700, "Zhonya's er 'i gang' med en dyr del");
+    if (zh.inProgress) assert.strictEqual(L.advice[0].id, '3157', "item du er i gang med står først");
     console.log('Live-forslag:', JSON.stringify(L.advice.map((a) => ({ item: a.name, cost: a.cost, råd: a.canAfford, del: a.part?.name, hvorfor: a.reasons }))));
+
+    // 7b) Halvt købt item: Lost Chapter (1.200 g) -> det item den bruges i står først, kun ét forslag bruger delen
+    const idByName = (name) => Object.keys(items).find((id) => items[id].name === name && items[id].maps['11']);
+    const lostChapter = Number(idByName('Lost Chapter'));
+    const setMyItems = (ids) => { live.data.allPlayers[0].items = ids.map((id, slot) => ({ itemID: id, count: 1, slot })); };
+    setMyItems([1056, 3020, lostChapter]);
+    await wait(2500);
+    let L2 = (await gui('GET', '/state')).body.live;
+    const first = L2.advice[0];
+    assert(first.inProgress, `første forslag er "i gang": ${first.name}`);
+    assert(first.reasons[0].startsWith('Du er i gang') && first.reasons[0].includes('Lost Chapter'), first.reasons[0]);
+    assert(items[first.id].from.includes(String(lostChapter)) || JSON.stringify(items[first.id].from).includes(String(lostChapter)), 'bruger Lost Chapter');
+    assert.strictEqual(L2.advice.filter((a) => a.inProgress).length, 1, 'kun ét forslag gør krav på Lost Chapter');
+    assert(L2.advice.some((a) => a.adapted && !a.inProgress), 'tilpassede forslag vises stadig');
+    console.log('Med Lost Chapter:', JSON.stringify(L2.advice.map((a) => ({ item: a.name, cost: a.cost, hvorfor: a.reasons }))));
+
+    // 7c) Kun en Amplifying Tome (400 g) -> intet låses fast
+    setMyItems([1056, 3020, Number(idByName('Amplifying Tome'))]);
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert(!L2.advice.some((a) => a.inProgress), 'en billig del gør ikke et item "i gang"');
+    live.data = liveGame(zhonyaPart);
+    await wait(2500);
 
     // Valgfrit: HOLD_LIVE=ms holder kampen åben, fx til node test/screenshot.js <url>.
     if (process.env.HOLD_LIVE) {

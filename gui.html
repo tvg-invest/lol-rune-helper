@@ -79,6 +79,8 @@
   .advice { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
   .pick { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
   .pick.adapted { border-color: var(--blue); }
+  .pick.progress { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
+  .progtag { font-size: 10px; font-weight: 700; color: #111; background: var(--gold); border-radius: 3px; padding: 0 5px; margin-left: 6px; vertical-align: middle; }
   .pick .top { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
   .pick .top img { width: 52px; height: 52px; border-radius: 8px; border: 1px solid var(--line); flex: none; }
   .pick .name { font-weight: 600; color: var(--gold2); }
@@ -212,9 +214,9 @@ function adviceCard(L) {
     el('h2', {}, 'Overvej at købe'),
     el('div', { class: 'muted', style: 'font-size:12px;margin:-6px 0 12px' }, 'Forslag ud fra dit build og hvad modstanderne bygger - du bestemmer.'),
     L.advice.length ? el('div', { class: 'advice' }, L.advice.map((a) =>
-      el('div', { class: 'pick' + (a.adapted ? ' adapted' : '') },
+      el('div', { class: 'pick' + (a.inProgress ? ' progress' : a.adapted ? ' adapted' : '') },
         el('div', { class: 'top' }, img(a.icon, a.name),
-          el('div', {}, el('div', { class: 'name' }, a.name),
+          el('div', {}, el('div', { class: 'name' }, a.name, a.inProgress ? el('span', { class: 'progtag' }, 'I GANG') : null),
             a.canAfford ? el('span', { class: 'badge ok' }, `Råd nu · ${gold(a.cost)}`) : el('span', { class: 'badge no' }, `${gold(a.cost)} · mangler ${gold(a.cost - L.gold)}`))),
         el('ul', {}, a.reasons.map((r) => el('li', {}, r))),
         a.part ? el('div', { class: 'part' }, 'Råd nu til delen', img(a.part.icon, a.part.name), `${a.part.name} (${gold(a.part.cost)})`) : null)))

@@ -487,19 +487,24 @@ function livePlayer(p) {
 }
 
 // Pris tilbage når de dele du allerede ejer trækkes fra (hver ejet del tælles én gang).
+// Returnerer også hvilke ejede dele der indgår, så vi ved om du er i gang med itemet.
 function remainingCost(id, ownedIds) {
   const owned = [...ownedIds];
+  const used = [];
   let cost = dd.items[id]?.gold || 0;
   // Ejer du en del, trækkes hele dens pris fra; ellers kigges på dens egne dele.
   const take = (x) => {
     for (const c of dd.items[x]?.from || []) {
       const i = owned.indexOf(c);
-      if (i !== -1) { owned.splice(i, 1); cost -= dd.items[c].gold; } else take(c);
+      if (i !== -1) { owned.splice(i, 1); used.push(c); cost -= dd.items[c].gold; } else take(c);
     }
   };
   take(id);
-  return Math.max(0, cost);
+  return { cost: Math.max(0, cost), used };
 }
+
+// Dele for mindst så meget guld betyder at du er i gang med itemet (en enkelt Amplifying Tome gør ikke).
+const IN_PROGRESS_GOLD = 700;
 
 function affordablePart(id, ownedIds, gold) {
   const parts = new Set();
@@ -591,10 +596,17 @@ function liveAdvice(build, me, enemy, gold, mapNumber) {
     if (!isCompleted(it) || !it.purchasable || it.maps[mapNumber] === false || owned.includes(id)) continue;
     if (hasBoots && it.tags.includes('Boots')) continue;
     if (hasAntiheal && it.antiheal) continue;
-    // Sjældne køb i puljen (fx Randuin's på en mage) passer sjældent til championen.
-    if (popularity >= 0 && popularity < 0.02) continue;
+    const { cost, used } = remainingCost(id, owned);
+    const paid = it.gold - cost;
+    const inProgress = paid >= IN_PROGRESS_GOLD;
+    // Sjældne køb i puljen (fx Randuin's på en mage) passer sjældent til championen - medmindre du er i gang med det.
+    if (popularity >= 0 && popularity < 0.02 && !inProgress) continue;
     let score = Math.max(popularity, 0) * 100;
     const reasons = [];
+    if (inProgress) {
+      score += 40 + 60 * (paid / it.gold);
+      reasons.push(`Du er i gang: har ${used.map(itemName).join(', ')} (${pct(paid / it.gold)} af prisen)`);
+    }
     if (it.antiheal && enemy.healers.length) { score += 30 + 15 * enemy.healers.length; reasons.push(`Anti-heal mod ${names(enemy.healers)}`); }
     if (it.tags.includes('ArmorPenetration') && iAmAD && enemy.armorHeavy) { score += 35; reasons.push(`${names(enemy.armorStackers)} bygger armor`); }
     if (it.tags.includes('MagicPenetration') && !iAmAD && enemy.mrHeavy) { score += 35; reasons.push(`${names(enemy.mrStackers)} bygger magic resist`); }
@@ -604,23 +616,35 @@ function liveAdvice(build, me, enemy, gold, mapNumber) {
     if (it.tags.includes('SpellBlock') && fedAP) { score += 30; reasons.push(`${fedAP.champ?.name || fedAP.name} er fed (${kda(fedAP)}) og laver AP-skade`); }
     if (it.tags.includes('Armor') && enemy.adShare >= 0.65) { score += 15; reasons.push(`${pct(enemy.adShare)} af deres trussel er AD`); }
     if (it.tags.includes('SpellBlock') && enemy.apShare >= 0.55) { score += 15; reasons.push(`${pct(enemy.apShare)} af deres trussel er AP`); }
-    if (!reasons.length) reasons.push(`Fast del af buildet (${pct(Math.min(popularity, 1))} køber det)`);
-    const cost = remainingCost(id, owned);
+    const adapted = reasons.length > (inProgress ? 1 : 0);
+    if (!reasons.length) reasons.push(`Fast del af buildet (${pct(Math.min(Math.max(popularity, 0), 1))} køber det)`);
     const part = cost > gold ? affordablePart(id, owned, gold) : null;
-    scored.push({ id, score, reasons, cost, canAfford: cost <= gold, part, adapted: reasons.length && !reasons[0].startsWith('Fast del') });
+    scored.push({ id, score, reasons, cost, canAfford: cost <= gold, part, adapted, inProgress, used });
   }
   scored.sort((a, b) => b.score - a.score);
-  // Op til 2 tilpassede forslag (der er en konkret grund), resten fyldes med det bedste fra buildet.
+  // Rækkefølge: det item du er i gang med (dine dele er ikke spildt), så op til 2 tilpassede forslag,
+  // resten fyldes med det bedste fra buildet. Hver ejet del bruges kun til ét "i gang"-item.
   // Max ét anti-heal-item.
   const out = [];
   const add = (s) => {
-    if (out.includes(s) || out.length === 3) return;
-    if (dd.items[s.id].antiheal && out.some((o) => dd.items[o.id].antiheal)) return;
+    if (out.includes(s) || out.length === 3) return false;
+    if (dd.items[s.id].antiheal && out.some((o) => dd.items[o.id].antiheal)) return false;
     out.push(s);
+    return true;
   };
-  scored.filter((s) => s.adapted).slice(0, 2).forEach(add);
-  scored.forEach(add);
-  return out.sort((a, b) => b.score - a.score);
+  const claimed = [];
+  const rejected = new Set(); // andre items der ville bruge de samme dele
+  for (const s of scored.filter((x) => x.inProgress)) {
+    const left = [...claimed];
+    const overlaps = s.used.some((u) => { const i = left.indexOf(u); if (i === -1) return false; left.splice(i, 1); return true; });
+    if (!overlaps && add(s)) claimed.push(...s.used);
+    else rejected.add(s);
+  }
+  const rest = scored.filter((s) => !rejected.has(s));
+  rest.filter((s) => s.adapted && !s.inProgress).slice(0, 2).forEach(add);
+  rest.forEach(add);
+  // "I gang" først, ellers efter score.
+  return out.sort((a, b) => (b.inProgress - a.inProgress) || (b.score - a.score));
 }
 
 async function updateLive(data) {
@@ -722,6 +746,7 @@ function liveView() {
       canAfford: a.canAfford,
       reasons: a.reasons,
       adapted: a.adapted,
+      inProgress: a.inProgress,
       part: a.part && { ...item(a.part), cost: dd.items[a.part].gold },
     })),
     enemy: {
