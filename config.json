@@ -1,8 +1,12 @@
 {
   "region": "GLOBAL",
+  "buildChoice": "smart",
   "setRunes": true,
   "setSpells": true,
   "flashKey": "keep",
   "setItemSet": true,
+  "adaptToEnemies": true,
+  "openWindow": true,
+  "port": 3399,
   "pollMs": 1500
 }

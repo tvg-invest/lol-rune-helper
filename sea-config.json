@@ -1,0 +1,8 @@
+{
+  "main": "lol-helper.js",
+  "output": "dist/sea-prep.blob",
+  "disableExperimentalSEAWarning": true,
+  "useCodeCache": false,
+  "useSnapshot": false,
+  "assets": { "gui.html": "gui.html" }
+}

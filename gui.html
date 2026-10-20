@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LoL Rune Helper</title>
+<style>
+  :root {
+    --bg: #0a0e14; --panel: #121821; --panel2: #18202c; --line: #263142;
+    --text: #e6e9ef; --muted: #8b95a7; --gold: #c8aa6e; --gold2: #f0e6d2;
+    --blue: #0ac8b9; --red: #e84057; --green: #3fbf7f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 20px 16px 40px; }
+  h2 { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--gold); margin: 0 0 12px; font-weight: 600; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .muted { color: var(--muted); }
+  .status { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  header { display: flex; gap: 16px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  header .champ { width: 72px; height: 72px; border-radius: 10px; border: 2px solid var(--gold); }
+  header h1 { margin: 0; font-size: 26px; color: var(--gold2); }
+  header .meta { color: var(--muted); font-size: 13px; }
+  header .right { margin-left: auto; text-align: right; }
+  .wr { font-size: 22px; font-weight: 700; }
+  .roles { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+  button { font: inherit; cursor: pointer; border-radius: 6px; border: 1px solid var(--line); background: var(--panel2); color: var(--text); padding: 6px 12px; }
+  button:hover { border-color: var(--gold); }
+  button.active { background: var(--gold); color: #111; border-color: var(--gold); font-weight: 600; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 14px; }
+  .grid > div { min-width: 0; }
+  @media (max-width: 760px) {
+    .grid { grid-template-columns: minmax(0, 1fr); }
+    header .right { margin-left: 0; text-align: left; flex-basis: 100%; }
+  }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tab { display: flex; align-items: center; gap: 6px; padding: 5px 10px 5px 5px; }
+  .tab img { width: 26px; height: 26px; }
+  .tab img.sub { width: 18px; height: 18px; margin-left: -4px; }
+  .tab .diff { display: block; font-size: 11px; opacity: .75; }
+  .tab span { text-align: left; }
+  .tab small { color: inherit; opacity: .8; }
+  .tree { display: flex; align-items: flex-start; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+  .tree .style { width: 22px; height: 22px; opacity: .9; margin-top: 14px; flex: none; }
+  .rune { display: flex; flex-direction: column; align-items: center; width: 70px; text-align: center; font-size: 11px; line-height: 1.25; color: var(--muted); }
+  .rune img { width: 40px; height: 40px; object-fit: contain; flex: none; margin-bottom: 4px; }
+  .rune.keystone { color: var(--gold2); }
+  .rune.keystone img { width: 52px; height: 52px; margin-top: -6px; }
+  .names { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .shards { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .pill { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--line); color: var(--muted); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .spell { display: flex; align-items: center; gap: 8px; }
+  .spell img { width: 36px; height: 36px; border-radius: 6px; }
+  .keys { display: flex; gap: 4px; }
+  .key { width: 28px; height: 28px; border-radius: 6px; background: var(--panel2); border: 1px solid var(--line); display: grid; place-items: center; font-weight: 700; color: var(--gold2); }
+  .key.r { color: var(--red); }
+  .block { margin-bottom: 12px; }
+  .block .title { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .items { display: flex; gap: 6px; flex-wrap: wrap; }
+  .item { position: relative; }
+  .item img { width: 42px; height: 42px; border-radius: 6px; border: 1px solid var(--line); display: block; }
+  .item .count { position: absolute; right: 2px; bottom: 0; font-size: 11px; font-weight: 700; text-shadow: 0 0 3px #000, 0 0 3px #000; }
+  .block.counter .title { color: var(--blue); }
+  .enemies { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .enemies img { width: 38px; height: 38px; border-radius: 6px; border: 1px solid var(--red); }
+  .bar { height: 8px; border-radius: 4px; overflow: hidden; display: flex; background: var(--panel2); margin: 6px 0 4px; }
+  .bar .ad { background: var(--red); } .bar .ap { background: #4f8cff; }
+  .notes { margin: 10px 0 0; padding-left: 18px; color: var(--text); }
+  .empty { text-align: center; padding: 70px 16px; }
+  .empty .big { font-size: 20px; color: var(--gold2); margin-bottom: 6px; }
+  pre.log { margin: 0; white-space: pre-wrap; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; color: var(--muted); max-height: 220px; overflow: auto; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<main id="app"><div class="empty"><div class="big">Starter...</div></div></main>
+<script>
+const $app = document.getElementById('app');
+const pct = (x) => (x * 100).toFixed(1).replace('.', ',') + '%';
+const num = (x) => x == null ? '' : x.toLocaleString('da-DK');
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else if (k === 'class') node.className = v;
+    else node.setAttribute(k, v);
+  }
+  for (const c of children.flat()) if (c != null && c !== false) node.append(c.nodeType ? c : String(c));
+  return node;
+}
+const img = (src, alt, cls) => src ? el('img', { src, alt, title: alt, class: cls }) : null;
+
+async function post(url, body) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) alert((await res.json().catch(() => ({}))).error || 'Noget gik galt');
+}
+
+function statusLine(s) {
+  const on = !/Venter på League|Mistede/.test(s.status);
+  return el('div', { class: 'status' }, el('span', { class: 'dot' + (on ? ' on' : '') }), s.status);
+}
+
+function logCard(s) {
+  return el('div', { class: 'card' }, el('details', {}, el('summary', {}, 'Log'), el('pre', { class: 'log' }, s.log.join('\n'))));
+}
+
+function runesCard(s) {
+  const opt = s.runeOptions[s.runeIndex] || s.runeOptions[0];
+  // Vis den rune der adskiller alternativerne, når keystone og grene er ens.
+  const allNames = s.runeOptions.map((r) => [...r.primaryRunes, ...r.secondaryRunes].map((x) => x.name));
+  const diffOf = (i) => allNames[i].find((n) => allNames.some((other, j) => j !== i && !other.includes(n))) || '';
+  const tabs = el('div', { class: 'tabs' }, s.runeOptions.map((r, i) =>
+    el('button', { class: 'tab' + (i === s.runeIndex ? ' active' : ''), onclick: () => post('/api/rune', { index: i }) },
+      img(r.primaryRunes[0].icon, r.primaryRunes[0].name),
+      img(r.secondary.icon, r.secondary.name, 'sub'),
+      el('span', {}, r.primaryRunes[0].name, ' ', el('small', {}, pct(r.winRate) + ' · ' + num(r.games)),
+        diffOf(i) ? el('small', { class: 'diff' }, 'med ' + diffOf(i)) : null))));
+  if (!opt) return el('div', { class: 'card' }, el('h2', {}, 'Runer'), el('div', { class: 'muted' }, 'Ingen rune-data.'));
+  const runeEl = (r, key) => el('div', { class: 'rune' + (key ? ' keystone' : '') }, img(r.icon, r.name), r.name);
+  return el('div', { class: 'card' },
+    el('h2', {}, 'Runer'),
+    tabs,
+    el('div', { class: 'tree' }, img(opt.primary.icon, opt.primary.name, 'style'), opt.primaryRunes.map((r, i) => runeEl(r, i === 0))),
+    el('div', { class: 'tree' }, img(opt.secondary.icon, opt.secondary.name, 'style'), opt.secondaryRunes.map((r) => runeEl(r))),
+    el('div', { class: 'shards' }, opt.shards.map((x) => el('span', { class: 'pill' }, x))));
+}
+
+function spellsCard(s) {
+  const keys = (list) => el('div', { class: 'keys' }, list.map((k) => el('span', { class: 'key' + (k === 'R' ? ' r' : '') }, k)));
+  return el('div', { class: 'card' },
+    el('h2', {}, 'Summoners & skills'),
+    el('div', { class: 'row', style: 'margin-bottom:12px' },
+      s.spells.map((sp, i) => el('div', { class: 'spell' }, img(sp.icon, sp.name), el('span', {}, sp.name, el('span', { class: 'muted' }, i ? ' (F)' : ' (D)'))))),
+    s.skills.start.length ? el('div', { class: 'row', style: 'margin-bottom:8px' }, el('span', { class: 'muted', style: 'width:44px' }, 'Start'), keys(s.skills.start)) : null,
+    s.skills.max.length ? el('div', { class: 'row' }, el('span', { class: 'muted', style: 'width:44px' }, 'Max'), keys(s.skills.max)) : null);
+}
+
+function itemsCard(s) {
+  return el('div', { class: 'card' },
+    el('h2', {}, 'Items'),
+    s.blocks.map((b) => el('div', { class: 'block' + (b.title === 'Mod deres hold' ? ' counter' : '') },
+      el('div', { class: 'title' }, b.title),
+      el('div', { class: 'items' }, b.items.map((it) =>
+        el('div', { class: 'item' }, img(it.icon, it.name), it.count > 1 ? el('span', { class: 'count' }, it.count) : null))),
+      el('div', { class: 'names' }, b.items.map((it) => it.name).join(' · ')))),
+    el('div', { class: 'muted', style: 'font-size:12px' }, 'Ligger også som item set i butikken i spillet.'));
+}
+
+function enemyCard(s) {
+  if (!s.enemy || !s.enemy.champions.length) {
+    return el('div', { class: 'card' }, el('h2', {}, 'Modstanderholdet'),
+      el('div', { class: 'muted' }, 'Ikke synligt endnu. Items tilpasses automatisk, når de vælger.'));
+  }
+  const total = s.enemy.adShare + s.enemy.apShare || 1;
+  return el('div', { class: 'card' },
+    el('h2', {}, 'Modstanderholdet'),
+    el('div', { class: 'enemies' }, s.enemy.champions.map((c) => img(c.icon, c.name))),
+    el('div', { class: 'bar' },
+      el('div', { class: 'ad', style: `width:${(s.enemy.adShare / total) * 100}%` }),
+      el('div', { class: 'ap', style: `width:${(s.enemy.apShare / total) * 100}%` })),
+    el('div', { class: 'muted', style: 'font-size:12px' }, `AD ${pct(s.enemy.adShare)} · AP ${pct(s.enemy.apShare)}`),
+    s.notes.length ? el('ul', { class: 'notes' }, s.notes.map((n) => el('li', {}, n))) : el('div', { class: 'muted', style: 'margin-top:8px' }, 'Intet særligt at tilpasse.'));
+}
+
+function render(s) {
+  $app.replaceChildren();
+  if (!s.champion) {
+    $app.append(
+      el('div', { class: 'card empty' }, el('div', { class: 'big' }, 'LoL Rune Helper'), statusLine(s),
+        el('p', { class: 'muted' }, 'Lås en champion i champion select, så sætter jeg runer, summoners og items.')),
+      logCard(s));
+    return;
+  }
+  const role = s.roleOverride;
+  $app.append(
+    el('header', {},
+      img(s.champion.icon, s.champion.name, 'champ'),
+      el('div', {}, el('h1', {}, s.champion.name), el('div', { class: 'meta' }, `${s.position} · patch ${s.patch || '?'} · ${s.gameMode}`), statusLine(s)),
+      s.winRate != null ? el('div', { class: 'right' }, el('div', { class: 'wr' }, pct(s.winRate)), el('div', { class: 'meta' }, `${num(s.games)} kampe · ${s.statsScope}`)) : null),
+    s.position !== 'ARAM' ? el('div', { class: 'roles' },
+      el('button', { class: role ? '' : 'active', onclick: () => post('/api/role', { position: null }) }, 'Auto'),
+      s.positions.map((p) => el('button', { class: role === p ? 'active' : '', onclick: () => post('/api/role', { position: p }) }, p))) : null,
+    el('div', { class: 'grid' },
+      el('div', {}, runesCard(s), itemsCard(s)),
+      el('div', {}, spellsCard(s), enemyCard(s))),
+    logCard(s));
+}
+
+let lastJson = '';
+function connect() {
+  const es = new EventSource('/events');
+  es.onmessage = (e) => {
+    if (e.data === lastJson) return;
+    lastJson = e.data;
+    const open = document.querySelector('details')?.open;
+    render(JSON.parse(e.data));
+    if (open) document.querySelector('details').open = true;
+  };
+  es.onerror = () => {
+    es.close();
+    $app.replaceChildren(el('div', { class: 'card empty' }, el('div', { class: 'big' }, 'Programmet er lukket'), el('div', { class: 'muted' }, 'Start LoL Rune Helper igen - siden genforbinder selv.')));
+    lastJson = '';
+    setTimeout(connect, 3000);
+  };
+}
+connect();
+</script>
+</body>
+</html>

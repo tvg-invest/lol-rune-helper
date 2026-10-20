@@ -1,0 +1,32 @@
+LoL Rune Helper
+===============
+
+Sætter automatisk runer, summoner spells og items (item set i butikken),
+når du låser en champion i champion select. Items tilpasses modstanderholdet.
+
+START
+- Windows: dobbeltklik "LoL Rune Helper.exe".
+  Første gang kan Windows vise "Windows beskyttede din pc" ->
+  klik "Flere oplysninger" -> "Kør alligevel" (programmet er ikke signeret).
+- Mac: dobbeltklik "LoL Rune Helper".
+  Første gang blokerer macOS den, fordi den ikke er signeret af Apple:
+  åbn Systemindstillinger -> Anonymitet og sikkerhed -> rul ned -> "Åbn alligevel".
+  (På ældre macOS: højreklik -> Åbn -> Åbn.)
+
+Et vindue åbner i din browser (http://127.0.0.1:3399) og viser
+runer, items og analysen af modstanderholdet. Lad programmet køre, mens du spiller.
+Rækkefølgen er ligegyldig - programmet venter selv på League-klienten.
+
+I vinduet kan du
+- vælge en af 3 alternative rune-sider (sættes med det samme)
+- tvinge en rolle (fx hvis du spiller off-role i blind pick)
+
+INDSTILLINGER (config.json ved siden af programmet)
+- region: GLOBAL (flest kampe), EUW, EUNE, NA, KR ...
+- buildChoice: "smart" (højeste win rate blandt populære builds) eller "popular" (mest spillede)
+- setRunes / setSpells / setItemSet / adaptToEnemies: true eller false
+- flashKey: "keep", "D" eller "F"
+- openWindow: false hvis browservinduet ikke skal åbne ved start
+
+Data: OP.GG (builds) og Riot Data Dragon (navne og ikoner).
+Programmet bruger kun klientens lokale API i champion select - det læser intet fra selve kampen.
