@@ -10,6 +10,7 @@ NOTES="${1:-Ny version}"
 echo "Udgiver v$VERSION"
 gh release create "v$VERSION" \
   --repo tvg-invest/lol-rune-helper \
+  --target "$(git rev-parse HEAD)" \
   --title "LoL Rune Helper $VERSION" \
   --notes "$NOTES" \
   dist/release/LoL-Rune-Helper.exe \
