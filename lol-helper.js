@@ -101,6 +101,12 @@ async function findClient() {
 
   let cmdline;
   if (process.platform === 'win32') {
+    // Lockfilen findes kun mens klienten kører og er gratis at læse - prøv den før PowerShell.
+    const fromLockfile = readLockfile(lockfileCandidates(''));
+    if (fromLockfile) return fromLockfile;
+    // PowerShell tager ~0,5 sek. CPU at starte: højst hvert 15. sekund når klienten ikke er fundet.
+    if (Date.now() - (findClient.lastPs || 0) < 15000) return null;
+    findClient.lastPs = Date.now();
     cmdline = await run('powershell.exe', ['-NoProfile', '-Command',
       "Get-CimInstance Win32_Process -Filter \"name='LeagueClientUx.exe'\" | Select-Object -ExpandProperty CommandLine"]);
   } else {
@@ -112,10 +118,15 @@ async function findClient() {
   const token = /--remoting-auth-token=([\w-]+)/.exec(cmdline);
   if (port && token) return { protocol: 'https', port: Number(port[1]), password: token[1] };
 
-  for (const file of lockfileCandidates(cmdline)) {
+  return readLockfile(lockfileCandidates(cmdline));
+}
+
+// Lockfile-format: LeagueClient:<pid>:<port>:<password>:<protocol>
+function readLockfile(files) {
+  for (const file of files) {
     try {
       const [, , p, password, protocol] = fs.readFileSync(file, 'utf8').trim().split(':');
-      return { protocol, port: Number(p), password };
+      if (Number(p) > 0 && password) return { protocol, port: Number(p), password };
     } catch {}
   }
   return null;
@@ -148,7 +159,9 @@ function localJson(protocol, port, method, urlPath, extraHeaders, body, timeout)
       res.setEncoding('utf8');
       res.on('data', (c) => (text += c));
       res.on('end', () => {
-        if (res.statusCode >= 400) return reject(new Error(`${method} ${urlPath} -> ${res.statusCode}: ${text.slice(0, 300)}`));
+        if (res.statusCode >= 400) {
+          return reject(Object.assign(new Error(`${method} ${urlPath} -> ${res.statusCode}: ${text.slice(0, 300)}`), { status: res.statusCode }));
+        }
         try { resolve(text ? JSON.parse(text) : null); } catch { resolve(text); }
       });
     });
@@ -216,6 +229,31 @@ const buildCache = new Map();
 const CACHE_TTL = 6 * 3600 * 1000;
 const CACHE_DIR = process.env.LOL_HELPER_CACHE || path.join(APP_DIR, 'cache');
 
+// Højst 4 OP.GG-kald ad gangen (draft kan ellers sende 20+ på én gang).
+let activeRequests = 0;
+const requestQueue = [];
+async function limited(fn) {
+  if (activeRequests >= 4) await new Promise((resolve) => requestQueue.push(resolve));
+  activeRequests++;
+  try {
+    return await fn();
+  } finally {
+    activeRequests--;
+    requestQueue.shift()?.();
+  }
+}
+
+// Ryd udløbne builds i hukommelsen og gamle filer i cache-mappen (kører hver time).
+function pruneCache() {
+  for (const [key, hit] of buildCache) if (Date.now() - hit.at > CACHE_TTL) buildCache.delete(key);
+  try {
+    for (const f of fs.readdirSync(CACHE_DIR)) {
+      const file = path.join(CACHE_DIR, f);
+      if (Date.now() - fs.statSync(file).mtimeMs > 24 * 3600 * 1000) fs.rmSync(file, { force: true });
+    }
+  } catch {}
+}
+
 async function fetchBuild(region, mode, championId, position, target) {
   const key = `${region}_${mode}_${championId}_${position}${target ? `_vs${target}` : ''}`;
   const hit = buildCache.get(key);
@@ -227,7 +265,7 @@ async function fetchBuild(region, mode, championId, position, target) {
     } catch {}
     const url = `https://lol-api-champion.op.gg/api/${region}/champions/${mode}/${championId}/${position}` +
       (target ? `?target_champion=${target}` : '');
-    const j = await getJson(url);
+    const j = await limited(() => getJson(url));
     const data = { ...j.data, version: j.meta?.version };
     try {
       fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -440,8 +478,14 @@ async function applyRunes(client, rune, title) {
   try {
     await lcu(client, 'POST', '/lol-perks/v1/pages', page);
   } catch (e) {
-    // Alle rune-sider er i brug: overskriv den aktive (eller sidste) redigerbare side.
-    const victim = editable.find((p) => p.current && p.id !== ours?.id) || editable.filter((p) => p.id !== ours?.id).pop();
+    // Har vi lige slettet vores egen side, er der en ledig plads - så skyldes fejlen noget andet
+    // (fx runer der ikke passer til en ny patch). Rør aldrig dine egne sider i det tilfælde.
+    if (ours) throw e;
+    // Er siderne faktisk fulde? (Kan klienten ikke svare, antager vi det, som før.)
+    const inventory = await lcu(client, 'GET', '/lol-perks/v1/inventory').catch(() => null);
+    if (typeof inventory?.ownedPageCount === 'number' && editable.length < inventory.ownedPageCount) throw e;
+    // Erstat helst en side du ikke bruger lige nu.
+    const victim = editable.filter((p) => !p.current).pop() || editable.find((p) => p.current);
     if (!victim) throw e;
     log(`  Alle rune-sider er fulde - erstatter siden "${victim.name}" (sker kun første gang).`);
     await lcu(client, 'DELETE', `/lol-perks/v1/pages/${victim.id}`);
@@ -492,7 +536,10 @@ async function myChampionPool(cfg, position) {
     const mastery = await lcu(app.client, 'GET', '/lol-champion-mastery/v1/local-player/champion-mastery');
     for (const m of (Array.isArray(mastery) ? mastery : []).sort((a, b) => b.championPoints - a.championPoints).slice(0, 15)) ids.push(m.championId);
   } catch {}
-  for (const g of history.games) if (g.championId && !ids.includes(g.championId)) ids.push(g.championId);
+  // + dine 8 mest spillede fra historikken (ikke alle - det ville give et udbrud af OP.GG-kald).
+  const played = new Map();
+  for (const g of history.games) if (g.championId) played.set(g.championId, (played.get(g.championId) || 0) + 1);
+  for (const [id] of [...played].sort((a, b) => b[1] - a[1]).slice(0, 8)) if (!ids.includes(id)) ids.push(id);
   const withRole = await Promise.all(ids.map(async (id) => {
     try {
       const probe = await fetchBuild(cfg.region, 'ranked', id, 'MID');
@@ -577,7 +624,13 @@ function updateDraft(session, me) {
 
 const HISTORY_FILE = process.env.LOL_HELPER_HISTORY || path.join(APP_DIR, 'history.json');
 const history = (() => {
-  try { return { games: JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')).games || [] }; } catch { return { games: [] }; }
+  try {
+    const games = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')).games;
+    // Spring ødelagte/håndredigerede poster over i stedet for at fejle senere.
+    return { games: Array.isArray(games) ? games.filter((g) => g && typeof g === 'object' && g.champion) : [] };
+  } catch {
+    return { games: [] };
+  }
 })();
 
 // Følger dine køb under kampen: hvilke færdige items, hvornår, og om de var blandt forslagene.
@@ -644,7 +697,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -678,20 +731,33 @@ async function applyUpdate() {
   if (buf.length < 10 * 1024 * 1024) throw new Error('Filen er for lille - afbryder');
   const exe = process.execPath;
   fs.writeFileSync(`${exe}.new`, buf, { mode: 0o755 });
-  // Windows kan omdøbe men ikke overskrive en kørende .exe; macOS kan erstatte filen direkte.
-  if (process.platform === 'win32') {
-    fs.rmSync(`${exe}.old`, { force: true });
-    fs.renameSync(exe, `${exe}.old`);
+  // En kørende fil kan omdøbes (også på Windows) men ikke overskrives: gem den gamle som .old.
+  const rollback = () => {
+    try { fs.rmSync(exe, { force: true }); fs.renameSync(`${exe}.old`, exe); } catch {}
+  };
+  fs.rmSync(`${exe}.old`, { force: true });
+  fs.renameSync(exe, `${exe}.old`);
+  try {
+    fs.renameSync(`${exe}.new`, exe);
+  } catch (e) {
+    fs.renameSync(`${exe}.old`, exe); // fx antivirus der holder den nye fil - behold den gamle
+    throw e;
   }
-  fs.renameSync(`${exe}.new`, exe);
+  // Start den nye version mens den gamle stadig kører; den venter selv på at porten bliver ledig.
+  const child = spawn(exe, ['--updated'], { cwd: APP_DIR, detached: true, stdio: 'ignore', env: process.env });
+  const started = await new Promise((resolve) => {
+    child.once('spawn', () => resolve(true));
+    child.once('error', () => resolve(false));
+  });
+  if (!started) {
+    rollback();
+    throw new Error('Den nye version kunne ikke starte - beholder den gamle');
+  }
+  child.unref();
   log('Opdateret - genstarter...');
   for (const client of sseClients) client.end();
-  await new Promise((resolve) => {
-    app.server.close(() => resolve());
-    app.server.closeAllConnections();
-    setTimeout(resolve, 1500);
-  });
-  spawn(exe, ['--updated'], { cwd: APP_DIR, detached: true, stdio: 'ignore', env: process.env }).unref();
+  app.server.close();
+  app.server.closeAllConnections();
   setTimeout(() => process.exit(0), 300);
 }
 
@@ -779,16 +845,53 @@ function remainingCost(id, ownedIds) {
 const IN_PROGRESS_GOLD = 700;
 
 function affordablePart(id, ownedIds, gold) {
-  const parts = new Set();
-  const walk = (x) => { for (const c of dd.items[x]?.from || []) { parts.add(c); walk(c); } };
+  const owned = [...ownedIds];
+  const parts = [];
+  // Som remainingCost: en del du ejer (inkl. dens under-dele) er allerede betalt og foreslås ikke.
+  const walk = (x) => {
+    for (const c of dd.items[x]?.from || []) {
+      const i = owned.indexOf(c);
+      if (i !== -1) { owned.splice(i, 1); continue; }
+      parts.push(c);
+      walk(c);
+    }
+  };
   walk(id);
-  return [...parts]
-    .filter((p) => !ownedIds.includes(p) && dd.items[p]?.gold <= gold)
+  return parts
+    .filter((p) => dd.items[p]?.gold <= gold)
     .sort((a, b) => dd.items[b].gold - dd.items[a].gold)[0] || null;
 }
 
 function threatOf(p) {
   return p.itemGold + p.kills * 300 + p.assists * 100 + p.level * 150 - p.deaths * 100;
+}
+
+// Næste evne efter buildets skill-rækkefølge: den første i rækkefølgen du ligger bagud på
+// (så den også giver mening, hvis du har afveget fra rækkefølgen tidligere).
+function nextSkill(order, levels) {
+  const target = { Q: 0, W: 0, E: 0, R: 0 };
+  for (const s of order) {
+    if (!(s in target)) continue;
+    target[s]++;
+    if (target[s] > levels[s]) return s;
+  }
+  return null;
+}
+
+function skillHint(activePlayer, build) {
+  const abilities = activePlayer?.abilities || {};
+  const levels = { Q: 0, W: 0, E: 0, R: 0 };
+  for (const k of Object.keys(levels)) levels[k] = abilities[k]?.abilityLevel || 0;
+  const spent = levels.Q + levels.W + levels.E + levels.R;
+  const unspent = Math.max(0, (activePlayer?.level || 0) - spent);
+  const order = build?.skills?.[0]?.order || [];
+  return {
+    levels,
+    unspent,
+    next: unspent > 0 ? nextSkill(order, levels) : null,
+    names: Object.fromEntries(Object.keys(levels).map((k) => [k, abilities[k]?.displayName || k])),
+    max: build?.skill_masteries?.[0]?.ids || [],
+  };
 }
 
 function analyzeLive(data, build) {
@@ -835,7 +938,8 @@ function analyzeLive(data, build) {
   const advice = liveAdvice(build, me, enemy, gold, data.gameData?.mapNumber || 11);
   const opponent = me.position ? enemies.find((p) => p.position === me.position) : null;
   const matchup = opponent && { player: opponent, stats: matchupStats(build, opponent.champ?.key) };
-  return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice, matchup };
+  const skill = skillHint(data.activePlayer, build);
+  return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice, matchup, skill };
 }
 
 // 2-3 forslag fra championens egen item-pulje, scoret efter popularitet + modstandernes faktiske builds.
@@ -948,20 +1052,32 @@ async function updateLive(data) {
 }
 
 async function liveLoop() {
+  let gone = 0; // antal tjek i træk hvor spillet ikke findes
   for (;;) {
     let wait = 2000;
+    let data = null;
     try {
-      const data = await liveGet('/liveclientdata/allgamedata');
-      if (data?.allPlayers?.length && data.activePlayer) await updateLive(data);
+      data = await liveGet('/liveclientdata/allgamedata');
+      gone = 0;
     } catch (e) {
-      if (app.live) {
-        app.live = null;
-        app.liveBuild = null;
-        log('Kampen er slut.');
-        finishGame();
-        broadcast();
+      // Kun "porten er lukket" eller 404 betyder at spillet er væk; en timeout er bare et hak.
+      if (e.code === 'ECONNREFUSED' || e.status === 404) gone++;
+      // Ingen kamp: tjek sjældnere, og endnu sjældnere når klienten slet ikke kører.
+      wait = app.client || process.env.LOL_HELPER_LIVE ? 3000 : 6000;
+    }
+    if (data?.allPlayers?.length && data.activePlayer) {
+      try {
+        await updateLive(data);
+      } catch (e) {
+        log(`Fejl i live-data: ${e.message}`); // fejl i vores egen behandling afslutter ikke kampen
       }
-      wait = 3000;
+    }
+    if (app.live && gone >= 2) {
+      app.live = null;
+      app.liveBuild = null;
+      log('Kampen er slut.');
+      finishGame();
+      broadcast();
     }
     await sleep(wait);
   }
@@ -1022,6 +1138,7 @@ function liveView() {
     gameTime: L.gameTime,
     gameMode: L.gameMode,
     gold: L.gold,
+    skill: L.skill,
     matchup: L.matchup && {
       name: L.matchup.player.champ?.name || L.matchup.player.name,
       icon: L.matchup.player.champ?.icon,
@@ -1077,12 +1194,12 @@ function historyView() {
     const p = per.get(g.champion) || { champion: g.champion, icon: dd.champions[g.championId]?.icon, games: 0, wins: 0, known: 0, k: 0, d: 0, a: 0, followed: [] };
     p.games++;
     if (g.result) { p.known++; if (g.result === 'Sejr') p.wins++; }
-    p.k += g.kills; p.d += g.deaths; p.a += g.assists;
+    p.k += g.kills || 0; p.d += g.deaths || 0; p.a += g.assists || 0;
     if (g.followed != null) p.followed.push(g.followed);
     per.set(g.champion, p);
   }
   return {
-    last: { ...games[0], icon: dd.champions[games[0].championId]?.icon, items: games[0].items.map(item), buys: games[0].buys.map((b) => ({ ...b, ...item(b.id) })) },
+    last: { ...games[0], icon: dd.champions[games[0].championId]?.icon, items: (games[0].items || []).map(item), buys: (games[0].buys || []).map((b) => ({ ...b, ...item(b.id) })) },
     recent: games.slice(0, 10).map((g) => ({
       date: g.date, champion: g.champion, icon: dd.champions[g.championId]?.icon, result: g.result,
       kda: `${g.kills}/${g.deaths}/${g.assists}`, csPerMin: g.csPerMin, followed: g.followed,
@@ -1211,7 +1328,14 @@ async function setAutostart(on) {
 const sseClients = new Set();
 function broadcast() {
   if (!sseClients.size) return;
-  const data = `data: ${JSON.stringify(viewModel())}\n\n`;
+  let data;
+  try {
+    data = `data: ${JSON.stringify(viewModel())}\n\n`;
+  } catch (e) {
+    // Ikke log() her - den kalder broadcast() igen.
+    console.error(`Fejl i vinduets data: ${e.message}`);
+    return;
+  }
   for (const res of sseClients) res.write(data);
 }
 
@@ -1257,92 +1381,122 @@ function remoteUrls(port) {
   return urls.sort((a, b) => (a.label === 'Tailscale' ? -1 : 1) - (b.label === 'Tailscale' ? -1 : 1));
 }
 
+// Tilladte Host-headers: beskytter mod DNS-rebinding (en fremmed side der "bliver" 127.0.0.1).
+const allowedHosts = new Set();
+function setAllowedHosts(port) {
+  allowedHosts.clear();
+  for (const h of ['127.0.0.1', 'localhost']) allowedHosts.add(`${h}:${port}`);
+  for (const u of app.remote.urls) allowedHosts.add(new URL(u.url).host);
+}
+
 function startWindowServer(port) {
   const html = readAsset('gui.html');
-  const server = http.createServer(async (req, res) => {
-    const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
-    if (!LOOPBACK.has(req.socket.remoteAddress)) {
-      const { token } = app.remote;
-      const query = new URL(req.url, 'http://x').searchParams.get('token');
-      if (token && query === token) {
-        res.writeHead(302, { 'Set-Cookie': `lrh=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`, Location: '/' });
-        return res.end();
-      }
-      if (!token || !(req.headers.cookie || '').split(/;\s*/).includes(`lrh=${token}`)) {
-        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-        return res.end('Mangler nøgle - scan QR-koden i vinduet på computeren.');
-      }
-    }
-    // POST kun som JSON: en fremmed hjemmeside kan ikke sende det uden CORS-forespørgsel, som vi ikke besvarer.
-    if (req.method === 'POST' && req.headers['content-type'] !== 'application/json') return json(415, { error: 'Kun JSON' });
-    if (req.method === 'GET' && req.url === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(html);
-    }
-    if (req.method === 'GET' && req.url === '/state') return json(200, viewModel());
-    if (req.method === 'GET' && req.url === '/events') {
-      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-      res.write(`data: ${JSON.stringify(viewModel())}\n\n`);
-      sseClients.add(res);
-      req.on('close', () => sseClients.delete(res));
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/api/rune') {
-      const { index } = await readBody(req);
-      if (!app.rec?.runeOptions[index] || !app.client) return json(400, { error: 'Ingen rune-side at vælge' });
-      try {
-        await serial(() => applyRuneChoice(index));
-        return json(200, { ok: true });
-      } catch (e) {
-        log(`Fejl: ${e.message}`);
-        return json(500, { error: e.message });
-      }
-    }
-    if (req.method === 'POST' && req.url === '/api/role') {
-      const { position } = await readBody(req);
-      if (position !== null && !POSITIONS.includes(position)) return json(400, { error: 'Ukendt rolle' });
-      app.roleOverride = position;
-      app.applied.pickKey = null; // løkken anvender igen med ny rolle
-      log(position ? `Rolle sat manuelt til ${position}.` : 'Rolle: automatisk.');
-      return json(200, { ok: true });
-    }
-    if (req.method === 'POST' && req.url === '/api/opponent') {
-      const { championId } = await readBody(req);
-      if (championId !== null && !app.pick?.enemyIds.includes(Number(championId))) return json(400, { error: 'Ikke på modstanderholdet' });
-      app.opponentOverride = championId === null ? null : Number(championId);
-      app.applied.itemKey = null; // løkken opdaterer med den nye modstander
-      return json(200, { ok: true });
-    }
-    if (req.method === 'POST' && req.url === '/api/update') {
-      if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
-      try {
-        json(200, { ok: true });
-        await applyUpdate();
-      } catch (e) {
-        log(`Fejl: opdatering mislykkedes: ${e.message}`);
-      }
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/api/autostart') {
-      if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
-      if (!autostartSupported()) return json(400, { error: 'Ikke understøttet her' });
-      const { enabled } = await readBody(req);
-      try {
-        await setAutostart(Boolean(enabled));
-        log(enabled ? 'Starter nu automatisk med computeren.' : 'Starter ikke længere automatisk.');
-        broadcast();
-        return json(200, { ok: true, enabled: autostartEnabled() });
-      } catch (e) {
-        log(`Fejl: kunne ikke ændre autostart: ${e.message}`);
-        return json(500, { error: e.message });
-      }
-    }
-    json(404, { error: 'Ikke fundet' });
-  });
+  // En fejl i en forespørgsel må aldrig vælte programmet - svar 500 og log den.
+  const server = http.createServer((req, res) => handleRequest(req, res, html).catch((e) => {
+    log(`Fejl i vinduet: ${e.message}`);
+    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end();
+  }));
+  return listenWithFallback(server, port);
+}
 
+async function handleRequest(req, res, html) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+  if (allowedHosts.size && !allowedHosts.has(req.headers.host)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('Ukendt adresse');
+  }
+  if (!LOOPBACK.has(req.socket.remoteAddress)) {
+    const { token } = app.remote;
+    let query = null;
+    try { query = new URL(req.url, 'http://x').searchParams.get('token'); } catch {}
+    if (token && query === token) {
+      res.writeHead(302, { 'Set-Cookie': `lrh=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`, Location: '/' });
+      return res.end();
+    }
+    if (!token || !(req.headers.cookie || '').split(/;\s*/).includes(`lrh=${token}`)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('Mangler nøgle - scan QR-koden i vinduet på computeren.');
+    }
+  }
+  // POST kun som JSON: en fremmed hjemmeside kan ikke sende det uden CORS-forespørgsel, som vi ikke besvarer.
+  if (req.method === 'POST' && req.headers['content-type'] !== 'application/json') return json(415, { error: 'Kun JSON' });
+  if (req.method === 'GET' && req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(html);
+  }
+  if (req.method === 'GET' && req.url === '/state') return json(200, viewModel());
+  if (req.method === 'GET' && req.url === '/events') {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.write(`data: ${JSON.stringify(viewModel())}\n\n`);
+    sseClients.add(res);
+    req.on('close', () => sseClients.delete(res));
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/api/rune') {
+    const { index } = await readBody(req);
+    try {
+      // Tjek inde i køen: en ny champion kan være låst, mens klikket ventede.
+      await serial(() => {
+        if (!app.rec?.runeOptions[index] || !app.client) throw Object.assign(new Error('Ingen rune-side at vælge'), { badRequest: true });
+        return applyRuneChoice(index);
+      });
+      return json(200, { ok: true });
+    } catch (e) {
+      if (e.badRequest) return json(400, { error: e.message });
+      log(`Fejl: ${e.message}`);
+      return json(500, { error: e.message });
+    }
+  }
+  if (req.method === 'POST' && req.url === '/api/role') {
+    const { position } = await readBody(req);
+    if (position !== null && !POSITIONS.includes(position)) return json(400, { error: 'Ukendt rolle' });
+    app.roleOverride = position;
+    app.applied.pickKey = null; // løkken anvender igen med ny rolle
+    log(position ? `Rolle sat manuelt til ${position}.` : 'Rolle: automatisk.');
+    return json(200, { ok: true });
+  }
+  if (req.method === 'POST' && req.url === '/api/opponent') {
+    const { championId } = await readBody(req);
+    if (championId !== null && !app.pick?.enemyIds.includes(Number(championId))) return json(400, { error: 'Ikke på modstanderholdet' });
+    app.opponentOverride = championId === null ? null : Number(championId);
+    app.applied.itemKey = null; // løkken opdaterer med den nye modstander
+    return json(200, { ok: true });
+  }
+  if (req.method === 'POST' && req.url === '/api/update') {
+    if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
+    try {
+      json(200, { ok: true });
+      await applyUpdate();
+    } catch (e) {
+      log(`Fejl: opdatering mislykkedes: ${e.message}`);
+    }
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/api/autostart') {
+    if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
+    if (!autostartSupported()) return json(400, { error: 'Ikke understøttet her' });
+    const { enabled } = await readBody(req);
+    try {
+      await setAutostart(Boolean(enabled));
+      log(enabled ? 'Starter nu automatisk med computeren.' : 'Starter ikke længere automatisk.');
+      broadcast();
+      return json(200, { ok: true, enabled: autostartEnabled() });
+    } catch (e) {
+      log(`Fejl: kunne ikke ændre autostart: ${e.message}`);
+      return json(500, { error: e.message });
+    }
+  }
+  json(404, { error: 'Ikke fundet' });
+}
+
+function listenWithFallback(server, port) {
+  // Efter en opdatering lukker den gamle version om lidt: vent på samme port i stedet for at tage en ny.
+  let waitForOld = process.argv.includes('--updated') ? 40 : 0;
   return new Promise((resolve, reject) => {
     const tryListen = (p, attempts) => {
       server.once('error', (e) => {
+        if (e.code === 'EADDRINUSE' && waitForOld-- > 0) return setTimeout(() => tryListen(p, attempts), 250);
         if (e.code === 'EADDRINUSE' && attempts > 0) return tryListen(p + 1, attempts - 1);
         reject(e);
       });
@@ -1555,8 +1709,11 @@ async function main() {
     app.remote.urls = remoteUrls(port);
     for (const u of app.remote.urls) log(`Telefon (${u.label}): ${u.url}`);
   }
+  setAllowedHosts(port);
   if (app.cfg.openWindow) openBrowser(url);
   if (app.cfg.liveAdvice) liveLoop();
+  pruneCache();
+  setInterval(pruneCache, 3600 * 1000);
   if (app.cfg.autoUpdate) {
     checkUpdate();
     setInterval(checkUpdate, 6 * 3600 * 1000);
@@ -1577,6 +1734,11 @@ async function main() {
     await sleep(wait);
   }
 }
+
+// Sikkerhedsnet: en overset fejl i en baggrundsopgave skal logges, ikke lukke programmet.
+process.on('unhandledRejection', (e) => {
+  try { log(`Fejl (uventet): ${e?.message || e}`); } catch {}
+});
 
 main().catch((e) => {
   console.error(e);

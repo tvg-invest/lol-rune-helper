@@ -158,6 +158,10 @@
   table.hist th { color: var(--muted); font-weight: 500; font-size: 12px; }
   table.hist img { width: 22px; height: 22px; border-radius: 4px; vertical-align: middle; margin-right: 6px; }
   .tablewrap { overflow-x: auto; }
+  .skillup { display: inline-flex; align-items: center; gap: 8px; margin-top: 6px; padding: 4px 10px 4px 8px; border-radius: 8px; background: rgba(10,200,185,.12); border: 1px solid var(--blue); font-size: 13px; font-weight: 600; }
+  .skillup .key { width: 26px; height: 26px; }
+  .skillup.compact { margin-top: 0; padding: 2px 6px; font-size: 12px; gap: 5px; }
+  .skillup.compact .key { width: 22px; height: 22px; font-size: 12px; }
   .version { color: var(--muted); font-size: 11px; text-align: right; margin-top: 6px; }
   .phone { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
   .phone .qr { background: #fff; padding: 8px; border-radius: 8px; }
@@ -382,6 +386,17 @@ function teamBlock(t, label, cls, diff) {
       el('div', { class: 'its' }, p.items.map((it) => img(it.icon, it.name))))));
 }
 
+// "Næste level: Q" når du har et ubrugt skill-point, ellers bare max-rækkefølgen.
+function skillLine(L, compact) {
+  const k = L.skill;
+  if (!k) return null;
+  if (k.next) {
+    return el('div', { class: 'skillup' + (compact ? ' compact' : '') }, 'Næste level:',
+      el('span', { class: 'key' + (k.next === 'R' ? ' r' : '') }, k.next), compact ? null : el('span', { class: 'muted' }, k.names[k.next]));
+  }
+  return compact || !k.max.length ? null : el('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, `Max ${k.max.join(' > ')}`);
+}
+
 function renderLive(s) {
   const L = s.live;
   const diff = L.allies.itemGold - L.enemies.itemGold;
@@ -389,7 +404,7 @@ function renderLive(s) {
     el('header', {},
       img(L.me.champion.icon, L.me.champion.name, 'champ'),
       el('div', {}, el('h1', {}, el('span', { class: 'live-badge' }, 'LIVE'), L.me.champion.name),
-        el('div', { class: 'meta' }, `${clock(L.gameTime)} · ${L.gameMode || ''} · ${L.me.kills}/${L.me.deaths}/${L.me.assists}`), statusLine(s), matchupLine(L.matchup)),
+        el('div', { class: 'meta' }, `${clock(L.gameTime)} · ${L.gameMode || ''} · ${L.me.kills}/${L.me.deaths}/${L.me.assists}`), statusLine(s), matchupLine(L.matchup), skillLine(L)),
       el('div', { class: 'right' }, el('div', { class: 'gold' }, gold(L.gold)), el('div', { class: 'meta' }, 'dit guld'))),
     adviceCard(L),
     el('div', { class: 'grid' },
@@ -515,7 +530,7 @@ function overlayContent(s) {
   const L = s && s.live;
   if (L) {
     return [
-      el('div', { class: 'ov-head' }, el('span', { class: 'gold' }, gold(L.gold)), el('span', { class: 'muted' }, clock(L.gameTime))),
+      el('div', { class: 'ov-head' }, el('span', { class: 'gold' }, gold(L.gold)), skillLine(L, true), el('span', { class: 'muted' }, clock(L.gameTime))),
       L.advice.map((a) => el('div', { class: 'ov-row' + (a.inProgress ? ' progress' : '') + (a.canAfford ? ' afford' : '') + (justAffordable.has(a.id) ? ' flash' : ''), 'data-id': a.id },
         img(a.icon, a.name),
         el('div', { class: 't' }, el('div', { class: 'n' }, a.name, a.inProgress ? el('span', { class: 'progtag' }, 'I GANG') : null),

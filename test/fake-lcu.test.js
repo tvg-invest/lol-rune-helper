@@ -61,6 +61,7 @@ const server = http.createServer((req, res) => {
       return send(204);
     }
     if (key === 'POST /lol-perks/v1/pages') {
+      if (state.failNextPost) { state.failNextPost = false; return send(400, { message: 'Invalid perks' }); }
       if (state.pages.filter((p) => p.isDeletable).length >= state.maxPages) return send(400, { message: 'Max pages reached' });
       const page = { ...JSON.parse(body), id: 100 + calls.length, isDeletable: true };
       state.pages.forEach((p) => (p.current = false));
@@ -76,7 +77,8 @@ const server = http.createServer((req, res) => {
 
 // Falsk Live Client Data API (spillets port 2999). Felter som i Riots dokumentation/eksempel.
 const live = { data: null };
-const liveServer = http.createServer((req, res) => {
+const liveServer = http.createServer(async (req, res) => {
+  if (live.stallMs) await new Promise((r) => setTimeout(r, live.stallMs)); // spillet hakker
   if (req.url === '/liveclientdata/allgamedata' && live.data) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(live.data));
@@ -92,7 +94,17 @@ const player = (name, raw, team, position, items, [kills, deaths, assists], leve
 });
 function liveGame(zhonyaPart) {
   return {
-    activePlayer: { riotId: 'Mig#EUW', riotIdGameName: 'Mig', summonerName: 'Mig#EUW', currentGold: 1400, level: 11 },
+    activePlayer: {
+      riotId: 'Mig#EUW', riotIdGameName: 'Mig', summonerName: 'Mig#EUW', currentGold: 1400, level: 11,
+      // 10 af 11 skill-points brugt -> ét ubrugt
+      abilities: {
+        Passive: { displayName: 'Essence Theft', id: 'AhriPassive' },
+        Q: { abilityLevel: 5, displayName: 'Orb of Deception', id: 'AhriQ' },
+        W: { abilityLevel: 2, displayName: 'Fox-Fire', id: 'AhriW' },
+        E: { abilityLevel: 1, displayName: 'Charm', id: 'AhriE' },
+        R: { abilityLevel: 2, displayName: 'Spirit Rush', id: 'AhriR' },
+      },
+    },
     allPlayers: [
       player('Mig', 'Ahri', 'ORDER', 'MIDDLE', [1056, 3020, zhonyaPart], [3, 2, 4], 11),
       player('Topper', 'Garen', 'ORDER', 'TOP', [3047], [1, 3, 2], 10),
@@ -249,6 +261,16 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(autoPage().selectedPerkIds[0], calls.filter((c) => c.method === 'POST').pop().body.selectedPerkIds[0]);
     assert.strictEqual(state.pages.filter((p) => p.name.startsWith('Auto: ')).length, 1, 'stadig kun én auto-side');
 
+    // 4a) En rune-side du selv har lavet slettes ikke, hvis klienten afviser auto-siden af en anden grund
+    state.maxPages = 5;
+    state.pages.push({ id: 50, name: 'Min nye side', isDeletable: true, current: false });
+    state.failNextPost = true;
+    assert.strictEqual((await gui('POST', '/api/rune', { index: 0 })).status, 500, 'fejl meldes');
+    assert(state.pages.some((p) => p.name === 'Min nye side'), 'din egen side er urørt');
+    assert.strictEqual((await gui('POST', '/api/rune', { index: 1 })).status, 200, 'virker igen bagefter');
+    state.pages = state.pages.filter((p) => p.id !== 50);
+    state.maxPages = 1;
+
     // 4b) Du ændrer selv rune-siden, og vælger så Zed som modstander manuelt -> din side røres ikke
     autoPage().selectedPerkIds = [...autoPage().selectedPerkIds].reverse();
     const postsBeforeManual = runePosts();
@@ -330,6 +352,16 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(L.allies.dragons, 1, 'drage til mit hold');
     assert.strictEqual(L.allies.turrets, 1, 'tårn (T2) til mit hold');
     assert.deepStrictEqual(L.enemy.fed, ['Zed'], 'Zed er fed');
+    assert.strictEqual(L.skill.unspent, 1, 'ét ubrugt skill-point');
+    assert(['Q', 'W', 'E', 'R'].includes(L.skill.next), `næste skill: ${L.skill.next}`);
+    console.log('Næste skill ved Q5/W2/E1/R2 (level 11):', L.skill.next, L.skill.names[L.skill.next]);
+    live.data.activePlayer.abilities.W.abilityLevel = 3; // pointet brugt
+    await wait(2500);
+    const Lspent = (await gui('GET', '/state')).body.live;
+    assert.strictEqual(Lspent.skill.unspent, 0);
+    assert.strictEqual(Lspent.skill.next, null, 'intet forslag uden ubrugte points');
+    live.data.activePlayer.abilities.W.abilityLevel = 2;
+    await wait(2500);
     assert.strictEqual(L.matchup?.name, 'Zed', 'live lane-modstander ud fra position');
     assert(L.matchup.winRate > 0.3, 'live matchup win rate');
     assert(L.enemy.healers.includes('Soraka') && L.enemy.healers.includes('Darius'), 'healere');
@@ -360,6 +392,10 @@ server.listen(0, '127.0.0.1', async () => {
     assert(first.reasons[0].startsWith('Du er i gang') && first.reasons[0].includes('Lost Chapter'), first.reasons[0]);
     assert(items[first.id].from.includes(String(lostChapter)) || JSON.stringify(items[first.id].from).includes(String(lostChapter)), 'bruger Lost Chapter');
     assert.strictEqual(L2.advice.filter((a) => a.inProgress).length, 1, 'kun ét forslag gør krav på Lost Chapter');
+    if (first.part) {
+      assert(first.part.id !== String(lostChapter) && !items[String(lostChapter)].from.includes(first.part.id),
+        `foreslår ikke en del du ejer (eller dens under-dele): ${first.part.name}`);
+    }
     assert(L2.advice.some((a) => a.adapted && !a.inProgress), 'tilpassede forslag vises stadig');
     console.log('Med Lost Chapter:', JSON.stringify(L2.advice.map((a) => ({ item: a.name, cost: a.cost, hvorfor: a.reasons }))));
 
@@ -370,6 +406,14 @@ server.listen(0, '127.0.0.1', async () => {
     assert(!L2.advice.some((a) => a.inProgress), 'en billig del gør ikke et item "i gang"');
     live.data = liveGame(zhonyaPart);
     await wait(2500);
+
+    // 7c2) Spillet hakker i 4 sek. (længere end timeout) -> kampen må ikke regnes som slut
+    live.stallMs = 4000;
+    await wait(9000);
+    live.stallMs = 0;
+    await wait(2500);
+    assert(!out.includes('Kampen er slut.'), 'et hak afslutter ikke kampen');
+    assert((await gui('GET', '/state')).body.live, 'stadig live efter hak');
 
     // 7d) Du køber Zhonya's (var foreslået + tilpasset mod Zed), og kampen vindes
     setMyItems([1056, 3020, 3157]);
@@ -435,6 +479,12 @@ server.listen(0, '127.0.0.1', async () => {
     const lan = Object.values(os.networkInterfaces()).flat().find((a) => a.family === 'IPv4' && !a.internal);
     assert(/Telefon \(/.test(out), 'telefon-links i loggen');
     const token = fs.readFileSync(tokenFile, 'utf8').trim();
+    const rawGet = (host, p, headers) => new Promise((resolve) => {
+      const r = http.request({ host, port: Number(base), path: p, headers }, (res) => { res.resume(); resolve(res.statusCode); });
+      r.on('error', (e) => resolve(e.code));
+      r.end();
+    });
+    assert.strictEqual(await rawGet('127.0.0.1', '/state', { Host: 'ondsindet.example:80' }), 403, 'fremmed Host-header afvises (DNS-rebinding)');
     const noJson = await fetch(`http://127.0.0.1:${base}/api/role`, { method: 'POST', body: 'position=TOP', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
     assert.strictEqual(noJson.status, 415, 'POST uden JSON afvises');
     if (lan) {
@@ -445,11 +495,16 @@ server.listen(0, '127.0.0.1', async () => {
       assert.strictEqual(login.status, 302, 'rigtig nøgle -> redirect');
       const cookie = login.headers.get('set-cookie').split(';')[0];
       assert.strictEqual((await fetch(remote + '/state', { headers: { cookie } })).status, 200, 'cookie giver adgang');
+      // Mærkelig sti udefra (gav "Invalid URL" og crash før) -> afvises, programmet lever videre
+      const weird = await rawGet(lan.address, '//', {});
+      assert.strictEqual(weird, 403, `mærkelig sti: ${weird}`);
+      assert.strictEqual((await gui('GET', '/state')).status, 200, 'programmet kører stadig');
     } else {
       console.log('(Intet netværksinterface - springer test af fjernadgang over)');
     }
 
-    assert(!/Fejl:/.test(out), 'ingen fejl i loggen');
+    const errors = out.split('\n').filter((l) => /Fejl/.test(l) && !l.includes('Invalid perks')); // den ene er fremprovokeret i 4a
+    assert(!errors.length, `ingen fejl i loggen: ${errors.join(' | ')}`);
 
     console.log(out);
     console.log('ALLE TESTS BESTÅET');
