@@ -5,6 +5,20 @@ FØR KAMPEN (champion select)
 Når du låser en champion, sætter programmet automatisk runer, summoner spells og
 et item set i butikken. Items tilpasses modstanderholdet.
 
+BAN OG COUNTERPICK
+Før du låser, viser vinduet ban-forslag (de champions dine champions til rollen klarer
+sig dårligst imod) og - når din lane-modstander har valgt - hvem i din pulje der vinder
+mest mod dem, plus de stærkeste counters. "DIN TUR TIL AT BANNE" vises når det er dig.
+Din pulje kommer fra din mastery og dine kampe med programmet.
+
+EFTER KAMPEN
+Vinduet viser en kampoversigt: resultat, KDA, CS/min, dine køb (og om de var blandt
+forslagene) + en tabel over dine champions. Gemmes i history.json ved siden af programmet.
+
+OPDATERINGER
+Når en ny version er udgivet, viser vinduet "Ny version ... - Opdater nu". Et klik henter
+den, udskifter programmet og genstarter. Slå tjekket fra med "autoUpdate": false.
+
 MATCHUP
 Programmet gætter din lane-modstander (eller klik på dem i vinduet) og viser din
 win rate mod dem. Er der nok kampe, kommer en "Mod <champion>"-rune-side først og

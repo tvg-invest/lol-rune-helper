@@ -21,6 +21,13 @@ Når du har **låst** en champion:
 
 Rolle: tildelt rolle i draft/ranked, ellers championens hovedrolle. ARAM har egne data. Arena springes over.
 
+## Draft, kampoversigt og opdateringer
+
+- **Draft (før du låser):** din pulje = top-15 mastery (`/lol-champion-mastery/v1/local-player/champion-mastery`) + champions fra `history.json`, filtreret på rollen (OP.GG role_rate >= 20%). Ban-forslag = champions som puljen i snit taber til (OP.GG `counters`, min. 200 kampe). Når lane-modstanderen er valgt: puljen sorteret efter win rate mod den + de 3 stærkeste counters (min. 500 kampe). Valgte/bannede champions foreslås ikke.
+- **Kampoversigt:** færdige items du køber registreres med tid og om de var blandt forslagene (og tilpassede). Resultat fra live-API'ens `GameEnd`-event (`Result`), ellers ukendt. Gemmes i `history.json` (max 100); kampe under 5 min tæller ikke.
+- **Opdateringer:** tjekker `https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest` ved start og hver 6. time. Asset `LoL-Rune-Helper.exe` / `LoL-Rune-Helper-mac`. "Opdater nu" henter filen, erstatter programmet (Windows: den kørende .exe omdøbes til .old) og genstarter med `--updated`. Udgiv med `bash scripts/build.sh && bash scripts/release.sh "noter"` efter at have hævet `VERSION`.
+- Tests: `node test/fake-lcu.test.js` (alt) og `HELPER_BIN=... node test/update.test.js` (selv-opdatering mod falsk udgivelse).
+
 ## Matchup, hastighed og autostart
 
 - **Lane-modstander:** den modstander hvis OP.GG-rollefordeling passer bedst til din rolle (min. 25%), eller den du klikker på i vinduet. Under kampen: samme `position` i live-API'en.

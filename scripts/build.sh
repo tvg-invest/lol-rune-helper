@@ -58,4 +58,9 @@ for dir in "$WIN" "$MAC"; do
   cp LAES-MIG.txt "$dir/LÆS MIG.txt"
 done
 (cd "$DIST" && zip -qry LoL-Rune-Helper-Windows.zip LoL-Rune-Helper-Windows && zip -qry LoL-Rune-Helper-Mac.zip LoL-Rune-Helper-Mac)
+
+# 6) Rå programfiler til automatiske opdateringer (navne som programmet leder efter i udgivelsen)
+mkdir -p "$DIST/release"
+cp "$WIN/LoL Rune Helper.exe" "$DIST/release/LoL-Rune-Helper.exe"
+cp "$MAC/LoL Rune Helper" "$DIST/release/LoL-Rune-Helper-mac"
 ls -lh "$DIST"/*.zip

@@ -13,6 +13,7 @@ const calls = [];
 const state = {
   phase: 'Lobby',
   pickCompleted: false,
+  banDone: true,
   championId: 0,
   enemies: [],
   pages: [
@@ -27,8 +28,16 @@ const session = () => ({
   localPlayerCellId: 2,
   myTeam: [{ cellId: 2, championId: state.championId, assignedPosition: 'middle', spell1Id: 14, spell2Id: 4 }],
   theirTeam: state.enemies.map((championId, i) => ({ cellId: 5 + i, championId })),
-  actions: [[{ actorCellId: 2, type: 'pick', completed: state.pickCompleted, championId: state.championId }]],
+  actions: [
+    [{ actorCellId: 2, type: 'ban', completed: state.banDone, isInProgress: !state.banDone, championId: state.banDone ? 157 : 0 }],
+    [{ actorCellId: 2, type: 'pick', completed: state.pickCompleted, championId: state.championId }],
+  ],
 });
+// Mastery: Ahri, LeBlanc, Syndra (mid) + Lee Sin (jungle, skal filtreres fra til MID)
+const MASTERY = [
+  { championId: 103, championPoints: 500000 }, { championId: 7, championPoints: 300000 },
+  { championId: 134, championPoints: 200000 }, { championId: 64, championPoints: 150000 },
+];
 
 const server = http.createServer((req, res) => {
   let body = '';
@@ -44,6 +53,7 @@ const server = http.createServer((req, res) => {
     if (key === 'GET /lol-champ-select/v1/session') return send(200, session());
     if (key === 'PATCH /lol-champ-select/v1/session/my-selection') return send(204);
     if (key === 'GET /lol-perks/v1/pages') return send(200, state.pages);
+    if (key === 'GET /lol-champion-mastery/v1/local-player/champion-mastery') return send(200, MASTERY);
     if (key === 'GET /lol-perks/v1/currentpage') return send(200, state.pages.find((p) => p.current) || null);
     if (req.method === 'DELETE' && req.url.startsWith('/lol-perks/v1/pages/')) {
       const id = Number(req.url.split('/').pop());
@@ -129,6 +139,8 @@ server.listen(0, '127.0.0.1', async () => {
     ...process.env,
     HOME: tmp,
     LOL_HELPER_CACHE: path.join(tmp, 'cache'),
+    LOL_HELPER_HISTORY: path.join(tmp, 'history.json'),
+    LOL_HELPER_UPDATE_URL: 'http://127.0.0.1:9/ingen-opdatering',
     LOL_HELPER_LCU: `http:${port}:${PASSWORD}`,
     LOL_HELPER_LIVE: `http:${livePort}`,
     LOL_HELPER_PORT: '0',
@@ -150,6 +162,33 @@ server.listen(0, '127.0.0.1', async () => {
     await waitFor(() => out.includes('venter på champion select'), 20000, 'forbindelse');
     const page = await gui('GET', '/');
     assert(page.body.includes('LoL Rune Helper'), 'vinduet serveres');
+
+    // 0) Draft: din tur til at banne -> ban-forslag ud fra din pulje; Zed vælges -> counterpicks
+    state.phase = 'ChampSelect';
+    state.banDone = false;
+    let d;
+    for (let i = 0; i < 60 && !(d = (await gui('GET', '/state')).body.draft)?.bans; i++) await wait(500);
+    assert(d, 'draft-visning');
+    assert.strictEqual(d.position, 'MID');
+    assert.strictEqual(d.myBanTurn, true, 'din tur til at banne');
+    const poolNames = d.pool.map((c) => c.name);
+    assert(poolNames.includes('Ahri') && poolNames.includes('Syndra'), `pulje: ${poolNames}`);
+    assert(!poolNames.includes('Lee Sin'), 'jungle-champion filtreret fra til MID');
+    assert(d.bans.length >= 1 && d.bans.every((b) => b.reason.includes(' vinder ')), `ban-forslag: ${JSON.stringify(d.bans)}`);
+    console.log('Ban-forslag:', d.bans.map((b) => `${b.name}: ${b.reason}`).join(' | '));
+    state.banDone = true;
+    state.enemies = [238]; // Zed låst før dig
+    for (let i = 0; i < 60 && !(d = (await gui('GET', '/state')).body.draft)?.opponent; i++) await wait(500);
+    assert.strictEqual(d.opponent?.name, 'Zed', 'lane-modstander i draft');
+    assert.strictEqual(d.myBanTurn, false);
+    assert(d.poolVs.length >= 1 && d.counters.length >= 1, `counterpicks: ${JSON.stringify({ poolVs: d.poolVs.length, counters: d.counters.length })}`);
+    assert(!d.bans.some((b) => b.name === 'Zed'), 'valgte champions foreslås ikke som ban');
+    console.log('Mod Zed:', d.poolVs.map((x) => `${x.name} ${(x.winRate * 100).toFixed(1)}%`).join(', '), '| counters:', d.counters.map((x) => `${x.name} ${(x.winRate * 100).toFixed(1)}%`).join(', '));
+    if (process.env.HOLD_DRAFT) {
+      console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
+      await wait(Number(process.env.HOLD_DRAFT));
+    }
+    state.enemies = [];
 
     // 1) Hover Ahri uden at låse -> intet sættes, men buildet hentes allerede (disk-cache)
     state.phase = 'ChampSelect';
@@ -332,6 +371,15 @@ server.listen(0, '127.0.0.1', async () => {
     live.data = liveGame(zhonyaPart);
     await wait(2500);
 
+    // 7d) Du køber Zhonya's (var foreslået + tilpasset mod Zed), og kampen vindes
+    setMyItems([1056, 3020, 3157]);
+    await wait(2500);
+    live.data.events.Events.push({ EventID: 9, EventName: 'GameEnd', EventTime: 1800, Result: 'Win' });
+    await wait(2500);
+    setMyItems([1056, 3020, zhonyaPart]); // tilbage til udgangspunktet for resten af testen
+    live.data.events.Events.pop();
+    await wait(2500);
+
     // Valgfrit: HOLD_LIVE=ms holder kampen åben, fx til node test/screenshot.js <url>.
     if (process.env.HOLD_LIVE) {
       console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
@@ -361,7 +409,25 @@ server.listen(0, '127.0.0.1', async () => {
     // 8) Kampen slutter
     live.data = null;
     await waitFor(() => out.includes('Kampen er slut.'), 15000, 'kamp slut');
-    assert.strictEqual((await gui('GET', '/state')).body.live, null);
+    const after = (await gui('GET', '/state')).body;
+    assert.strictEqual(after.live, null);
+    // Kampoversigt gemt i historikken
+    const g = after.history?.last;
+    assert(g, 'kampoversigt');
+    assert.strictEqual(g.champion, 'Ahri');
+    assert.strictEqual(g.result, 'Sejr', 'resultat fra GameEnd');
+    const zBuy = g.buys.find((b) => b.id === '3157');
+    assert(zBuy && zBuy.suggested && zBuy.adapted, `Zhonya-køb markeret som foreslået/tilpasset: ${JSON.stringify(g.buys)}`);
+    assert.strictEqual(g.buys.length, 1, 'kun færdige items tæller som køb');
+    assert.strictEqual(g.followed, 1);
+    assert.strictEqual(after.history.champions[0].champion, 'Ahri');
+    assert(fs.existsSync(env.LOL_HELPER_HISTORY), 'historik gemt på disk');
+    assert(out.includes('Kampoversigt: Ahri'), 'log med kampoversigt');
+    if (process.env.HOLD_END) {
+      state.phase = 'EndOfGame';
+      console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
+      await wait(Number(process.env.HOLD_END));
+    }
 
     // 9) Telefon-adgang: kræver nøgle udefra, POST kun som JSON
     if (process.env.NO_REMOTE) throw new Error('SKIP_REMOTE');

@@ -12,7 +12,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const { randomUUID, randomBytes } = require('crypto');
 
 let sea = null;
@@ -34,6 +34,7 @@ const DEFAULT_CONFIG = {
   liveAdvice: true,       // købsforslag + scoreboard under kampen
   openWindow: true,       // åbn vinduet i browseren ved start
   remoteAccess: false,    // true = vinduet kan åbnes fra telefonen (Tailscale/wifi) med en hemmelig nøgle
+  autoUpdate: true,       // tjek for nye versioner (opdatering sker først når du klikker)
   port: 3399,
   pollMs: 1500,
 };
@@ -479,6 +480,221 @@ async function applyItemSet(client, championId, title, blocks) {
   await lcu(client, 'PUT', url, { accountId: current.accountId ?? summoner.accountId, itemSets, timestamp: Date.now() });
 }
 
+// ---------- Draft: bans og counterpicks (før du låser) ----------
+// Kun aggregerede OP.GG-tal + din egen champion-pulje - data fra før kampen, som Riot tillader.
+
+const DRAFT_MIN_GAMES = 200;
+
+// Dine champions til rollen: højeste mastery + champions fra din historik, filtreret på rollen.
+async function myChampionPool(cfg, position) {
+  const ids = [];
+  try {
+    const mastery = await lcu(app.client, 'GET', '/lol-champion-mastery/v1/local-player/champion-mastery');
+    for (const m of (Array.isArray(mastery) ? mastery : []).sort((a, b) => b.championPoints - a.championPoints).slice(0, 15)) ids.push(m.championId);
+  } catch {}
+  for (const g of history.games) if (g.championId && !ids.includes(g.championId)) ids.push(g.championId);
+  const withRole = await Promise.all(ids.map(async (id) => {
+    try {
+      const probe = await fetchBuild(cfg.region, 'ranked', id, 'MID');
+      return { id, rate: probe.summary?.positions?.find((p) => p.name === position)?.stats?.role_rate || 0 };
+    } catch {
+      return { id, rate: 0 };
+    }
+  }));
+  return withRole.filter((x) => x.rate >= 0.2).map((x) => x.id).slice(0, 6);
+}
+
+async function analyzeDraft(cfg, position, enemyIds, unavailable) {
+  const pool = await myChampionPool(cfg, position);
+  const builds = (await Promise.all(pool.map((id) => fetchBuild(cfg.region, 'ranked', id, position).then((b) => ({ id, b }), () => null)))).filter(Boolean);
+  const name = (id) => dd.champions[id]?.name || String(id);
+
+  // Bans: de champions dine champions klarer sig dårligst imod (vægtet efter hvor mange af dem de rammer).
+  const threat = new Map();
+  for (const { id, b } of builds) {
+    for (const c of b.counters || []) {
+      if (c.play < DRAFT_MIN_GAMES || unavailable.includes(c.champion_id)) continue;
+      const t = threat.get(c.champion_id) || { loss: 0, hits: [] };
+      t.loss += 0.5 - c.win / c.play;
+      t.hits.push({ id, wr: c.win / c.play });
+      threat.set(c.champion_id, t);
+    }
+  }
+  const bans = [...threat]
+    .map(([id, t]) => ({ id, score: t.loss / Math.max(builds.length, 1), wr: t.hits.reduce((s, h) => s + h.wr, 0) / t.hits.length, hits: t.hits }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+    .map((x) => ({ id: x.id, reason: `Dine ${x.hits.length > 1 ? `${x.hits.length} champions` : name(x.hits[0].id)} vinder ${pct(x.wr)} mod ${name(x.id)}` }));
+
+  // Counterpicks når lane-modstanderen er kendt: din pulje sorteret efter win rate mod den + generelle counters.
+  const opponent = await laneOpponent(cfg, position, enemyIds);
+  let poolVs = [];
+  let counters = [];
+  if (opponent) {
+    poolVs = builds.map(({ id, b }) => ({ id, stats: matchupStats(b, opponent) }))
+      .filter((x) => x.stats && x.stats.games >= 100)
+      .sort((a, b) => b.stats.winRate - a.stats.winRate)
+      .map((x) => ({ id: x.id, winRate: x.stats.winRate, games: x.stats.games }));
+    try {
+      const opp = await fetchBuild(cfg.region, 'ranked', opponent, position);
+      counters = (opp.counters || [])
+        // Højere krav end for din pulje: ellers dukker sjældne off-role picks op på få kampe.
+        .filter((c) => c.play >= 500 && !unavailable.includes(c.champion_id))
+        .map((c) => ({ id: c.champion_id, winRate: 1 - c.win / c.play, games: c.play }))
+        .sort((a, b) => b.winRate - a.winRate)
+        .slice(0, 3);
+    } catch {}
+  }
+  return { position, pool, bans, opponent, poolVs, counters };
+}
+
+// Kører i baggrunden, så champion select-løkken ikke venter på OP.GG.
+function updateDraft(session, me) {
+  const position = app.roleOverride || POSITION_MAP[me.assignedPosition];
+  if (!POSITIONS.includes(position)) { app.draft = null; return; }
+  const actions = (session.actions || []).flat();
+  const unavailable = [
+    ...actions.filter((a) => a.type === 'ban' && a.completed && a.championId).map((a) => a.championId),
+    ...[...(session.myTeam || []), ...(session.theirTeam || [])].map((m) => m.championId).filter((id) => id > 0),
+  ];
+  const enemyIds = (session.theirTeam || []).map((m) => m.championId).filter((id) => id > 0);
+  const myBanTurn = actions.some((a) => a.actorCellId === session.localPlayerCellId && a.type === 'ban' && a.isInProgress);
+  const key = `${position}|${enemyIds.sort().join(',')}|${unavailable.sort().join(',')}`;
+  if (app.draft) app.draft.myBanTurn = myBanTurn;
+  if (key === app.draftKey) return;
+  app.draftKey = key;
+  analyzeDraft(app.cfg, position, enemyIds, unavailable)
+    .then((d) => {
+      if (app.draftKey !== key) return;
+      app.draft = { ...d, myBanTurn };
+      broadcast();
+    })
+    .catch((e) => log(`Draft-hjælp fejlede: ${e.message}`));
+}
+
+// ---------- Kampoversigt og historik ----------
+
+const HISTORY_FILE = process.env.LOL_HELPER_HISTORY || path.join(APP_DIR, 'history.json');
+const history = (() => {
+  try { return { games: JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')).games || [] }; } catch { return { games: [] }; }
+})();
+
+// Følger dine køb under kampen: hvilke færdige items, hvornår, og om de var blandt forslagene.
+function trackGame(data, L) {
+  const t = L.gameTime;
+  if (!app.game || app.game.championKey !== L.me.champ?.key) {
+    app.game = { championKey: L.me.champ?.key, seen: new Map(), adapted: new Set(), buys: [], lastItems: [...L.me.itemIds], result: null };
+  }
+  const g = app.game;
+  for (const a of L.advice) {
+    if (!g.seen.has(a.id)) g.seen.set(a.id, t);
+    if (a.adapted) g.adapted.add(a.id);
+  }
+  const before = [...g.lastItems];
+  for (const id of L.me.itemIds) {
+    const i = before.indexOf(id);
+    if (i !== -1) { before.splice(i, 1); continue; }
+    if (isCompleted(dd.items[id])) g.buys.push({ id, t, suggested: g.seen.has(id), adapted: g.adapted.has(id) });
+  }
+  g.lastItems = [...L.me.itemIds];
+  // GameEnd-eventet har (efter Riots eksempler) et Result-felt; findes det ikke, er resultatet ukendt.
+  const end = (data.events?.Events || []).find((e) => e.EventName === 'GameEnd');
+  if (end?.Result) g.result = /win/i.test(end.Result) ? 'Sejr' : 'Nederlag';
+  g.last = L;
+}
+
+// Glem sidste champion select, så vinduet viser oversigten/historikken.
+function clearPick() {
+  app.pick = null;
+  app.build = null;
+  app.rec = null;
+}
+
+function finishGame() {
+  const g = app.game;
+  app.game = null;
+  clearPick();
+  if (!g?.last || g.last.gameTime < 300) return; // remakes og afbrudte kampe tæller ikke
+  const L = g.last;
+  const minutes = L.gameTime / 60;
+  const summary = {
+    date: new Date().toISOString(),
+    championId: Number(L.me.champ?.key) || null,
+    champion: L.me.champ?.name || '?',
+    position: LIVE_POSITION[L.me.position] || L.me.position || '',
+    result: g.result,
+    duration: Math.round(L.gameTime),
+    kills: L.me.kills, deaths: L.me.deaths, assists: L.me.assists,
+    cs: L.me.cs,
+    csPerMin: Math.round((L.me.cs / minutes) * 10) / 10,
+    items: L.me.itemIds.filter((id) => isCompleted(dd.items[id])),
+    buys: g.buys,
+    followed: g.buys.length ? g.buys.filter((b) => b.suggested).length / g.buys.length : null,
+    adaptedBought: g.buys.filter((b) => b.adapted).map((b) => itemName(b.id)),
+    goldDiff: L.allies.reduce((s, p) => s + p.itemGold, 0) - L.enemies.reduce((s, p) => s + p.itemGold, 0),
+    matchup: L.matchup ? { champion: L.matchup.player.champ?.name, winRate: L.matchup.stats?.winRate ?? null } : null,
+  };
+  history.games.unshift(summary);
+  history.games.length = Math.min(history.games.length, 100);
+  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 1)); } catch (e) { log(`Kunne ikke gemme historik: ${e.message}`); }
+  log(`Kampoversigt: ${summary.champion} ${summary.kills}/${summary.deaths}/${summary.assists}, ${String(summary.csPerMin).replace('.', ',')} CS/min` +
+    (summary.followed != null ? `, ${pct(summary.followed)} af dine køb var blandt forslagene` : ''));
+}
+
+// ---------- Opdateringer ----------
+
+const VERSION = '1.5.0';
+const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
+const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
+
+const newer = (a, b) => {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+  return false;
+};
+
+async function checkUpdate() {
+  try {
+    const rel = await getJson(UPDATE_URL);
+    const latest = String(rel.tag_name || '').replace(/^v/, '');
+    const asset = (rel.assets || []).find((a) => a.name === UPDATE_ASSET);
+    if (latest && newer(latest, VERSION) && asset) {
+      if (app.update?.version !== latest) log(`Ny version ${latest} er klar - klik "Opdater" i vinduet.`);
+      app.update = { version: latest, url: asset.browser_download_url, notes: String(rel.body || '').slice(0, 600) };
+      broadcast();
+    }
+  } catch {} // ingen udgivelse eller intet net: prøv igen senere
+}
+
+async function applyUpdate() {
+  if (!IS_SEA) throw new Error('Kører fra kildekode - hent ny kode i stedet');
+  if (!app.update?.url) throw new Error('Ingen opdatering');
+  log(`Henter version ${app.update.version}...`);
+  const res = await fetch(app.update.url, { headers: { 'User-Agent': 'lol-rune-helper' }, signal: AbortSignal.timeout(300000) });
+  if (!res.ok) throw new Error(`Download fejlede: ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length < 10 * 1024 * 1024) throw new Error('Filen er for lille - afbryder');
+  const exe = process.execPath;
+  fs.writeFileSync(`${exe}.new`, buf, { mode: 0o755 });
+  // Windows kan omdøbe men ikke overskrive en kørende .exe; macOS kan erstatte filen direkte.
+  if (process.platform === 'win32') {
+    fs.rmSync(`${exe}.old`, { force: true });
+    fs.renameSync(exe, `${exe}.old`);
+  }
+  fs.renameSync(`${exe}.new`, exe);
+  log('Opdateret - genstarter...');
+  for (const client of sseClients) client.end();
+  await new Promise((resolve) => {
+    app.server.close(() => resolve());
+    app.server.closeAllConnections();
+    setTimeout(resolve, 1500);
+  });
+  spawn(exe, ['--updated'], { cwd: APP_DIR, detached: true, stdio: 'ignore', env: process.env }).unref();
+  setTimeout(() => process.exit(0), 300);
+}
+
 // ---------- Live i kampen ----------
 // Bruger kun det spilleren selv kan se (TAB-scoreboard, kill-feed, eget guld) - jf. Riots regler
 // giver vi 2-3 begrundede forslag i stedet for at bestemme for spilleren.
@@ -726,6 +942,7 @@ async function updateLive(data) {
   }
   const first = !app.live;
   app.live = analyzeLive(data, app.liveBuild.build);
+  if (app.live) trackGame(data, app.live);
   if (first && app.live) log(`Live: ${champ.name} - forslag og scoreboard vises i vinduet.`);
   broadcast();
 }
@@ -741,6 +958,8 @@ async function liveLoop() {
         app.live = null;
         app.liveBuild = null;
         log('Kampen er slut.');
+        finishGame();
+        broadcast();
       }
       wait = 3000;
     }
@@ -763,6 +982,11 @@ const app = {
   build: null,         // { build, position }
   rec: null,
   applied: { pickKey: null, itemKey: null },
+  draft: null,         // ban/counterpick-forslag før du låser
+  draftKey: null,
+  game: null,          // køb og forslag i den igangværende kamp (til kampoversigten)
+  update: null,        // { version, url, notes } hvis en nyere version findes
+  server: null,
   live: null,          // analyse af den igangværende kamp
   liveBuild: null,     // { championKey, build }
   remote: { enabled: false, token: null, urls: [] },
@@ -827,6 +1051,51 @@ function liveView() {
   };
 }
 
+const champView = (id) => ({ id, name: dd.champions[id]?.name || String(id), icon: dd.champions[id]?.icon });
+
+function draftView() {
+  const d = app.draft;
+  if (!d) return null;
+  return {
+    position: d.position,
+    myBanTurn: Boolean(d.myBanTurn),
+    pool: d.pool.map(champView),
+    bans: d.bans.map((b) => ({ ...champView(b.id), reason: b.reason })),
+    opponent: d.opponent ? champView(d.opponent) : null,
+    poolVs: d.poolVs.map((x) => ({ ...champView(x.id), winRate: x.winRate, games: x.games })),
+    counters: d.counters.map((x) => ({ ...champView(x.id), winRate: x.winRate, games: x.games })),
+  };
+}
+
+function historyView() {
+  const games = history.games;
+  if (!games.length) return null;
+  const item = (id) => ({ id, name: itemName(id), icon: dd.items[id]?.icon });
+  // Pr. champion: kampe, sejre (hvor kendt), gennemsnitlig KDA og hvor ofte du fulgte forslagene.
+  const per = new Map();
+  for (const g of games) {
+    const p = per.get(g.champion) || { champion: g.champion, icon: dd.champions[g.championId]?.icon, games: 0, wins: 0, known: 0, k: 0, d: 0, a: 0, followed: [] };
+    p.games++;
+    if (g.result) { p.known++; if (g.result === 'Sejr') p.wins++; }
+    p.k += g.kills; p.d += g.deaths; p.a += g.assists;
+    if (g.followed != null) p.followed.push(g.followed);
+    per.set(g.champion, p);
+  }
+  return {
+    last: { ...games[0], icon: dd.champions[games[0].championId]?.icon, items: games[0].items.map(item), buys: games[0].buys.map((b) => ({ ...b, ...item(b.id) })) },
+    recent: games.slice(0, 10).map((g) => ({
+      date: g.date, champion: g.champion, icon: dd.champions[g.championId]?.icon, result: g.result,
+      kda: `${g.kills}/${g.deaths}/${g.assists}`, csPerMin: g.csPerMin, followed: g.followed,
+    })),
+    champions: [...per.values()].sort((a, b) => b.games - a.games).slice(0, 8).map((p) => ({
+      champion: p.champion, icon: p.icon, games: p.games,
+      winRate: p.known ? p.wins / p.known : null,
+      kda: p.d ? (p.k + p.a) / p.d : p.k + p.a,
+      followed: p.followed.length ? p.followed.reduce((s, x) => s + x, 0) / p.followed.length : null,
+    })),
+  };
+}
+
 function viewModel() {
   const { pick, build: b, rec } = app;
   const base = {
@@ -837,6 +1106,11 @@ function viewModel() {
     live: liveView(),
     remote: app.remote.enabled ? { urls: app.remote.urls } : null,
     autostart: autostartSupported() ? autostartEnabled() : null,
+    version: VERSION,
+    pid: process.pid,
+    update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA },
+    draft: draftView(),
+    history: historyView(),
   };
   if (!pick || !b || !rec) return base;
   const champ = dd.champions[pick.championId] || { name: `Champion ${pick.championId}` };
@@ -1039,6 +1313,16 @@ function startWindowServer(port) {
       app.applied.itemKey = null; // løkken opdaterer med den nye modstander
       return json(200, { ok: true });
     }
+    if (req.method === 'POST' && req.url === '/api/update') {
+      if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
+      try {
+        json(200, { ok: true });
+        await applyUpdate();
+      } catch (e) {
+        log(`Fejl: opdatering mislykkedes: ${e.message}`);
+      }
+      return;
+    }
     if (req.method === 'POST' && req.url === '/api/autostart') {
       if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
       if (!autostartSupported()) return json(400, { error: 'Ikke understøttet her' });
@@ -1063,7 +1347,10 @@ function startWindowServer(port) {
         reject(e);
       });
       // Uden telefon-adgang kun 127.0.0.1: vinduet kan ikke nås fra andre maskiner.
-      server.listen(p, app.remote.enabled ? '0.0.0.0' : '127.0.0.1', () => resolve(server.address().port));
+      server.listen(p, app.remote.enabled ? '0.0.0.0' : '127.0.0.1', () => {
+        app.server = server;
+        resolve(server.address().port);
+      });
     };
     tryListen(port, 10);
   });
@@ -1196,6 +1483,9 @@ async function tick() {
       app.opponentOverride = null;
     }
     app.prefetched = null;
+    if (app.draft || app.draftKey) { app.draft = null; app.draftKey = null; }
+    // Tilbage i lobbyen uden kamp (fx dodge): vis ikke den gamle champion select.
+    if (app.pick && ['None', 'Lobby', 'Matchmaking', 'ReadyCheck'].includes(phase)) { clearPick(); broadcast(); }
     return cfg.pollMs;
   }
   const session = await lcu(app.client, 'GET', '/lol-champ-select/v1/session');
@@ -1204,6 +1494,7 @@ async function tick() {
     .some((a) => a.actorCellId === session.localPlayerCellId && a.type === 'pick' && !a.completed);
   if (!(me?.championId > 0) || pickPending) {
     setStatus('Champion select - venter på at du låser en champion.');
+    if (me) updateDraft(session, me);
     // Hent buildet allerede mens du hover, så runerne sættes i samme sekund du låser.
     const hover = me?.championId || me?.championPickIntent;
     if (hover > 0 && hover !== app.prefetched) {
@@ -1236,10 +1527,12 @@ async function main() {
   if (process.env.LOL_HELPER_PORT) app.cfg.port = Number(process.env.LOL_HELPER_PORT);
   if (process.env.LOL_HELPER_NO_WINDOW) app.cfg.openWindow = false;
   if (process.env.LOL_HELPER_REMOTE) app.cfg.remoteAccess = true;
-  if (process.argv.includes('--autostart')) app.cfg.openWindow = false;
+  const updated = process.argv.includes('--updated');
+  if (process.argv.includes('--autostart') || updated) app.cfg.openWindow = false; // efter opdatering genforbinder vinduet selv
+  if (IS_SEA) fs.rm(`${process.execPath}.old`, { force: true }, () => {}); // rester fra en opdatering på Windows
 
   // Kører programmet allerede? Så åbn bare dets vindue i stedet for at starte en kopi.
-  if (app.cfg.port) {
+  if (app.cfg.port && !updated) {
     try {
       const running = await fetch(`http://127.0.0.1:${app.cfg.port}/state`, { signal: AbortSignal.timeout(1500) }).then((r) => r.json());
       if (running && 'ddVersion' in running) {
@@ -1251,7 +1544,7 @@ async function main() {
     } catch {}
   }
 
-  log('LoL Rune Helper starter...');
+  log(`LoL Rune Helper ${VERSION} starter...`);
   const ddVersion = await loadStaticData();
   log(`Data Dragon ${ddVersion} hentet. Builds fra OP.GG (${app.cfg.region}, ${app.cfg.buildChoice}).`);
   setupRemote(app.cfg);
@@ -1264,6 +1557,10 @@ async function main() {
   }
   if (app.cfg.openWindow) openBrowser(url);
   if (app.cfg.liveAdvice) liveLoop();
+  if (app.cfg.autoUpdate) {
+    checkUpdate();
+    setInterval(checkUpdate, 6 * 3600 * 1000);
+  }
 
   for (;;) {
     let wait = app.cfg.pollMs;

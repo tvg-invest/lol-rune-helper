@@ -134,6 +134,31 @@
   .ov-row .c { font-size: 12px; font-weight: 700; white-space: nowrap; }
   .ov-row .c.ok { color: var(--green); }
   .ov-foot { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .update { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: rgba(200,170,110,.12); border: 1px solid var(--gold); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px; }
+  .update b { color: var(--gold2); }
+  .update button { margin-left: auto; background: var(--gold); color: #111; border-color: var(--gold); font-weight: 600; }
+  .turn { display: inline-block; background: var(--red); color: #fff; font-weight: 700; font-size: 12px; letter-spacing: .06em; border-radius: 6px; padding: 3px 10px; margin-top: 6px; }
+  .clist { display: flex; flex-direction: column; gap: 8px; }
+  .crow { display: flex; gap: 10px; align-items: center; }
+  .crow img { width: 38px; height: 38px; border-radius: 6px; flex: none; }
+  .crow .t { min-width: 0; }
+  .crow .n { font-weight: 600; }
+  .crow .r { font-size: 12px; color: var(--muted); }
+  .crow .wr { margin-left: auto; font-weight: 700; white-space: nowrap; }
+  .good { color: var(--green); } .bad { color: var(--red); }
+  .pool { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pool img { width: 34px; height: 34px; border-radius: 6px; }
+  .buys { display: flex; gap: 8px; flex-wrap: wrap; }
+  .buy { text-align: center; font-size: 11px; color: var(--muted); width: 54px; }
+  .buy img { width: 40px; height: 40px; border-radius: 6px; border: 2px solid var(--line); display: block; margin: 0 auto 2px; }
+  .buy.sug img { border-color: var(--green); }
+  .buy.adp img { border-color: var(--blue); }
+  table.hist { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.hist td, table.hist th { padding: 5px 6px; border-top: 1px solid var(--line); text-align: left; white-space: nowrap; }
+  table.hist th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  table.hist img { width: 22px; height: 22px; border-radius: 4px; vertical-align: middle; margin-right: 6px; }
+  .tablewrap { overflow-x: auto; }
+  .version { color: var(--muted); font-size: 11px; text-align: right; margin-top: 6px; }
   .phone { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
   .phone .qr { background: #fff; padding: 8px; border-radius: 8px; }
   .phone a { color: var(--gold2); word-break: break-all; font-size: 12px; }
@@ -143,6 +168,8 @@
 <main id="app"><div class="empty"><div class="big">Starter...</div></div></main>
 <script>
 const $app = document.getElementById('app');
+// Tilføj elementer til siden; lister flades ud og tomme værdier (null/false) springes over.
+const put = (...xs) => $app.append(...xs.flat(Infinity).filter((x) => x != null && x !== false));
 const pct = (x) => (x * 100).toFixed(1).replace('.', ',') + '%';
 const num = (x) => x == null ? '' : x.toLocaleString('da-DK');
 
@@ -170,7 +197,77 @@ function statusLine(s) {
 }
 
 function logCard(s) {
-  return el('div', { class: 'card' }, el('details', {}, el('summary', {}, 'Log'), el('pre', { class: 'log' }, s.log.join('\n'))));
+  return el('div', { class: 'card' }, el('details', {}, el('summary', {}, 'Log'), el('pre', { class: 'log' }, s.log.join('\n'))),
+    el('div', { class: 'version' }, `LoL Rune Helper ${s.version || ''}`));
+}
+
+function updateBanner(s) {
+  if (!s.update) return null;
+  return el('div', { class: 'update' },
+    el('div', {}, el('b', {}, `Ny version ${s.update.version} er klar`), s.update.notes ? el('div', { class: 'muted' }, s.update.notes.split('\n')[0]) : null),
+    s.update.canApply && ['127.0.0.1', 'localhost'].includes(location.hostname)
+      ? el('button', { onclick: (e) => { e.target.textContent = 'Opdaterer...'; e.target.disabled = true; post('/api/update', {}); } }, 'Opdater nu')
+      : el('span', { class: 'muted' }, 'Hent den nye version'));
+}
+
+const wrClass = (wr) => (wr >= 0.515 ? 'good' : wr <= 0.485 ? 'bad' : '');
+const crow = (c, sub, right, cls) => el('div', { class: 'crow' }, img(c.icon, c.name),
+  el('div', { class: 't' }, el('div', { class: 'n' }, c.name), sub ? el('div', { class: 'r' }, sub) : null),
+  right != null ? el('div', { class: 'wr ' + (cls || '') }, right) : null);
+
+function renderDraft(s) {
+  const d = s.draft;
+  put(
+    el('header', {},
+      el('div', {}, el('h1', {}, 'Champion select'), el('div', { class: 'meta' }, `Din rolle: ${d.position}`), statusLine(s),
+        d.myBanTurn ? el('div', { class: 'turn' }, 'DIN TUR TIL AT BANNE') : null)),
+    el('div', { class: 'grid' },
+      el('div', {},
+        el('div', { class: 'card' }, el('h2', {}, 'Ban-forslag'),
+          d.bans.length ? el('div', { class: 'clist' }, d.bans.map((b) => crow(b, b.reason)))
+            : el('div', { class: 'muted' }, d.pool.length ? 'Ingen klare trusler mod dine champions.' : 'Jeg kender ikke dine champions til rollen endnu (mastery eller kampe med programmet).')),
+        d.opponent ? el('div', { class: 'card' }, el('h2', {}, `Mod ${d.opponent.name}`),
+          d.poolVs.length ? [el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' }, 'Dine champions:'),
+            el('div', { class: 'clist' }, d.poolVs.map((x) => crow(x, `${num(x.games)} kampe`, pct(x.winRate), wrClass(x.winRate))))] : null,
+          d.counters.length ? [el('div', { class: 'muted', style: 'font-size:12px;margin:12px 0 8px' }, `Stærkeste counters til ${d.opponent.name}:`),
+            el('div', { class: 'clist' }, d.counters.map((x) => crow(x, `${num(x.games)} kampe`, pct(x.winRate), wrClass(x.winRate))))] : null)
+          : el('div', { class: 'card' }, el('h2', {}, 'Counterpick'), el('div', { class: 'muted' }, 'Når din lane-modstander har valgt, viser jeg hvem i din pulje der klarer sig bedst mod dem.'))),
+      el('div', {},
+        el('div', { class: 'card' }, el('h2', {}, 'Din pulje til rollen'),
+          d.pool.length ? el('div', { class: 'pool' }, d.pool.map((c) => img(c.icon, c.name))) : el('div', { class: 'muted' }, 'Ingen endnu.'),
+          el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Ud fra din mastery og dine kampe med programmet.')),
+        phoneCard(s))),
+    logCard(s));
+}
+
+const fmtDur = (sec) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+
+function historyCards(s) {
+  const h = s.history;
+  if (!h) return [];
+  const g = h.last;
+  return [
+    el('div', { class: 'card' }, el('h2', {}, 'Seneste kamp'),
+      el('div', { class: 'crow', style: 'margin-bottom:12px' }, img(g.icon, g.champion),
+        el('div', { class: 't' }, el('div', { class: 'n' }, `${g.champion} ${g.position ? '· ' + g.position : ''}`),
+          el('div', { class: 'r' }, `${g.kills}/${g.deaths}/${g.assists} · ${String(g.csPerMin).replace('.', ',')} CS/min · ${fmtDur(g.duration)}` + (g.matchup?.champion ? ` · mod ${g.matchup.champion}` : ''))),
+        el('div', { class: 'wr ' + (g.result === 'Sejr' ? 'good' : g.result === 'Nederlag' ? 'bad' : '') }, g.result || '')),
+      g.buys.length ? [
+        el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:6px' },
+          `Dine køb (grøn = var blandt forslagene, blå = tilpasset modstanderne)` + (g.followed != null ? ` · ${pct(g.followed)} fulgte forslagene` : '')),
+        el('div', { class: 'buys' }, g.buys.map((b) => el('div', { class: 'buy' + (b.adapted ? ' adp' : b.suggested ? ' sug' : '') }, img(b.icon, b.name), clock(b.t))))]
+        : el('div', { class: 'muted' }, 'Ingen færdige items købt.'),
+      g.goldDiff ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, `Item-guld ved slut: ${g.goldDiff > 0 ? '+' : ''}${num(g.goldDiff)} til dit hold`) : null),
+    el('div', { class: 'card' }, el('h2', {}, 'Dine champions'),
+      el('div', { class: 'tablewrap' }, el('table', { class: 'hist' },
+        el('tr', {}, ['Champion', 'Kampe', 'Sejre', 'KDA', 'Fulgte forslag'].map((x) => el('th', {}, x))),
+        h.champions.map((c) => el('tr', {},
+          el('td', {}, img(c.icon, c.champion), c.champion), el('td', {}, c.games),
+          el('td', {}, c.winRate != null ? pct(c.winRate) : '-'), el('td', {}, c.kda.toFixed(1).replace('.', ',')),
+          el('td', {}, c.followed != null ? pct(c.followed) : '-'))))),
+      el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, `Seneste ${h.recent.length} kampe: ` +
+        h.recent.map((r) => `${r.champion} ${r.kda}${r.result ? ' (' + r.result + ')' : ''}`).join(' · '))),
+  ];
 }
 
 function runesCard(s) {
@@ -288,7 +385,7 @@ function teamBlock(t, label, cls, diff) {
 function renderLive(s) {
   const L = s.live;
   const diff = L.allies.itemGold - L.enemies.itemGold;
-  $app.append(
+  put(
     el('header', {},
       img(L.me.champion.icon, L.me.champion.name, 'champ'),
       el('div', {}, el('h1', {}, el('span', { class: 'live-badge' }, 'LIVE'), L.me.champion.name),
@@ -344,18 +441,22 @@ function matchupLine(m) {
 function render(s) {
   $app.replaceChildren();
   if (!s) return;
-  if (['127.0.0.1', 'localhost'].includes(location.hostname)) $app.append(toolbar(s));
+  if (['127.0.0.1', 'localhost'].includes(location.hostname)) put(toolbar(s));
+  const banner = updateBanner(s);
+  if (banner) put(banner);
   if (s.live) return renderLive(s);
+  if (!s.champion && s.draft) return renderDraft(s);
   if (!s.champion) {
-    $app.append(
-      el('div', { class: 'card empty' }, el('div', { class: 'big' }, 'LoL Rune Helper'), statusLine(s),
-        el('p', { class: 'muted' }, 'Lås en champion i champion select, så sætter jeg runer, summoners og items. Under kampen kommer købsforslag og scoreboard her.')),
+    put(
+      el('div', { class: 'card' + (s.history ? '' : ' empty') }, el('div', { class: 'big', style: s.history ? 'font-size:18px;color:var(--gold2)' : '' }, 'LoL Rune Helper'), statusLine(s),
+        el('p', { class: 'muted' }, 'I champion select får du ban- og counterpick-forslag; når du låser, sætter jeg runer, summoners og items. Under kampen kommer købsforslag og scoreboard her.')),
+      historyCards(s),
       phoneCard(s),
       logCard(s));
     return;
   }
   const role = s.roleOverride;
-  $app.append(
+  put(
     el('header', {},
       img(s.champion.icon, s.champion.name, 'champ'),
       el('div', {}, el('h1', {}, s.champion.name), el('div', { class: 'meta' }, `${s.position} · patch ${s.patch || '?'} · ${s.gameMode}`), statusLine(s), matchupLine(s.matchup)),
