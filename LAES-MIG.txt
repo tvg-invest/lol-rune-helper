@@ -50,6 +50,19 @@ Et vindue åbner i din browser (http://127.0.0.1:3399).
 Lad programmet køre, mens du spiller. Rækkefølgen er ligegyldig.
 Tip: læg vinduet på en anden skærm, eller åbn det på telefonen (se nedenfor).
 
+STEMME (VIRKER OGSÅ I ÆGTE FULDSKÆRM)
+Programmet siger højt: "Råd til <item>", "Level op: Q" og "<champion> er fed".
+Det virker uanset om spillet kører i fuldskærm, da det ikke kræver et vindue.
+Slå til/fra med "Stemme" øverst i vinduet (huskes i config.json).
+
+FULDSKÆRM
+I ægte fuldskærm (Full Screen) dækker League alle andre vinduer - også overlayet.
+Det eneste der tegner inde i et spil i fuldskærm, er programmer der går ind i selve
+spillet, og det gør dette program ikke (Riots anti-cheat). Brug i stedet:
+- Borderless (ser ud som fuldskærm) + Overlay
+- Stemmen
+- Vinduet på en anden skærm eller på telefonen
+
 OVERLAY OVER SPILLET
 Klik "Overlay" øverst i vinduet: et lille vindue der altid ligger øverst med dit guld,
 de 3 forslag ("RÅD NU" eller hvad du mangler) og hvem der er fed. Det bipper og blinker,

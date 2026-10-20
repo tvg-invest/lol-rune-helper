@@ -51,6 +51,10 @@ Læser spillets [Live Client Data API](https://developer.riotgames.com/docs/lol)
 
 Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General Policies](https://developer.riotgames.com/policies/general)) forbyder information spilleren ikke allerede kender og apps der bestemmer spillerens beslutninger, men tillader at fremhæve vigtige beslutninger og give flere valg. Derfor: kun TAB-information, 2-3 begrundede forslag, ingen timere. Bemærk at Riot kræver at produkter registreres i Developer Portal.
 
+## Stemme og fuldskærm
+
+Ægte fuldskærm (exclusive fullscreen) kan ikke overlejres af andre vinduer; det kræver injektion i spilprocessen, som programmet bevidst ikke gør (Vanguard). Derfor en stemme, der virker uanset vindue: "Råd til <item>" (vigtigste nye forslag), "Level op: Q" og "<champion> er fed" - kun nye hændelser, max én pr. slags hvert 8. sek. Windows: `System.Speech` via PowerShell; macOS: `say`. Til/fra i vinduet (gemmes i `config.json` som `voice`).
+
 ## Overlay
 
 Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozilla.org/en-US/docs/Web/API/Document_Picture-in-Picture_API)-vindue (Chrome/Edge 116+), som altid ligger øverst: guld, de 3 forslag (RÅD NU / mangler X) og hvem der er fed. Bip + blink når et forslag skifter til "råd nu" (kun dit eget guld). Intet injiceres i spillet - det er et almindeligt browservindue, så League skal køre i Borderless.

@@ -22,7 +22,7 @@ const IS_SEA = Boolean(sea?.isSea?.());
 const APP_DIR = IS_SEA ? path.dirname(process.execPath) : __dirname;
 
 const PREFIX = 'Auto: ';
-const CONFIG_PATH = path.join(APP_DIR, 'config.json');
+const CONFIG_PATH = process.env.LOL_HELPER_CONFIG || path.join(APP_DIR, 'config.json');
 const DEFAULT_CONFIG = {
   region: 'GLOBAL',       // OP.GG-region: GLOBAL, EUW, EUNE, NA, KR ...
   buildChoice: 'smart',   // 'smart' = højeste win rate blandt populære builds, 'popular' = mest spillede
@@ -32,6 +32,7 @@ const DEFAULT_CONFIG = {
   setItemSet: true,
   adaptToEnemies: true,   // tilpas items/støvler til modstanderholdet
   liveAdvice: true,       // købsforslag + scoreboard under kampen
+  voice: true,            // sig "Råd til ...", "Level op: Q", "X er fed" højt (virker også i ægte fuldskærm)
   openWindow: true,       // åbn vinduet i browseren ved start
   remoteAccess: false,    // true = vinduet kan åbnes fra telefonen (Tailscale/wifi) med en hemmelig nøgle
   autoUpdate: true,       // tjek for nye versioner (opdatering sker først når du klikker)
@@ -66,6 +67,14 @@ function loadConfig() {
     if (e.code !== 'ENOENT') log(`Kunne ikke læse config.json (${e.message}) - bruger standardindstillinger.`);
     return { ...DEFAULT_CONFIG };
   }
+}
+
+// Gem én indstilling i config.json (resten af filen bevares).
+function saveConfigValue(key, value) {
+  let current = {};
+  try { current = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch {}
+  current[key] = value;
+  try { fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(current, null, 2)}\n`); } catch (e) { log(`Kunne ikke gemme indstillingen: ${e.message}`); }
 }
 
 function readAsset(name) {
@@ -697,7 +706,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -1025,6 +1034,43 @@ function liveAdvice(build, me, enemy, gold, mapNumber) {
   return out.sort((a, b) => (b.inProgress - a.inProgress) || (b.score - a.score));
 }
 
+// ---------- Stemme (virker også i ægte fuldskærm, hvor intet vindue kan ses) ----------
+
+const lastSpoken = new Map();
+function speak(kind, text) {
+  if (!app.cfg.voice) return;
+  // Højst én besked af hver slags hvert 8. sekund, så den ikke snakker i munden på sig selv.
+  if (Date.now() - (lastSpoken.get(kind) || 0) < 8000) return;
+  lastSpoken.set(kind, Date.now());
+  log(`Stemme: ${text}`);
+  const done = () => {};
+  if (process.env.LOL_HELPER_SAY_CMD) return execFile(process.env.LOL_HELPER_SAY_CMD, [text], done); // test-hook
+  if (process.platform === 'win32') {
+    // Windows' indbyggede talesyntese; teksten via miljøvariabel, så anførselstegn i navne er sikre.
+    execFile('powershell.exe', ['-NoProfile', '-Command',
+      'Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Rate = 1; $s.Speak($env:LRH_SAY)'],
+    { windowsHide: true, env: { ...process.env, LRH_SAY: text } }, done);
+  } else if (process.platform === 'darwin') {
+    execFile('say', [text], done);
+  }
+}
+
+// Sig kun det der er NYT siden sidste tjek (ikke alt sammen når kampen starter).
+function announce(L) {
+  const v = app.voice;
+  const afford = new Set(L.advice.filter((a) => a.canAfford).map((a) => a.id));
+  const fed = new Set(L.enemy.fed.map((p) => p.champ?.name || p.name));
+  if (v) {
+    const newAfford = [...afford].filter((id) => !v.afford.has(id));
+    // Kun det vigtigste forslag (de står i prioriteret rækkefølge) - kort besked midt i en kamp.
+    if (newAfford.length) speak('afford', `Råd til ${itemName(newAfford[0])}`);
+    if (L.skill.next && !v.skillNext) speak('skill', `Level op: ${L.skill.next}`);
+    const newFed = [...fed].filter((n) => !v.fed.has(n));
+    if (newFed.length) speak('fed', `${newFed.join(' og ')} er fed`);
+  }
+  app.voice = { afford, fed, skillNext: L.skill.next };
+}
+
 async function updateLive(data) {
   const activeName = data.activePlayer?.riotId || data.activePlayer?.summonerName || '';
   const meRaw = (data.allPlayers || []).find((p) => playerName(p) === activeName)
@@ -1046,7 +1092,10 @@ async function updateLive(data) {
   }
   const first = !app.live;
   app.live = analyzeLive(data, app.liveBuild.build);
-  if (app.live) trackGame(data, app.live);
+  if (app.live) {
+    trackGame(data, app.live);
+    announce(app.live);
+  }
   if (first && app.live) log(`Live: ${champ.name} - forslag og scoreboard vises i vinduet.`);
   broadcast();
 }
@@ -1075,6 +1124,7 @@ async function liveLoop() {
     if (app.live && gone >= 2) {
       app.live = null;
       app.liveBuild = null;
+      app.voice = null;
       log('Kampen er slut.');
       finishGame();
       broadcast();
@@ -1098,6 +1148,7 @@ const app = {
   build: null,         // { build, position }
   rec: null,
   applied: { pickKey: null, itemKey: null },
+  voice: null,         // hvad stemmen allerede har sagt i denne kamp
   draft: null,         // ban/counterpick-forslag før du låser
   draftKey: null,
   game: null,          // køb og forslag i den igangværende kamp (til kampoversigten)
@@ -1225,6 +1276,7 @@ function viewModel() {
     autostart: autostartSupported() ? autostartEnabled() : null,
     version: VERSION,
     pid: process.pid,
+    voice: Boolean(app.cfg.voice),
     update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA },
     draft: draftView(),
     history: historyView(),
@@ -1472,6 +1524,14 @@ async function handleRequest(req, res, html) {
       log(`Fejl: opdatering mislykkedes: ${e.message}`);
     }
     return;
+  }
+  if (req.method === 'POST' && req.url === '/api/voice') {
+    const { enabled } = await readBody(req);
+    app.cfg.voice = Boolean(enabled);
+    saveConfigValue('voice', app.cfg.voice);
+    log(app.cfg.voice ? 'Stemme slået til.' : 'Stemme slået fra.');
+    if (app.cfg.voice) { lastSpoken.clear(); speak('test', 'Stemmen er slået til'); }
+    return json(200, { ok: true, enabled: app.cfg.voice });
   }
   if (req.method === 'POST' && req.url === '/api/autostart') {
     if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });

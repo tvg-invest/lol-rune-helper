@@ -580,7 +580,11 @@ function toolbar(s) {
       title: 'Starter programmet i baggrunden når du logger ind (uden at åbne browseren)',
       onclick: () => post('/api/autostart', { enabled: !s.autostart }),
     }, s.autostart ? 'Autostart: til' : 'Autostart: fra') : null,
-    el('button', { onclick: () => { settings.sound = !settings.sound; saveSettings(); render(lastState); } }, settings.sound ? 'Lyd: til' : 'Lyd: fra'),
+    el('button', {
+      title: 'Programmet siger "Råd til ...", "Level op: Q" og "X er fed" højt - virker også i ægte fuldskærm',
+      onclick: () => post('/api/voice', { enabled: !s.voice }),
+    }, s.voice ? 'Stemme: til' : 'Stemme: fra'),
+    el('button', { title: 'Bip i browseren når du har råd til et forslag', onclick: () => { settings.sound = !settings.sound; saveSettings(); render(lastState); } }, settings.sound ? 'Bip: til' : 'Bip: fra'),
     el('button', { onclick: openOverlay, title: 'Lille vindue der altid ligger øverst - kræver Borderless i League' }, pip ? 'Overlay åben' : 'Overlay'));
 }
 

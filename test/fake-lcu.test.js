@@ -147,7 +147,14 @@ server.listen(0, '127.0.0.1', async () => {
     : [process.execPath, [path.join(__dirname, '..', 'lol-helper.js')]];
   // Midlertidig cache og hjemmemappe, så testen ikke rører rigtige filer (fx autostart i ~/Library).
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lol-helper-test-'));
+  // Falsk "say": skriver det programmet siger til en fil i stedet for højttaleren.
+  const saidFile = path.join(tmp, 'said.txt');
+  const sayCmd = path.join(tmp, 'say.sh');
+  fs.writeFileSync(sayCmd, `#!/bin/sh\necho "$1" >> "${saidFile}"\n`, { mode: 0o755 });
+  const said = () => { try { return fs.readFileSync(saidFile, 'utf8'); } catch { return ''; } };
   const env = {
+    LOL_HELPER_SAY_CMD: sayCmd,
+    LOL_HELPER_CONFIG: path.join(tmp, 'config.json'),
     ...process.env,
     HOME: tmp,
     LOL_HELPER_CACHE: path.join(tmp, 'cache'),
@@ -360,8 +367,28 @@ server.listen(0, '127.0.0.1', async () => {
     const Lspent = (await gui('GET', '/state')).body.live;
     assert.strictEqual(Lspent.skill.unspent, 0);
     assert.strictEqual(Lspent.skill.next, null, 'intet forslag uden ubrugte points');
-    live.data.activePlayer.abilities.W.abilityLevel = 2;
+    assert.strictEqual(said(), '', `intet siges når kampen starter: ${said()}`);
+    live.data.activePlayer.abilities.W.abilityLevel = 2; // nyt level -> ubrugt point igen
     await wait(2500);
+    assert(said().includes('Level op: W'), `stemme ved level op: ${said()}`);
+
+    // Stemme: råd til et forslag + en ny fed modstander
+    live.data.activePlayer.currentGold = 5000;
+    await wait(2500);
+    assert(/Råd til /.test(said()), `stemme ved råd nu: ${said()}`);
+    live.data.activePlayer.currentGold = 1400;
+    const darius = live.data.allPlayers.find((p) => p.championName === 'Darius');
+    darius.scores.kills = 10;
+    await wait(2500);
+    assert(said().includes('Darius er fed'), `stemme ved ny fed modstander: ${said()}`);
+    darius.scores.kills = 2;
+    // Stemme fra/til gemmes i config
+    assert.strictEqual((await gui('POST', '/api/voice', { enabled: false })).body.enabled, false);
+    assert.strictEqual(JSON.parse(fs.readFileSync(env.LOL_HELPER_CONFIG, 'utf8')).voice, false);
+    assert.strictEqual((await gui('GET', '/state')).body.voice, false);
+    await gui('POST', '/api/voice', { enabled: true });
+    await wait(2500);
+    console.log('Stemmen sagde:', said().trim().split('\n').join(' | '));
     assert.strictEqual(L.matchup?.name, 'Zed', 'live lane-modstander ud fra position');
     assert(L.matchup.winRate > 0.3, 'live matchup win rate');
     assert(L.enemy.healers.includes('Soraka') && L.enemy.healers.includes('Darius'), 'healere');

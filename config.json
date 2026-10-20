@@ -7,8 +7,10 @@
   "setItemSet": true,
   "adaptToEnemies": true,
   "liveAdvice": true,
+  "voice": true,
   "openWindow": true,
   "remoteAccess": false,
+  "autoUpdate": true,
   "port": 3399,
   "pollMs": 1500
 }
