@@ -51,6 +51,13 @@ Læser spillets [Live Client Data API](https://developer.riotgames.com/docs/lol)
 
 Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General Policies](https://developer.riotgames.com/policies/general)) forbyder information spilleren ikke allerede kender og apps der bestemmer spillerens beslutninger, men tillader at fremhæve vigtige beslutninger og give flere valg. Derfor: kun TAB-information, 2-3 begrundede forslag, ingen timere. Bemærk at Riot kræver at produkter registreres i Developer Portal.
 
+## Gameplan mod lane-modstanderen
+
+- **Fast del** (champion select og kamp): win rate i matchuppet (OP.GG `counters`), lane-fordel / flest solo kills / spillestil + tip-tekst fra OP.GG's offentlige MCP-tjeneste (`https://mcp-api.op.gg/mcp`, værktøj `lol_get_lane_matchup_guide`; navne i UPPER_SNAKE_CASE, kun engelsk; udokumenteret - fejler den, laves planen uden), skalering ud fra begge champions' `game_lengths`, og begges typiske core build.
+- **Live** ("Lige nu"): level og hvem der har ult, item-guld, KDA, core-fremskridt for begge, hans armor/MR/anti-heal/skadetype med items fra DIT build (min. 2% pick rate) der svarer på det.
+- **Ændringer**: hans nye færdige items og level 6 logges med tid og siges højt (`voiceEnemy`).
+- Kun fakta + valg, ingen "engage nu" (Riot: "Apps that dictate player decisions"). Research: `docs/research-tryndamere-evelynn.md`.
+
 ## Stemme og fuldskærm
 
 Ægte fuldskærm (exclusive fullscreen) kan ikke overlejres af andre vinduer; det kræver injektion i spilprocessen, som programmet bevidst ikke gør (Vanguard). Derfor en stemme, der virker uanset vindue: "Råd til <item>" (vigtigste nye forslag), "Level op: Q" og "<champion> er fed" - kun nye hændelser, max én pr. slags hvert 8. sek. Windows: `System.Speech` via PowerShell; macOS: `say`. Til/fra i vinduet (gemmes i `config.json` som `voice`).

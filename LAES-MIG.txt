@@ -5,6 +5,17 @@ FØR KAMPEN (champion select)
 Når du låser en champion, sætter programmet automatisk runer, summoner spells og
 et item set i butikken. Items tilpasses modstanderholdet.
 
+GAMEPLAN MOD DIN LANE-MODSTANDER
+Så snart din lane-modstander (eller fjendens jungler) er kendt, laver programmet en
+gameplan: din win rate i matchuppet, hvem der har lane-fordel og flest solo kills,
+anbefalet spillestil, OP.GG's tip mod netop den champion, hvem der skalerer bedst, og
+jeres typiske builds. Under kampen opdateres den løbende med "Lige nu": level (og hvem
+der har ult), item-guld, KDA, hvor langt I er med jeres core builds, og hans armor/
+magic resist/anti-heal med de items i DIT build der svarer på det. Når han køber et
+item eller når level 6, kommer det i "Ændringer" og stemmen siger det
+(slå fra med "voiceEnemy": false). Det er fakta og valg - du bestemmer selv hvornår du
+går ind (Riot tillader ikke apps der træffer beslutninger for dig).
+
 BAN OG COUNTERPICK
 Før du låser, viser vinduet ban-forslag (de champions dine champions til rollen klarer
 sig dårligst imod) og - når din lane-modstander har valgt - hvem i din pulje der vinder

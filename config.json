@@ -8,6 +8,7 @@
   "adaptToEnemies": true,
   "liveAdvice": true,
   "voice": true,
+  "voiceEnemy": true,
   "openWindow": true,
   "remoteAccess": false,
   "autoUpdate": true,

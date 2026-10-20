@@ -33,6 +33,7 @@ const DEFAULT_CONFIG = {
   adaptToEnemies: true,   // tilpas items/støvler til modstanderholdet
   liveAdvice: true,       // købsforslag + scoreboard under kampen
   voice: true,            // sig "Råd til ...", "Level op: Q", "X er fed" højt (virker også i ægte fuldskærm)
+  voiceEnemy: true,       // sig også når din lane-modstander køber et item eller når level 6 (ren fakta fra TAB)
   openWindow: true,       // åbn vinduet i browseren ved start
   remoteAccess: false,    // true = vinduet kan åbnes fra telefonen (Tailscale/wifi) med en hemmelig nøgle
   autoUpdate: true,       // tjek for nye versioner (opdatering sker først når du klikker)
@@ -44,7 +45,7 @@ const POSITION_MAP = { top: 'TOP', jungle: 'JUNGLE', middle: 'MID', bottom: 'ADC
 const POSITIONS = ['TOP', 'JUNGLE', 'MID', 'ADC', 'SUPPORT'];
 const SHARD_NAMES = { 5001: 'Health Scaling', 5005: 'Attack Speed', 5007: 'Ability Haste', 5008: 'Adaptive Force', 5010: 'Move Speed', 5011: 'Health', 5013: 'Tenacity & Slow Resist' };
 // Champions med meget healing/sustain (Data Dragon-id). Bruges til at anbefale anti-heal.
-const HEALERS = new Set(['Aatrox', 'Briar', 'DrMundo', 'Fiddlesticks', 'Fiora', 'Gwen', 'Illaoi', 'Irelia', 'Maokai', 'Milio', 'Nami', 'Olaf', 'Samira', 'Senna', 'Seraphine', 'Sona', 'Soraka', 'Swain', 'Sylas', 'Trundle', 'Vladimir', 'Volibear', 'Warwick', 'Yuumi', 'Zac', 'Viego', 'Belveth', 'Kayn', 'Nasus', 'Darius', 'Udyr', 'Renekton']);
+const HEALERS = new Set(['Aatrox', 'Briar', 'DrMundo', 'Fiddlesticks', 'Fiora', 'Gwen', 'Illaoi', 'Irelia', 'Maokai', 'Milio', 'Nami', 'Olaf', 'Samira', 'Senna', 'Seraphine', 'Sona', 'Soraka', 'Swain', 'Sylas', 'Trundle', 'Vladimir', 'Volibear', 'Warwick', 'Yuumi', 'Zac', 'Viego', 'Belveth', 'Kayn', 'Nasus', 'Darius', 'Udyr', 'Renekton', 'Tryndamere']);
 const BOOTS_ARMOR = 3047;
 const BOOTS_MR = 3111;
 
@@ -263,8 +264,8 @@ function pruneCache() {
   } catch {}
 }
 
-async function fetchBuild(region, mode, championId, position, target) {
-  const key = `${region}_${mode}_${championId}_${position}${target ? `_vs${target}` : ''}`;
+// Fælles cache for OP.GG-data: hukommelse + fil i cache-mappen, 6 timer.
+function cachedJson(key, loader) {
   const hit = buildCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL) return hit.promise;
   const file = path.join(CACHE_DIR, `${key}.json`);
@@ -272,10 +273,7 @@ async function fetchBuild(region, mode, championId, position, target) {
     try {
       if (Date.now() - fs.statSync(file).mtimeMs < CACHE_TTL) return JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch {}
-    const url = `https://lol-api-champion.op.gg/api/${region}/champions/${mode}/${championId}/${position}` +
-      (target ? `?target_champion=${target}` : '');
-    const j = await limited(() => getJson(url));
-    const data = { ...j.data, version: j.meta?.version };
+    const data = await limited(loader);
     try {
       fs.mkdirSync(CACHE_DIR, { recursive: true });
       fs.writeFileSync(file, JSON.stringify(data));
@@ -287,6 +285,50 @@ async function fetchBuild(region, mode, championId, position, target) {
   });
   buildCache.set(key, { promise, at: Date.now() });
   return promise;
+}
+
+function fetchBuild(region, mode, championId, position, target) {
+  const key = `${region}_${mode}_${championId}_${position}${target ? `_vs${target}` : ''}`;
+  return cachedJson(key, async () => {
+    const url = `https://lol-api-champion.op.gg/api/${region}/champions/${mode}/${championId}/${position}` +
+      (target ? `?target_champion=${target}` : '');
+    const j = await getJson(url);
+    return { ...j.data, version: j.meta?.version };
+  });
+}
+
+// OP.GG's matchup-guide (via deres offentlige MCP-tjeneste): tip-tekst + lane-/solo-kill-fordel + spillestil.
+// Udokumenteret - fejler den, laves gameplanen bare uden.
+const MCP_URL = process.env.LOL_HELPER_MCP || 'https://mcp-api.op.gg/mcp';
+const GUIDE_POSITION = { TOP: 'top', JUNGLE: 'jungle', MID: 'mid', ADC: 'adc', SUPPORT: 'support' };
+// "Kha'Zix" -> KHAZIX, "Dr. Mundo" -> DR_MUNDO, "Nunu & Willump" -> NUNU_WILLUMP
+const mcpName = (name) => name.toUpperCase().replace(/['’.]/g, '').replace(/&/g, ' ').trim().replace(/\s+/g, '_');
+
+function fetchMatchupGuide(myKey, oppKey, position) {
+  const me = dd.champions[myKey];
+  const opp = dd.champions[oppKey];
+  const pos = GUIDE_POSITION[position];
+  if (!me || !opp || !pos) return Promise.resolve(null);
+  return cachedJson(`guide_${myKey}_vs${oppKey}_${pos}`, async () => {
+    const res = await fetch(MCP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'User-Agent': 'lol-rune-helper' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'lol_get_lane_matchup_guide', arguments: { position: pos, my_champion: mcpName(me.name), opponent_champion: mcpName(opp.name) } },
+      }),
+      signal: AbortSignal.timeout(20000),
+    });
+    const j = await res.json();
+    if (j.error || j.result?.isError) throw new Error(`Matchup-guide: ${JSON.stringify(j.error || j.result.content?.[0]?.text).slice(0, 200)}`);
+    const d = JSON.parse(j.result.content[0].text).data || {};
+    return {
+      tip: d.opponent_champion_tip || '',
+      laneAdvantage: d.lane_advantage_champion || null,
+      soloKill: d.lane_solo_kill_advantage_champion || null,
+      playStyle: d.recommended_play_style || null,
+    };
+  });
 }
 
 // Lane-modstanderen: den modstander der oftest spiller din rolle (OP.GG's rollefordeling).
@@ -302,6 +344,140 @@ async function laneOpponent(cfg, position, enemyIds) {
   }));
   const best = rates.sort((a, b) => b.rate - a.rate)[0];
   return best && best.rate >= 0.25 ? best.id : null;
+}
+
+// ---------- Gameplan mod din lane-modstander ----------
+// Fast del: OP.GG's matchup-guide + tal. Live del: fakta om jer to (level, items, core) + valg fra dit build.
+// Bevidst ingen "engage nu"-råd: Riot tillader ikke apps der træffer beslutninger for spilleren.
+
+const PLAY_STYLE = { defensive: 'Defensiv', aggressive: 'Aggressiv', even: 'Jævn' };
+const genitive = (name) => (/[sxz]$/i.test(name) ? `${name}'` : `${name}s`);
+const coreOf = (build) => (build?.core_items?.[0]?.ids || []).map(String);
+
+// Hvem skalerer bedst: hvor meget win rate ændrer sig fra korte (<25 min) til lange (40+ min) kampe.
+function scalingNote(myBuild, oppBuild, oppName) {
+  const curve = (b) => {
+    const g = b?.game_lengths || [];
+    return g.length >= 2 ? g[g.length - 1].rate - g[0].rate : null;
+  };
+  const mine = curve(myBuild);
+  const his = curve(oppBuild);
+  if (mine == null || his == null) return null;
+  if (mine - his > 0.02) return `Du skalerer bedre end ${oppName} (din win rate stiger mere jo længere kampen varer).`;
+  if (his - mine > 0.02) return `${oppName} skalerer bedre end dig - din bedste chance i kampen er før 25 min.`;
+  return `I skalerer nogenlunde ens.`;
+}
+
+async function buildPlan(myKey, oppKey, position, myBuild) {
+  const oppName = dd.champions[oppKey]?.name || '?';
+  const myName = dd.champions[myKey]?.name || '';
+  const [guide, oppBuild] = await Promise.all([
+    fetchMatchupGuide(myKey, oppKey, position).catch((e) => { log(`  ${e.message}`); return null; }),
+    POSITIONS.includes(position) ? fetchBuild(app.cfg.region, 'ranked', oppKey, position).catch(() => null) : null,
+  ]);
+  const who = (x) => {
+    if (!x) return null;
+    if (x === 'EVEN') return 'jævn';
+    if (x.toLowerCase() === oppName.toLowerCase()) return oppName;
+    if (x.toLowerCase() === myName.toLowerCase()) return 'dig';
+    return x;
+  };
+  return {
+    key: `${myKey}_${oppKey}_${position}`,
+    myKey: String(myKey),
+    oppKey: String(oppKey),
+    opponent: oppName,
+    position,
+    stats: matchupStats(myBuild, oppKey),
+    laneAdvantage: who(guide?.laneAdvantage),
+    soloKill: who(guide?.soloKill),
+    playStyle: guide?.playStyle ? PLAY_STYLE[guide.playStyle] || guide.playStyle : null,
+    tip: guide?.tip || null,
+    scaling: scalingNote(myBuild, oppBuild, oppName),
+    myCore: coreOf(myBuild),
+    oppCore: coreOf(oppBuild),
+    // Items du faktisk bygger: core + sene items som mindst 2% køber (ikke fx Randuin's på en mage).
+    myPool: [
+      ...(myBuild?.core_items || []).flatMap((x) => x.ids.map(String)),
+      ...(myBuild?.last_items || []).filter((x) => (x.pick_rate || 0) >= 0.02).map((x) => String(x.ids[0])),
+    ],
+    seen: null, // modstanderens items/level ved sidste tjek
+    log: [],    // ændringer under kampen
+  };
+}
+
+// Laves én gang pr. matchup (champion select eller live) og bruges videre ind i kampen.
+function ensurePlan(myKey, oppKey, position, myBuild) {
+  if (!myKey || !oppKey || !myBuild) return;
+  const key = `${myKey}_${oppKey}_${position}`;
+  if (app.planKey === key) return;
+  app.planKey = key;
+  buildPlan(myKey, oppKey, position, myBuild)
+    .then((plan) => {
+      if (app.planKey !== key) return;
+      app.plan = plan;
+      log(`Gameplan klar: ${dd.champions[myKey]?.name} mod ${plan.opponent}.`);
+      broadcast();
+    })
+    .catch((e) => log(`Gameplan fejlede: ${e.message}`));
+}
+
+// Modstanderens nye færdige items og level 6 -> ændringslog (+ stemme hvis slået til).
+function trackOpponent(L) {
+  const plan = app.plan;
+  const opp = L.matchup?.player;
+  if (!plan || !opp || String(opp.champ?.key) !== plan.oppKey) return;
+  const completed = opp.itemIds.filter((id) => isCompleted(dd.items[id]));
+  const add = (kind, text) => {
+    plan.log.unshift({ t: L.gameTime, text });
+    plan.log.length = Math.min(plan.log.length, 12);
+    if (app.cfg.voiceEnemy) speak(kind, text);
+  };
+  if (plan.seen) {
+    const before = [...plan.seen.items];
+    for (const id of completed) {
+      const i = before.indexOf(id);
+      if (i !== -1) before.splice(i, 1);
+      else add('opp-item', `${plan.opponent} har købt ${itemName(id)}`);
+    }
+    if (plan.seen.level < 6 && opp.level >= 6) add('opp-level', `${plan.opponent} er level 6`);
+  }
+  plan.seen = { items: completed, level: opp.level };
+}
+
+// "Lige nu": kun fakta om jer to + hvilke items i DIT build der svarer på hans.
+function planNow(plan, L) {
+  const opp = L?.matchup?.player;
+  if (!opp || String(opp.champ?.key) !== plan.oppKey) return null;
+  const me = L.me;
+  const n = plan.opponent;
+  const num = (x) => Math.round(x).toLocaleString('da-DK');
+  const lines = [];
+  let lvl = `Level: dig ${me.level}, ${n} ${opp.level}`;
+  if (me.level >= 6 && opp.level < 6) lvl += ` - du har ult, ${n} har ikke endnu`;
+  else if (opp.level >= 6 && me.level < 6) lvl += ` - ${n} har ult, du har ikke endnu`;
+  lines.push(lvl);
+  const diff = me.itemGold - opp.itemGold;
+  lines.push(`Items: dig ${num(me.itemGold)} g, ${n} ${num(opp.itemGold)} g (${diff >= 0 ? '+' : ''}${num(diff)} til dig)`);
+  lines.push(`KDA: dig ${me.kills}/${me.deaths}/${me.assists}, ${n} ${opp.kills}/${opp.deaths}/${opp.assists}`);
+  const progress = (core, items) => core.filter((id) => items.includes(id));
+  const mine = progress(plan.myCore, me.itemIds);
+  const his = progress(plan.oppCore, opp.itemIds);
+  if (plan.myCore.length) lines.push(`Dit core build: ${mine.length}/${plan.myCore.length}${mine.length ? ` (${mine.map(itemName).join(', ')})` : ''}`);
+  if (plan.oppCore.length) lines.push(`${genitive(n)} typiske core: ${his.length}/${plan.oppCore.length}${his.length ? ` (${his.map(itemName).join(', ')})` : ''}`);
+  // Items i dit eget build (ikke ejet) med et bestemt tag - som valg, ikke ordre.
+  const options = (pred) => [...new Set(plan.myPool)]
+    .filter((id) => !me.itemIds.includes(id) && isCompleted(dd.items[id]) && pred(dd.items[id]))
+    .slice(0, 2).map(itemName);
+  const withOptions = (text, opts, label) => text + (opts.length ? `. ${label}: ${opts.join(', ')}` : '');
+  const iAmAD = me.dmg.ad >= 0.5;
+  if (iAmAD && opp.armor >= 40) lines.push(withOptions(`${n} har ${opp.armor} armor fra items`, options((it) => it.tags.includes('ArmorPenetration')), 'Armor pen i dit build'));
+  if (!iAmAD && opp.mr >= 40) lines.push(withOptions(`${n} har ${opp.mr} magic resist fra items`, options((it) => it.tags.includes('MagicPenetration')), 'Magic pen i dit build'));
+  const antiheal = opp.itemIds.find((id) => dd.items[id]?.antiheal);
+  if (antiheal && (HEALERS.has(me.champ?.id) || me.healing)) lines.push(`${n} har anti-heal (${itemName(antiheal)}) - din healing er reduceret`);
+  if (opp.itemGold >= 2500 && opp.dmg.ad >= 0.7) lines.push(withOptions(`${genitive(n)} items er mest AD`, options((it) => it.tags.includes('Armor')), 'Armor i dit build'));
+  if (opp.itemGold >= 2500 && opp.dmg.ap >= 0.7) lines.push(withOptions(`${genitive(n)} items er mest AP`, options((it) => it.tags.includes('SpellBlock')), 'Magic resist i dit build'));
+  return lines;
 }
 
 // Din win rate mod en bestemt champion (OP.GG's counters-liste for din champion og rolle).
@@ -671,6 +847,8 @@ function clearPick() {
   app.pick = null;
   app.build = null;
   app.rec = null;
+  app.plan = null;
+  app.planKey = null;
 }
 
 function finishGame() {
@@ -706,7 +884,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -1094,6 +1272,9 @@ async function updateLive(data) {
   app.live = analyzeLive(data, app.liveBuild.build);
   if (app.live) {
     trackGame(data, app.live);
+    const opp = app.live.matchup?.player;
+    if (opp?.champ) ensurePlan(champ.key, opp.champ.key, LIVE_POSITION[meRaw.position] || app.build?.position, app.liveBuild.build);
+    trackOpponent(app.live);
     announce(app.live);
   }
   if (first && app.live) log(`Live: ${champ.name} - forslag og scoreboard vises i vinduet.`);
@@ -1149,6 +1330,8 @@ const app = {
   rec: null,
   applied: { pickKey: null, itemKey: null },
   voice: null,         // hvad stemmen allerede har sagt i denne kamp
+  plan: null,          // gameplan mod lane-modstanderen
+  planKey: null,
   draft: null,         // ban/counterpick-forslag før du låser
   draftKey: null,
   game: null,          // køb og forslag i den igangværende kamp (til kampoversigten)
@@ -1221,6 +1404,28 @@ function liveView() {
 
 const champView = (id) => ({ id, name: dd.champions[id]?.name || String(id), icon: dd.champions[id]?.icon });
 
+function planView() {
+  const p = app.plan;
+  if (!p) return null;
+  const item = (id) => ({ id, name: itemName(id), icon: dd.items[id]?.icon });
+  return {
+    opponent: champView(p.oppKey),
+    me: champView(p.myKey),
+    position: p.position,
+    winRate: p.stats?.winRate ?? null,
+    games: p.stats?.games ?? null,
+    laneAdvantage: p.laneAdvantage,
+    soloKill: p.soloKill,
+    playStyle: p.playStyle,
+    tip: p.tip,
+    scaling: p.scaling,
+    myCore: p.myCore.map(item),
+    oppCore: p.oppCore.map(item),
+    now: app.live ? planNow(p, app.live) : null,
+    log: p.log.map((l) => ({ t: l.t, text: l.text })),
+  };
+}
+
 function draftView() {
   const d = app.draft;
   if (!d) return null;
@@ -1279,6 +1484,7 @@ function viewModel() {
     voice: Boolean(app.cfg.voice),
     update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA },
     draft: draftView(),
+    plan: planView(),
     history: historyView(),
   };
   if (!pick || !b || !rec) return base;
@@ -1631,6 +1837,8 @@ async function handlePick(pick, pickKey, itemKey) {
   const matchupChanged = (app.rec.matchup?.id ?? null) !== prevMatchup;
   // Rune-valgene kan være omrokeret (matchup-side først) - peg på den side der faktisk er sat.
   if (app.appliedPerks) app.runeIndex = app.rec.runeOptions.findIndex((r) => perkKey(r) === app.appliedPerks);
+  // Gameplan mod lane-modstanderen (i baggrunden - runer/items venter ikke på den).
+  if (app.rec.matchup) ensurePlan(pick.championId, app.rec.matchup.id, app.build.position, app.build.build);
 
   if (fullApply) {
     const stats = roleStats(app.build);

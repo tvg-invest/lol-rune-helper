@@ -75,6 +75,26 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// Falsk OP.GG matchup-guide (MCP, JSON-RPC) - registrerer hvad programmet spørger om.
+const mcpCalls = [];
+const mcpServer = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (c) => (body += c));
+  req.on('end', () => {
+    const rpc = JSON.parse(body);
+    const a = rpc.params.arguments;
+    mcpCalls.push(a);
+    const data = {
+      opponent_champion_tip: `Testtip: sådan slår ${a.my_champion} ${a.opponent_champion}`,
+      lane_advantage_champion: a.opponent_champion === 'ZED' ? 'Zed' : 'EVEN',
+      lane_solo_kill_advantage_champion: 'EVEN',
+      recommended_play_style: 'defensive',
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify({ data }) }] } }));
+  });
+});
+
 // Falsk Live Client Data API (spillets port 2999). Felter som i Riots dokumentation/eksempel.
 const live = { data: null };
 const liveServer = http.createServer(async (req, res) => {
@@ -138,6 +158,7 @@ const autoSet = () => state.itemSets.itemSets.find((s) => s.title.startsWith('Au
 const autoPage = () => state.pages.find((p) => p.name.startsWith('Auto: '));
 
 liveServer.listen(0, '127.0.0.1');
+mcpServer.listen(0, '127.0.0.1');
 server.listen(0, '127.0.0.1', async () => {
   const port = server.address().port;
   const livePort = liveServer.address().port;
@@ -153,6 +174,7 @@ server.listen(0, '127.0.0.1', async () => {
   fs.writeFileSync(sayCmd, `#!/bin/sh\necho "$1" >> "${saidFile}"\n`, { mode: 0o755 });
   const said = () => { try { return fs.readFileSync(saidFile, 'utf8'); } catch { return ''; } };
   const env = {
+    LOL_HELPER_MCP: `http://127.0.0.1:${mcpServer.address().port}/mcp`,
     LOL_HELPER_SAY_CMD: sayCmd,
     LOL_HELPER_CONFIG: path.join(tmp, 'config.json'),
     ...process.env,
@@ -250,6 +272,21 @@ server.listen(0, '127.0.0.1', async () => {
     } else {
       assert.strictEqual(runePosts(), 2, 'ingen matchup-rune -> runer røres ikke');
     }
+    // Gameplan mod Zed (matchup-guide + tal)
+    let plan;
+    for (let i = 0; i < 40 && (plan = (await gui('GET', '/state')).body.plan)?.opponent?.name !== 'Zed'; i++) await wait(500);
+    assert.strictEqual(plan?.opponent?.name, 'Zed', `gameplan mod Zed: ${JSON.stringify(plan)?.slice(0, 200)}`);
+    assert(mcpCalls.some((c) => c.my_champion === 'AHRI' && c.opponent_champion === 'ZED' && c.position === 'mid'), `MCP-kald: ${JSON.stringify(mcpCalls)}`);
+    assert(plan.tip.startsWith('Testtip'), plan.tip);
+    assert.strictEqual(plan.laneAdvantage, 'Zed');
+    assert.strictEqual(plan.soloKill, 'jævn');
+    assert.strictEqual(plan.playStyle, 'Defensiv');
+    assert(plan.winRate > 0.3 && plan.games > 100, 'matchup win rate i planen');
+    assert(plan.myCore.length >= 2 && plan.oppCore.length >= 2, 'core builds for begge');
+    assert(plan.scaling && /skalerer/.test(plan.scaling), `skalering: ${plan.scaling}`);
+    assert.strictEqual(plan.now, null, 'ingen "lige nu" før kampen');
+    console.log('Gameplan:', JSON.stringify({ lane: plan.laneAdvantage, solo: plan.soloKill, stil: plan.playStyle, skalering: plan.scaling, han: plan.oppCore.map((i) => i.name) }));
+
     const titles = autoSet().blocks.map((b) => b.type);
     assert(titles.includes('Mod deres hold'), `counter-blok mangler: ${titles}`);
     const boots = autoSet().blocks.find((b) => b.type === 'Støvler');
@@ -288,6 +325,8 @@ server.listen(0, '127.0.0.1', async () => {
     st = (await gui('GET', '/state')).body;
     assert.strictEqual(st.matchup.name, 'Jhin');
     assert.strictEqual(st.matchup.manual, true);
+    for (let i = 0; i < 40 && (await gui('GET', '/state')).body.plan?.opponent?.name !== 'Jhin'; i++) await wait(500);
+    assert.strictEqual((await gui('GET', '/state')).body.plan?.opponent?.name, 'Jhin', 'gameplan følger manuelt valgt modstander');
     assert.strictEqual(runePosts(), postsBeforeManual, 'din egen rune-side overskrives ikke');
     const putsAuto = count('PUT');
     await gui('POST', '/api/opponent', { championId: null });
@@ -389,6 +428,20 @@ server.listen(0, '127.0.0.1', async () => {
     await gui('POST', '/api/voice', { enabled: true });
     await wait(2500);
     console.log('Stemmen sagde:', said().trim().split('\n').join(' | '));
+
+    // Gameplan live: "lige nu" + Zed køber et nyt item -> ændringslog og stemme
+    let lp = (await gui('GET', '/state')).body.plan;
+    assert.strictEqual(lp?.opponent?.name, 'Zed', 'gameplan mod Zed under kampen');
+    assert(lp.now && lp.now[0].startsWith('Level: dig 11, Zed 13'), `lige nu: ${JSON.stringify(lp.now)}`);
+    assert(lp.now.some((l) => l.startsWith('Items: dig')) && lp.now.some((l) => l.startsWith('KDA: dig')), 'items og KDA');
+    const zed = live.data.allPlayers.find((p) => p.championName === 'Zed');
+    zed.items.push({ itemID: 6694, count: 1, slot: 4 });
+    await wait(2500);
+    lp = (await gui('GET', '/state')).body.plan;
+    assert(lp.log[0]?.text === "Zed har købt Serylda's Grudge", `ændringslog: ${JSON.stringify(lp.log)}`);
+    assert(said().includes("Zed har købt Serylda's Grudge"), 'stemme om modstanderens køb');
+    zed.items.pop();
+    console.log('Gameplan lige nu:', lp.now.join(' | '));
     assert.strictEqual(L.matchup?.name, 'Zed', 'live lane-modstander ud fra position');
     assert(L.matchup.winRate > 0.3, 'live matchup win rate');
     assert(L.enemy.healers.includes('Soraka') && L.enemy.healers.includes('Darius'), 'healere');
@@ -547,6 +600,7 @@ server.listen(0, '127.0.0.1', async () => {
     child.kill();
     server.close();
     liveServer.close();
+    mcpServer.close();
     if (!hadToken) fs.rmSync(tokenFile, { force: true });
     fs.rmSync(tmp, { recursive: true, force: true });
   }

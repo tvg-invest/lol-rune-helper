@@ -162,6 +162,14 @@
   .skillup .key { width: 26px; height: 26px; }
   .skillup.compact { margin-top: 0; padding: 2px 6px; font-size: 12px; gap: 5px; }
   .skillup.compact .key { width: 22px; height: 22px; font-size: 12px; }
+  .plan-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .plan-ic { width: 30px; height: 30px; border-radius: 6px; }
+  .pill b { color: var(--gold2); font-weight: 600; }
+  blockquote.tip { margin: 0 0 6px; padding: 8px 12px; border-left: 3px solid var(--gold); background: var(--panel2); border-radius: 0 8px 8px 0; font-style: italic; }
+  .plan-build { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 6px 0; font-size: 12px; }
+  .plan-build img { width: 28px; height: 28px; border-radius: 5px; border: 1px solid var(--line); }
+  .plan-build .muted { min-width: 130px; }
+  .plan-sub { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--blue); margin-top: 12px; }
   .version { color: var(--muted); font-size: 11px; text-align: right; margin-top: 6px; }
   .phone { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
   .phone .qr { background: #fff; padding: 8px; border-radius: 8px; }
@@ -242,6 +250,29 @@ function renderDraft(s) {
           el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Ud fra din mastery og dine kampe med programmet.')),
         phoneCard(s))),
     logCard(s));
+}
+
+// Gameplan mod lane-modstanderen: fast del (matchup) + "Lige nu" og ændringer under kampen.
+function gameplanCard(p) {
+  if (!p) return null;
+  const chip = (label, value) => value ? el('span', { class: 'pill' }, `${label}: `, el('b', {}, value)) : null;
+  return el('div', { class: 'card plan' },
+    el('div', { class: 'plan-head' },
+      img(p.me.icon, p.me.name, 'plan-ic'), el('span', { class: 'muted' }, 'mod'), img(p.opponent.icon, p.opponent.name, 'plan-ic'),
+      el('h2', { style: 'margin:0' }, `Gameplan mod ${p.opponent.name}`),
+      p.winRate != null ? el('span', { class: 'wr ' + wrClass(p.winRate), style: 'margin-left:auto;font-size:18px' }, pct(p.winRate)) : null),
+    p.games ? el('div', { class: 'muted', style: 'font-size:12px;margin:-4px 0 8px' }, `Din win rate i ${num(p.games)} kampe`) : null,
+    el('div', { class: 'shards', style: 'margin:0 0 10px' },
+      chip('Lane', p.laneAdvantage === 'jævn' ? 'jævn' : p.laneAdvantage && `fordel ${p.laneAdvantage}`),
+      chip('Flest solo kills', p.soloKill === 'jævn' ? 'jævnt' : p.soloKill),
+      chip('Spillestil', p.playStyle)),
+    p.tip ? el('blockquote', { class: 'tip' }, p.tip, el('div', { class: 'muted', style: 'font-size:11px;margin-top:4px' }, 'Tip fra OP.GG')) : null,
+    p.scaling ? el('div', { style: 'margin:8px 0' }, p.scaling) : null,
+    p.oppCore.length ? el('div', { class: 'plan-build' }, el('span', { class: 'muted' }, `${p.opponent.name} bygger typisk`), p.oppCore.map((it) => img(it.icon, it.name))) : null,
+    p.myCore.length ? el('div', { class: 'plan-build' }, el('span', { class: 'muted' }, 'Dit core build'), p.myCore.map((it) => img(it.icon, it.name))) : null,
+    p.now ? [el('div', { class: 'plan-sub' }, 'Lige nu'), el('ul', { class: 'notes', style: 'margin-top:4px' }, p.now.map((l) => el('li', {}, l)))] : null,
+    p.log.length ? [el('div', { class: 'plan-sub' }, 'Ændringer'), el('ul', { class: 'notes plan-log', style: 'margin-top:4px' }, p.log.slice(0, 6).map((l) => el('li', {}, el('span', { class: 'muted' }, clock(l.t) + ' '), l.text)))] : null,
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:8px' }, 'Fakta og valg - du bestemmer selv hvornår du går ind.'));
 }
 
 const fmtDur = (sec) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
@@ -407,6 +438,7 @@ function renderLive(s) {
         el('div', { class: 'meta' }, `${clock(L.gameTime)} · ${L.gameMode || ''} · ${L.me.kills}/${L.me.deaths}/${L.me.assists}`), statusLine(s), matchupLine(L.matchup), skillLine(L)),
       el('div', { class: 'right' }, el('div', { class: 'gold' }, gold(L.gold)), el('div', { class: 'meta' }, 'dit guld'))),
     adviceCard(L),
+    gameplanCard(s.plan),
     el('div', { class: 'grid' },
       el('div', { class: 'card' }, el('h2', {}, 'Scoreboard'),
         teamBlock(L.allies, 'Dit hold', 'ally', diff),
@@ -479,6 +511,7 @@ function render(s) {
     s.position !== 'ARAM' ? el('div', { class: 'roles' },
       el('button', { class: role ? '' : 'active', onclick: () => post('/api/role', { position: null }) }, 'Auto'),
       s.positions.map((p) => el('button', { class: role === p ? 'active' : '', onclick: () => post('/api/role', { position: p }) }, p))) : null,
+    gameplanCard(s.plan),
     el('div', { class: 'grid' },
       el('div', {}, runesCard(s), itemsCard(s)),
       el('div', {}, spellsCard(s), enemyCard(s), phoneCard(s))),
@@ -539,6 +572,7 @@ function overlayContent(s) {
         el('div', { class: 'c' + (a.canAfford ? ' ok' : '') }, a.canAfford ? 'RÅD NU' : `mangler ${num(Math.round(a.cost - L.gold))}`))),
       L.enemy.fed.length ? el('div', { class: 'ov-foot' }, 'Fed: ' + L.enemy.fed.join(', ')) : null,
       L.matchup && L.matchup.winRate != null ? el('div', { class: 'ov-foot' }, `Mod ${L.matchup.name}: ${pct(L.matchup.winRate)} WR`) : null,
+      s.plan && s.plan.log.length ? el('div', { class: 'ov-foot' }, `${clock(s.plan.log[0].t)} ${s.plan.log[0].text}`) : null,
     ];
   }
   if (s && s.champion) {
