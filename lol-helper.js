@@ -209,18 +209,57 @@ const runeName = (id) => dd.runes[id]?.name || String(id);
 const itemName = (id) => dd.items[id]?.name || String(id);
 const spellName = (id) => dd.spells[id]?.name || String(id);
 
+// Builds caches i hukommelsen og på disken i 6 timer: champion select bliver øjeblikkelig,
+// og programmet kan køre i dagevis uden at hænge fast på en gammel patch.
 const buildCache = new Map();
+const CACHE_TTL = 6 * 3600 * 1000;
+const CACHE_DIR = process.env.LOL_HELPER_CACHE || path.join(APP_DIR, 'cache');
 
-async function fetchBuild(region, mode, championId, position) {
-  const key = `${region}:${mode}:${championId}:${position}`;
-  if (!buildCache.has(key)) {
-    const url = `https://lol-api-champion.op.gg/api/${region}/champions/${mode}/${championId}/${position}`;
-    buildCache.set(key, getJson(url).then((j) => ({ ...j.data, version: j.meta?.version })).catch((e) => {
-      buildCache.delete(key);
-      throw e;
-    }));
-  }
-  return buildCache.get(key);
+async function fetchBuild(region, mode, championId, position, target) {
+  const key = `${region}_${mode}_${championId}_${position}${target ? `_vs${target}` : ''}`;
+  const hit = buildCache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL) return hit.promise;
+  const file = path.join(CACHE_DIR, `${key}.json`);
+  const promise = (async () => {
+    try {
+      if (Date.now() - fs.statSync(file).mtimeMs < CACHE_TTL) return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {}
+    const url = `https://lol-api-champion.op.gg/api/${region}/champions/${mode}/${championId}/${position}` +
+      (target ? `?target_champion=${target}` : '');
+    const j = await getJson(url);
+    const data = { ...j.data, version: j.meta?.version };
+    try {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(data));
+    } catch {}
+    return data;
+  })().catch((e) => {
+    buildCache.delete(key);
+    throw e;
+  });
+  buildCache.set(key, { promise, at: Date.now() });
+  return promise;
+}
+
+// Lane-modstanderen: den modstander der oftest spiller din rolle (OP.GG's rollefordeling).
+async function laneOpponent(cfg, position, enemyIds) {
+  if (!POSITIONS.includes(position) || !enemyIds.length) return null;
+  const rates = await Promise.all(enemyIds.map(async (id) => {
+    try {
+      const probe = await fetchBuild(cfg.region, 'ranked', id, 'MID');
+      return { id, rate: probe.summary?.positions?.find((p) => p.name === position)?.stats?.role_rate || 0 };
+    } catch {
+      return { id, rate: 0 };
+    }
+  }));
+  const best = rates.sort((a, b) => b.rate - a.rate)[0];
+  return best && best.rate >= 0.25 ? best.id : null;
+}
+
+// Din win rate mod en bestemt champion (OP.GG's counters-liste for din champion og rolle).
+function matchupStats(build, opponentId) {
+  const c = build?.counters?.find((x) => x.champion_id === Number(opponentId));
+  return c && c.play ? { games: c.play, winRate: c.win / c.play } : null;
 }
 
 // Finder build for championen. Uden rolle (blind pick) bruges championens hovedrolle.
@@ -317,7 +356,10 @@ function itemBlock(type, ids) {
   return { type, hideIfSummonerSpell: '', showIfSummonerSpell: '', items: [...counts].map(([id, count]) => ({ id: String(id), count })) };
 }
 
-function recommend(build, cfg, enemyIds) {
+// Matchup-data bruges kun når der er nok kampe bag (ellers er tallene støj).
+const MATCHUP_MIN_GAMES = 150;
+
+function recommend(build, cfg, enemyIds, matchup) {
   const enemy = cfg.adaptToEnemies && enemyIds.length ? analyzeEnemies(enemyIds) : null;
   const blocks = [];
   const notes = [];
@@ -327,8 +369,13 @@ function recommend(build, cfg, enemyIds) {
   const skillOrder = build.skills?.[0]?.order || [];
   const skills = { start: skillOrder.slice(0, 3), max: build.skill_masteries?.[0]?.ids || [] };
 
-  const start = rankOptions(build.starter_items, { buildChoice: 'popular' })[0];
-  if (start) blocks.push(itemBlock(`Start${skills.max.length ? ` - max ${skills.max.join(' > ')}` : ''}`, start.ids));
+  const vsName = matchup && (dd.champions[matchup.id]?.name || 'modstanderen');
+  if (matchup?.stats) notes.push(`Mod ${vsName}: ${pct(matchup.stats.winRate)} WR i ${matchup.stats.games.toLocaleString('da-DK')} kampe`);
+  const mStart = matchup?.build?.starter_items?.[0];
+  const useMStart = mStart && mStart.play >= MATCHUP_MIN_GAMES;
+  const start = useMStart ? mStart : rankOptions(build.starter_items, { buildChoice: 'popular' })[0];
+  if (useMStart) notes.push(`Start-items valgt til matchuppet mod ${vsName}`);
+  if (start) blocks.push(itemBlock(`Start${useMStart ? ` mod ${vsName}` : ''}${skills.max.length ? ` - max ${skills.max.join(' > ')}` : ''}`, start.ids));
 
   const cores = rankOptions(build.core_items, cfg);
   const core = cores[0];
@@ -359,11 +406,19 @@ function recommend(build, cfg, enemyIds) {
   if (late.length) blocks.push(itemBlock('Situationelle items', late));
   blocks.push(itemBlock('Forbrug', [2003, 2055]));
 
-  const runePages = (build.rune_pages || []).flatMap((p) => p.builds || []);
-  const runeOptions = rankOptions(runePages.length ? runePages : build.runes, cfg).slice(0, 3);
+  const pagesOf = (b) => {
+    const pages = (b?.rune_pages || []).flatMap((p) => p.builds || []);
+    return pages.length ? pages : b?.runes || [];
+  };
+  let runeOptions = rankOptions(pagesOf(build), cfg).slice(0, 3);
+  // Bedste rune-side i matchuppet først (fx "Mod Zed"), hvis der er nok kampe.
+  const mRune = rankOptions(pagesOf(matchup?.build), cfg).find((r) => r.play >= MATCHUP_MIN_GAMES);
+  if (mRune) {
+    runeOptions = [{ ...mRune, matchup: vsName }, ...runeOptions.filter((r) => perkKey(r) !== perkKey(mRune))].slice(0, 3);
+  }
   const spells = rankOptions(build.summoner_spells, { buildChoice: 'popular' })[0]?.ids || null;
 
-  return { blocks, notes, skills, runeOptions, spells, enemy };
+  return { blocks, notes, skills, runeOptions, spells, enemy, matchup: matchup && { id: matchup.id, name: vsName, stats: matchup.stats, manual: matchup.manual } };
 }
 
 // ---------- Anvend på klienten ----------
@@ -471,6 +526,7 @@ function livePlayer(p) {
     name: shortName(p),
     champ,
     team: p.team,
+    position: p.position || '',
     level: p.level || 1,
     kills: s.kills || 0,
     deaths: s.deaths || 0,
@@ -561,7 +617,9 @@ function analyzeLive(data, build) {
   const enemy = { fed, adShare, apShare, armorStackers, mrStackers, armorHeavy, mrHeavy, healers };
 
   const advice = liveAdvice(build, me, enemy, gold, data.gameData?.mapNumber || 11);
-  return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice };
+  const opponent = me.position ? enemies.find((p) => p.position === me.position) : null;
+  const matchup = opponent && { player: opponent, stats: matchupStats(build, opponent.champ?.key) };
+  return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice, matchup };
 }
 
 // 2-3 forslag fra championens egen item-pulje, scoret efter popularitet + modstandernes faktiske builds.
@@ -698,7 +756,10 @@ const app = {
   status: 'Starter...',
   pick: null,          // { championId, assignedPosition, gameMode, me, enemyIds }
   roleOverride: null,
+  opponentOverride: null, // lane-modstander valgt i vinduet
+  prefetched: null,       // champion hvis build allerede hentes (hover)
   runeIndex: 0,
+  appliedPerks: null,     // rune-siden vi selv har sat (så vi kan se om du har ændret den)
   build: null,         // { build, position }
   rec: null,
   applied: { pickKey: null, itemKey: null },
@@ -737,6 +798,12 @@ function liveView() {
     gameTime: L.gameTime,
     gameMode: L.gameMode,
     gold: L.gold,
+    matchup: L.matchup && {
+      name: L.matchup.player.champ?.name || L.matchup.player.name,
+      icon: L.matchup.player.champ?.icon,
+      winRate: L.matchup.stats?.winRate ?? null,
+      games: L.matchup.stats?.games ?? null,
+    },
     me: player(L.me),
     allies: team(L.allies, L.me.team),
     enemies: team(L.enemies, enemySide),
@@ -769,6 +836,7 @@ function viewModel() {
     ddVersion: dd.version,
     live: liveView(),
     remote: app.remote.enabled ? { urls: app.remote.urls } : null,
+    autostart: autostartSupported() ? autostartEnabled() : null,
   };
   if (!pick || !b || !rec) return base;
   const champ = dd.champions[pick.championId] || { name: `Champion ${pick.championId}` };
@@ -793,7 +861,16 @@ function viewModel() {
       shards: r.stat_mod_ids.map(runeName),
       games: r.play,
       winRate: r.win / r.play,
+      matchup: r.matchup || null,
     })),
+    matchup: rec.matchup && {
+      id: rec.matchup.id,
+      name: rec.matchup.name,
+      icon: dd.champions[rec.matchup.id]?.icon,
+      winRate: rec.matchup.stats?.winRate ?? null,
+      games: rec.matchup.stats?.games ?? null,
+      manual: rec.matchup.manual,
+    },
     spells: (app.appliedSpells || rec.spells || []).map((id) => ({ name: spellName(id), icon: dd.spells[id]?.icon })),
     skills: rec.skills,
     blocks: rec.blocks.map((bl) => ({
@@ -801,12 +878,60 @@ function viewModel() {
       items: bl.items.map((i) => ({ id: i.id, count: i.count, name: itemName(i.id), icon: dd.items[i.id]?.icon })),
     })),
     notes: rec.notes,
-    enemy: rec.enemy && {
-      champions: rec.enemy.champions.map((c) => ({ name: c.name, icon: c.icon })),
-      adShare: rec.enemy.adShare,
-      apShare: rec.enemy.apShare,
-    },
+    enemy: pick.enemyIds.length ? {
+      champions: pick.enemyIds.map((id) => ({ id, name: dd.champions[id]?.name || '?', icon: dd.champions[id]?.icon })),
+      adShare: rec.enemy?.adShare ?? null,
+      apShare: rec.enemy?.apShare ?? null,
+    } : null,
   };
+}
+
+// ---------- Start med computeren ----------
+
+const AUTOSTART_FILE = {
+  win32: path.join(process.env.APPDATA || '', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'LoL Rune Helper.lnk'),
+  darwin: path.join(os.homedir(), 'Library', 'LaunchAgents', 'dk.tvginvest.lolrunehelper.plist'),
+}[process.platform];
+
+const autostartSupported = () => Boolean(AUTOSTART_FILE);
+const autostartEnabled = () => Boolean(AUTOSTART_FILE) && fs.existsSync(AUTOSTART_FILE);
+// Som færdig programfil: start programmet selv. Fra kilde: node + scriptet.
+const launchCommand = () => (IS_SEA ? [process.execPath] : [process.execPath, path.join(__dirname, 'lol-helper.js')]);
+const xmlEscape = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+async function setAutostart(on) {
+  if (!on) {
+    fs.rmSync(AUTOSTART_FILE, { force: true });
+    return;
+  }
+  const [cmd, ...args] = launchCommand();
+  args.push('--autostart'); // starter uden at åbne browseren
+  if (process.platform === 'win32') {
+    // Genvej i Start-mappen (minimeret vindue). Værdier via miljøvariabler, så stier med mellemrum er sikre.
+    const ps = '$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:LRH_LNK);' +
+      '$s.TargetPath=$env:LRH_TARGET;$s.Arguments=$env:LRH_ARGS;$s.WorkingDirectory=$env:LRH_DIR;$s.WindowStyle=7;$s.Save()';
+    await new Promise((resolve, reject) => execFile('powershell.exe', ['-NoProfile', '-Command', ps], {
+      windowsHide: true,
+      env: { ...process.env, LRH_LNK: AUTOSTART_FILE, LRH_TARGET: cmd, LRH_ARGS: args.map((a) => `"${a}"`).join(' '), LRH_DIR: APP_DIR },
+    }, (err) => (err ? reject(err) : resolve())));
+  } else {
+    const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dk.tvginvest.lolrunehelper</string>
+  <key>ProgramArguments</key>
+  <array>${[cmd, ...args].map((a) => `<string>${xmlEscape(a)}</string>`).join('')}</array>
+  <key>WorkingDirectory</key><string>${xmlEscape(APP_DIR)}</string>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>${xmlEscape(path.join(APP_DIR, 'lol-helper.log'))}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(path.join(APP_DIR, 'lol-helper.log'))}</string>
+</dict>
+</plist>
+`;
+    fs.mkdirSync(path.dirname(AUTOSTART_FILE), { recursive: true });
+    fs.writeFileSync(AUTOSTART_FILE, plist);
+  }
 }
 
 const sseClients = new Set();
@@ -907,6 +1032,27 @@ function startWindowServer(port) {
       log(position ? `Rolle sat manuelt til ${position}.` : 'Rolle: automatisk.');
       return json(200, { ok: true });
     }
+    if (req.method === 'POST' && req.url === '/api/opponent') {
+      const { championId } = await readBody(req);
+      if (championId !== null && !app.pick?.enemyIds.includes(Number(championId))) return json(400, { error: 'Ikke på modstanderholdet' });
+      app.opponentOverride = championId === null ? null : Number(championId);
+      app.applied.itemKey = null; // løkken opdaterer med den nye modstander
+      return json(200, { ok: true });
+    }
+    if (req.method === 'POST' && req.url === '/api/autostart') {
+      if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
+      if (!autostartSupported()) return json(400, { error: 'Ikke understøttet her' });
+      const { enabled } = await readBody(req);
+      try {
+        await setAutostart(Boolean(enabled));
+        log(enabled ? 'Starter nu automatisk med computeren.' : 'Starter ikke længere automatisk.');
+        broadcast();
+        return json(200, { ok: true, enabled: autostartEnabled() });
+      } catch (e) {
+        log(`Fejl: kunne ikke ændre autostart: ${e.message}`);
+        return json(500, { error: e.message });
+      }
+    }
     json(404, { error: 'Ikke fundet' });
   });
 
@@ -936,10 +1082,13 @@ function titleFor() {
   return `${champ} ${app.build.position}`;
 }
 
+const perkKey = (r) => [...r.primary_rune_ids, ...r.secondary_rune_ids, ...r.stat_mod_ids].join(',');
+
 async function applyRuneChoice(index) {
   const rune = app.rec.runeOptions[index];
   await applyRunes(app.client, rune, titleFor());
   app.runeIndex = index;
+  app.appliedPerks = perkKey(rune);
   log(`  Runer: ${runeName(rune.primary_page_id)}: ${rune.primary_rune_ids.map(runeName).join(', ')} | ${runeName(rune.secondary_page_id)}: ${rune.secondary_rune_ids.map(runeName).join(', ')} | ${rune.stat_mod_ids.map(runeName).join(', ')}`);
 }
 
@@ -971,11 +1120,16 @@ async function handlePick(pick, pickKey, itemKey) {
     app.rec = null;
     app.runeIndex = 0;
     app.appliedSpells = null;
+    app.appliedPerks = null;
     const position = app.roleOverride || POSITION_MAP[pick.assignedPosition];
     app.build = await getBuild(cfg, pick.championId, position, pick.gameMode);
   }
   if (!app.build) return;
-  app.rec = recommend(app.build.build, cfg, pick.enemyIds);
+  const prevMatchup = app.rec?.matchup?.id ?? null;
+  app.rec = recommend(app.build.build, cfg, pick.enemyIds, await findMatchup(pick));
+  const matchupChanged = (app.rec.matchup?.id ?? null) !== prevMatchup;
+  // Rune-valgene kan være omrokeret (matchup-side først) - peg på den side der faktisk er sat.
+  if (app.appliedPerks) app.runeIndex = app.rec.runeOptions.findIndex((r) => perkKey(r) === app.appliedPerks);
 
   if (fullApply) {
     const stats = roleStats(app.build);
@@ -988,9 +1142,43 @@ async function handlePick(pick, pickKey, itemKey) {
     }
     if (app.rec.skills.start.length) log(`  Skills: start ${app.rec.skills.start.join(' > ')}, max ${app.rec.skills.max.join(' > ')}`);
   } else {
-    log(`Modstanderholdet ændrede sig - opdaterer items for ${champName}.`);
+    log(matchupChanged && app.rec.matchup
+      ? `Lane-modstander: ${app.rec.matchup.name}${app.rec.matchup.manual ? ' (valgt manuelt)' : ''} - opdaterer for ${champName}.`
+      : `Modstanderholdet ændrede sig - opdaterer items for ${champName}.`);
+    const top = app.rec.runeOptions[0];
+    if (cfg.setRunes && top?.matchup && app.appliedPerks && perkKey(top) !== app.appliedPerks) {
+      // Matchup-runer kun hvis du ikke selv har ændret auto-siden.
+      if (await autoPageUntouched()) {
+        await applyRuneChoice(0);
+        log(`  Runer skiftet til matchuppet mod ${top.matchup}.`);
+      } else {
+        log(`  Du har selv ændret rune-siden - matchup-runerne mod ${top.matchup} ligger som fane i vinduet.`);
+      }
+    }
   }
   await applyItems();
+}
+
+async function autoPageUntouched() {
+  try {
+    const page = await lcu(app.client, 'GET', '/lol-perks/v1/currentpage');
+    return Boolean(page?.name?.startsWith(PREFIX)) && (page.selectedPerkIds || []).join(',') === app.appliedPerks;
+  } catch {
+    return false;
+  }
+}
+
+async function findMatchup(pick) {
+  if (pick.gameMode === 'ARAM' || !POSITIONS.includes(app.build.position)) return null;
+  const id = app.opponentOverride ?? await laneOpponent(app.cfg, app.build.position, pick.enemyIds);
+  if (!id) return null;
+  let build = null;
+  try {
+    build = await fetchBuild(app.cfg.region, 'ranked', pick.championId, app.build.position, id);
+  } catch (e) {
+    log(`  Kunne ikke hente matchup-data: ${e.message}`);
+  }
+  return { id, build, stats: matchupStats(app.build.build, id), manual: app.opponentOverride != null };
 }
 
 async function tick() {
@@ -1005,7 +1193,9 @@ async function tick() {
     if (app.applied.pickKey) {
       app.applied = { pickKey: null, itemKey: null };
       app.roleOverride = null;
+      app.opponentOverride = null;
     }
+    app.prefetched = null;
     return cfg.pollMs;
   }
   const session = await lcu(app.client, 'GET', '/lol-champ-select/v1/session');
@@ -1014,13 +1204,19 @@ async function tick() {
     .some((a) => a.actorCellId === session.localPlayerCellId && a.type === 'pick' && !a.completed);
   if (!(me?.championId > 0) || pickPending) {
     setStatus('Champion select - venter på at du låser en champion.');
+    // Hent buildet allerede mens du hover, så runerne sættes i samme sekund du låser.
+    const hover = me?.championId || me?.championPickIntent;
+    if (hover > 0 && hover !== app.prefetched) {
+      app.prefetched = hover;
+      getBuild(cfg, hover, app.roleOverride || POSITION_MAP[me.assignedPosition], 'CLASSIC').catch(() => {});
+    }
     return cfg.pollMs;
   }
   setStatus('Champion select - build sat.');
   const enemyIds = (session.theirTeam || []).map((m) => m.championId).filter((id) => id > 0).sort((a, b) => a - b);
   const pickKey = `${me.championId}:${me.assignedPosition}:${app.roleOverride || ''}`;
-  const itemKey = `${pickKey}|${enemyIds.join(',')}`;
-  if (pickKey !== app.applied.pickKey || (cfg.adaptToEnemies && itemKey !== app.applied.itemKey)) {
+  const itemKey = `${pickKey}|${enemyIds.join(',')}|${app.opponentOverride ?? ''}`;
+  if (pickKey !== app.applied.pickKey || itemKey !== app.applied.itemKey) {
     const gameMode = pickKey === app.applied.pickKey && app.pick ? app.pick.gameMode
       : await lcu(app.client, 'GET', '/lol-gameflow/v1/session').then(
         (f) => f?.gameData?.queue?.gameMode || f?.map?.gameMode || 'CLASSIC', () => 'CLASSIC');
@@ -1040,6 +1236,21 @@ async function main() {
   if (process.env.LOL_HELPER_PORT) app.cfg.port = Number(process.env.LOL_HELPER_PORT);
   if (process.env.LOL_HELPER_NO_WINDOW) app.cfg.openWindow = false;
   if (process.env.LOL_HELPER_REMOTE) app.cfg.remoteAccess = true;
+  if (process.argv.includes('--autostart')) app.cfg.openWindow = false;
+
+  // Kører programmet allerede? Så åbn bare dets vindue i stedet for at starte en kopi.
+  if (app.cfg.port) {
+    try {
+      const running = await fetch(`http://127.0.0.1:${app.cfg.port}/state`, { signal: AbortSignal.timeout(1500) }).then((r) => r.json());
+      if (running && 'ddVersion' in running) {
+        console.log('LoL Rune Helper kører allerede - åbner vinduet.');
+        if (!process.argv.includes('--autostart')) openBrowser(`http://127.0.0.1:${app.cfg.port}`);
+        setTimeout(() => process.exit(0), 1500);
+        return;
+      }
+    } catch {}
+  }
+
   log('LoL Rune Helper starter...');
   const ddVersion = await loadStaticData();
   log(`Data Dragon ${ddVersion} hentet. Builds fra OP.GG (${app.cfg.region}, ${app.cfg.buildChoice}).`);

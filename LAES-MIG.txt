@@ -5,6 +5,17 @@ FØR KAMPEN (champion select)
 Når du låser en champion, sætter programmet automatisk runer, summoner spells og
 et item set i butikken. Items tilpasses modstanderholdet.
 
+MATCHUP
+Programmet gætter din lane-modstander (eller klik på dem i vinduet) og viser din
+win rate mod dem. Er der nok kampe, kommer en "Mod <champion>"-rune-side først og
+start-items vælges til matchuppet. Har du selv ændret rune-siden, røres den ikke -
+matchup-runerne ligger så som en fane du kan klikke på.
+
+AUTOSTART
+Klik "Autostart: fra" øverst i vinduet for at starte programmet i baggrunden, når du
+logger ind (det åbner ikke browseren). Starter du det igen, åbner det bare vinduet.
+Builds gemmes i mappen "cache" i 6 timer, så champion select går hurtigt.
+
 UNDER KAMPEN (live)
 Vinduet viser 2-3 købsforslag med begrundelse ud fra dit guld, dit build og hvad
 modstanderne faktisk bygger (fx anti-heal mod healere, armor mod en fed AD-spiller,

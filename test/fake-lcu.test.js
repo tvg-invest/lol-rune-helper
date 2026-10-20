@@ -44,6 +44,7 @@ const server = http.createServer((req, res) => {
     if (key === 'GET /lol-champ-select/v1/session') return send(200, session());
     if (key === 'PATCH /lol-champ-select/v1/session/my-selection') return send(204);
     if (key === 'GET /lol-perks/v1/pages') return send(200, state.pages);
+    if (key === 'GET /lol-perks/v1/currentpage') return send(200, state.pages.find((p) => p.current) || null);
     if (req.method === 'DELETE' && req.url.startsWith('/lol-perks/v1/pages/')) {
       const id = Number(req.url.split('/').pop());
       state.pages = state.pages.filter((p) => p.id !== id);
@@ -122,16 +123,19 @@ server.listen(0, '127.0.0.1', async () => {
   const [cmd, args] = process.env.HELPER_BIN
     ? [path.resolve(process.env.HELPER_BIN), []]
     : [process.execPath, [path.join(__dirname, '..', 'lol-helper.js')]];
-  const child = spawn(cmd, args, {
-    env: {
-      ...process.env,
-      LOL_HELPER_LCU: `http:${port}:${PASSWORD}`,
-      LOL_HELPER_LIVE: `http:${livePort}`,
-      LOL_HELPER_PORT: '0',
-      LOL_HELPER_NO_WINDOW: '1',
-      LOL_HELPER_REMOTE: process.env.NO_REMOTE ? '' : '1',
-    },
-  });
+  // Midlertidig cache og hjemmemappe, så testen ikke rører rigtige filer (fx autostart i ~/Library).
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lol-helper-test-'));
+  const env = {
+    ...process.env,
+    HOME: tmp,
+    LOL_HELPER_CACHE: path.join(tmp, 'cache'),
+    LOL_HELPER_LCU: `http:${port}:${PASSWORD}`,
+    LOL_HELPER_LIVE: `http:${livePort}`,
+    LOL_HELPER_PORT: '0',
+    LOL_HELPER_NO_WINDOW: '1',
+    LOL_HELPER_REMOTE: process.env.NO_REMOTE ? '' : '1',
+  };
+  const child = spawn(cmd, args, { env });
   const tokenFile = path.join(process.env.HELPER_BIN ? path.dirname(cmd) : path.join(__dirname, '..'), 'remote-token.txt');
   const hadToken = fs.existsSync(tokenFile);
   let out = '';
@@ -147,11 +151,12 @@ server.listen(0, '127.0.0.1', async () => {
     const page = await gui('GET', '/');
     assert(page.body.includes('LoL Rune Helper'), 'vinduet serveres');
 
-    // 1) Hover Ahri uden at låse -> intet må ske
+    // 1) Hover Ahri uden at låse -> intet sættes, men buildet hentes allerede (disk-cache)
     state.phase = 'ChampSelect';
     state.championId = 103;
     await wait(2500);
     assert.strictEqual(runePosts(), 0, 'må ikke sætte runer før champion er låst');
+    assert(fs.existsSync(path.join(env.LOL_HELPER_CACHE, 'GLOBAL_ranked_103_MID.json')), 'build hentet på forhånd under hover');
 
     // 2) Lås Ahri
     state.pickCompleted = true;
@@ -169,11 +174,24 @@ server.listen(0, '127.0.0.1', async () => {
     assert.deepStrictEqual(autoSet().associatedChampions, [103]);
     assert.strictEqual(count('PUT'), 1, 'kun anvendt én gang');
 
-    // 3) Modstanderne vælger et AD-tungt hold med healing -> kun items opdateres
+    // 3) Modstanderne vælger et AD-tungt hold med healing -> items opdateres, Zed gættes som lane-modstander,
+    //    og runerne skiftes kun til matchup-siden (auto-siden er urørt)
     state.enemies = [122, 238, 202, 104, 266]; // Darius, Zed, Jhin, Graves, Aatrox
     await waitFor(() => count('PUT') === 2, 20000, 'item set efter modstandere');
     await wait(500);
-    assert.strictEqual(runePosts(), 2, 'runer sættes ikke igen når kun modstanderne ændrer sig');
+    let st3 = (await gui('GET', '/state')).body;
+    assert.strictEqual(st3.matchup?.name, 'Zed', `lane-modstander gættet: ${JSON.stringify(st3.matchup)}`);
+    assert(st3.matchup.winRate > 0.3 && st3.matchup.games > 100, 'matchup win rate fra OP.GG');
+    assert(st3.notes.some((n) => n.startsWith('Mod Zed:')), 'matchup-note');
+    if (st3.runeOptions[0].matchup) {
+      assert.strictEqual(st3.runeOptions[0].matchup, 'Zed');
+      // Den aktive side er matchup-siden: enten skiftet nu, eller den var allerede identisk.
+      assert.strictEqual(st3.runeIndex, 0, 'matchup-siden er den aktive');
+      if (runePosts() === 3) assert(out.includes('Runer skiftet til matchuppet mod Zed'), 'log om matchup-runer');
+      else assert.strictEqual(runePosts(), 2, 'samme side -> intet at skifte');
+    } else {
+      assert.strictEqual(runePosts(), 2, 'ingen matchup-rune -> runer røres ikke');
+    }
     const titles = autoSet().blocks.map((b) => b.type);
     assert(titles.includes('Mod deres hold'), `counter-blok mangler: ${titles}`);
     const boots = autoSet().blocks.find((b) => b.type === 'Støvler');
@@ -191,6 +209,45 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(st.runeIndex, 1);
     assert.strictEqual(autoPage().selectedPerkIds[0], calls.filter((c) => c.method === 'POST').pop().body.selectedPerkIds[0]);
     assert.strictEqual(state.pages.filter((p) => p.name.startsWith('Auto: ')).length, 1, 'stadig kun én auto-side');
+
+    // 4b) Du ændrer selv rune-siden, og vælger så Zed som modstander manuelt -> din side røres ikke
+    autoPage().selectedPerkIds = [...autoPage().selectedPerkIds].reverse();
+    const postsBeforeManual = runePosts();
+    assert.strictEqual((await gui('POST', '/api/opponent', { championId: 999 })).status, 400, 'ukendt modstander afvises');
+    const putsOpp = count('PUT');
+    assert.strictEqual((await gui('POST', '/api/opponent', { championId: 202 })).status, 200);
+    await waitFor(() => count('PUT') > putsOpp, 20000, 'opdatering efter manuel modstander');
+    st = (await gui('GET', '/state')).body;
+    assert.strictEqual(st.matchup.name, 'Jhin');
+    assert.strictEqual(st.matchup.manual, true);
+    assert.strictEqual(runePosts(), postsBeforeManual, 'din egen rune-side overskrives ikke');
+    const putsAuto = count('PUT');
+    await gui('POST', '/api/opponent', { championId: null });
+    await waitFor(() => count('PUT') > putsAuto, 20000, 'tilbage til automatisk modstander');
+    st = (await gui('GET', '/state')).body;
+    assert.strictEqual(st.matchup.name, 'Zed', 'automatisk igen');
+    assert.strictEqual(runePosts(), postsBeforeManual, 'stadig ikke overskrevet');
+
+    // 4c) Kun én kopi: en ny start på samme port lukker sig selv
+    const winPort = /Vindue: http:\/\/127\.0\.0\.1:(\d+)/.exec(out)[1];
+    const second = spawn(cmd, [...args, '--autostart'], { env: { ...env, LOL_HELPER_PORT: winPort } });
+    let out2 = '';
+    second.stdout.on('data', (d) => (out2 += d));
+    const code2 = await new Promise((resolve) => { const t = setTimeout(() => { second.kill(); resolve('timeout'); }, 10000); second.on('exit', (c) => { clearTimeout(t); resolve(c); }); });
+    assert.strictEqual(code2, 0, `anden kopi skal lukke: ${code2} ${out2}`);
+    assert(out2.includes('kører allerede'), out2);
+
+    // 4d) Autostart til/fra (macOS: LaunchAgent i den midlertidige hjemmemappe)
+    if (process.platform === 'darwin') {
+      const plist = path.join(tmp, 'Library', 'LaunchAgents', 'dk.tvginvest.lolrunehelper.plist');
+      assert.strictEqual(st.autostart, false);
+      assert.strictEqual((await gui('POST', '/api/autostart', { enabled: true })).body.enabled, true);
+      const xml = fs.readFileSync(plist, 'utf8');
+      assert(xml.includes('<string>--autostart</string>') && xml.includes(`<string>${cmd}</string>`), xml);
+      assert.strictEqual((await gui('GET', '/state')).body.autostart, true);
+      assert.strictEqual((await gui('POST', '/api/autostart', { enabled: false })).body.enabled, false);
+      assert(!fs.existsSync(plist), 'plist fjernet');
+    }
 
     // Valgfrit: HOLD_SELECT=ms holder champion select åben, fx til node test/screenshot.js <url>.
     if (process.env.HOLD_SELECT) {
@@ -234,6 +291,8 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(L.allies.dragons, 1, 'drage til mit hold');
     assert.strictEqual(L.allies.turrets, 1, 'tårn (T2) til mit hold');
     assert.deepStrictEqual(L.enemy.fed, ['Zed'], 'Zed er fed');
+    assert.strictEqual(L.matchup?.name, 'Zed', 'live lane-modstander ud fra position');
+    assert(L.matchup.winRate > 0.3, 'live matchup win rate');
     assert(L.enemy.healers.includes('Soraka') && L.enemy.healers.includes('Darius'), 'healere');
     assert(L.enemy.armorStackers.includes('Darius'), 'Darius bygger armor');
     assert(L.enemy.adShare > 0.6, `AD-tung trussel: ${L.enemy.adShare}`);
@@ -341,5 +400,6 @@ server.listen(0, '127.0.0.1', async () => {
     server.close();
     liveServer.close();
     if (!hadToken) fs.rmSync(tokenFile, { force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

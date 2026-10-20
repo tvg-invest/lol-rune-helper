@@ -65,7 +65,13 @@
   .item .count { position: absolute; right: 2px; bottom: 0; font-size: 11px; font-weight: 700; text-shadow: 0 0 3px #000, 0 0 3px #000; }
   .block.counter .title { color: var(--blue); }
   .enemies { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
-  .enemies img { width: 38px; height: 38px; border-radius: 6px; border: 1px solid var(--red); }
+  .enemies img { width: 38px; height: 38px; border-radius: 6px; border: 1px solid var(--red); display: block; }
+  .enemy-pick { padding: 0; border: 2px solid transparent; border-radius: 8px; background: none; }
+  .enemy-pick.active { border-color: var(--gold); }
+  .matchup { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-top: 4px; }
+  .matchup img { width: 20px; height: 20px; border-radius: 4px; }
+  .matchup b { color: var(--gold2); }
+  a { color: var(--gold2); }
   .bar { height: 8px; border-radius: 4px; overflow: hidden; display: flex; background: var(--panel2); margin: 6px 0 4px; }
   .bar .ad { background: var(--red); } .bar .ap { background: #4f8cff; }
   .notes { margin: 10px 0 0; padding-left: 18px; color: var(--text); }
@@ -173,11 +179,15 @@ function runesCard(s) {
   const allNames = s.runeOptions.map((r) => [...r.primaryRunes, ...r.secondaryRunes].map((x) => x.name));
   const diffOf = (i) => allNames[i].find((n) => allNames.some((other, j) => j !== i && !other.includes(n))) || '';
   const tabs = el('div', { class: 'tabs' }, s.runeOptions.map((r, i) =>
-    el('button', { class: 'tab' + (i === s.runeIndex ? ' active' : ''), onclick: () => post('/api/rune', { index: i }) },
+    el('button', {
+      class: 'tab' + (i === s.runeIndex ? ' active' : ''),
+      onclick: () => post('/api/rune', { index: i }),
+      title: r.matchup ? `Win rate kun i kampe mod ${r.matchup} - kan ikke sammenlignes direkte med de andre` : null,
+    },
       img(r.primaryRunes[0].icon, r.primaryRunes[0].name),
       img(r.secondary.icon, r.secondary.name, 'sub'),
       el('span', {}, r.primaryRunes[0].name, ' ', el('small', {}, pct(r.winRate) + ' · ' + num(r.games)),
-        diffOf(i) ? el('small', { class: 'diff' }, 'med ' + diffOf(i)) : null))));
+        r.matchup ? el('small', { class: 'diff' }, 'Mod ' + r.matchup) : diffOf(i) ? el('small', { class: 'diff' }, 'med ' + diffOf(i)) : null))));
   if (!opt) return el('div', { class: 'card' }, el('h2', {}, 'Runer'), el('div', { class: 'muted' }, 'Ingen rune-data.'));
   const runeEl = (r, key) => el('div', { class: 'rune' + (key ? ' keystone' : '') }, img(r.icon, r.name), r.name);
   return el('div', { class: 'card' },
@@ -215,13 +225,19 @@ function enemyCard(s) {
       el('div', { class: 'muted' }, 'Ikke synligt endnu. Items tilpasses automatisk, når de vælger.'));
   }
   const total = s.enemy.adShare + s.enemy.apShare || 1;
+  const oppId = s.matchup && s.matchup.id;
   return el('div', { class: 'card' },
     el('h2', {}, 'Modstanderholdet'),
-    el('div', { class: 'enemies' }, s.enemy.champions.map((c) => img(c.icon, c.name))),
-    el('div', { class: 'bar' },
-      el('div', { class: 'ad', style: `width:${(s.enemy.adShare / total) * 100}%` }),
-      el('div', { class: 'ap', style: `width:${(s.enemy.apShare / total) * 100}%` })),
-    el('div', { class: 'muted', style: 'font-size:12px' }, `AD ${pct(s.enemy.adShare)} · AP ${pct(s.enemy.apShare)}`),
+    el('div', { class: 'enemies' }, s.enemy.champions.map((c) =>
+      el('button', { class: 'enemy-pick' + (c.id === oppId ? ' active' : ''), title: `${c.name} - klik: min lane-modstander`, onclick: () => post('/api/opponent', { championId: c.id }) }, img(c.icon, c.name)))),
+    el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:6px' },
+      oppId ? `Lane-modstander: ${s.matchup.name}${s.matchup.manual ? ' (valgt af dig) ' : ' (gættet) '}` : 'Klik på din lane-modstander for matchup-runer. ',
+      s.matchup && s.matchup.manual ? el('a', { href: '#', onclick: (e) => { e.preventDefault(); post('/api/opponent', { championId: null }); } }, 'automatisk') : null),
+    s.enemy.adShare != null ? [
+      el('div', { class: 'bar' },
+        el('div', { class: 'ad', style: `width:${(s.enemy.adShare / total) * 100}%` }),
+        el('div', { class: 'ap', style: `width:${(s.enemy.apShare / total) * 100}%` })),
+      el('div', { class: 'muted', style: 'font-size:12px' }, `AD ${pct(s.enemy.adShare)} · AP ${pct(s.enemy.apShare)}`)] : null,
     s.notes.length ? el('ul', { class: 'notes' }, s.notes.map((n) => el('li', {}, n))) : el('div', { class: 'muted', style: 'margin-top:8px' }, 'Intet særligt at tilpasse.'));
 }
 
@@ -276,7 +292,7 @@ function renderLive(s) {
     el('header', {},
       img(L.me.champion.icon, L.me.champion.name, 'champ'),
       el('div', {}, el('h1', {}, el('span', { class: 'live-badge' }, 'LIVE'), L.me.champion.name),
-        el('div', { class: 'meta' }, `${clock(L.gameTime)} · ${L.gameMode || ''} · ${L.me.kills}/${L.me.deaths}/${L.me.assists}`), statusLine(s)),
+        el('div', { class: 'meta' }, `${clock(L.gameTime)} · ${L.gameMode || ''} · ${L.me.kills}/${L.me.deaths}/${L.me.assists}`), statusLine(s), matchupLine(L.matchup)),
       el('div', { class: 'right' }, el('div', { class: 'gold' }, gold(L.gold)), el('div', { class: 'meta' }, 'dit guld'))),
     adviceCard(L),
     el('div', { class: 'grid' },
@@ -319,10 +335,16 @@ function phoneCard(s) {
         s.remote.urls.map((u) => el('div', {}, el('span', { class: 'muted' }, u.label + ': '), el('a', { href: u.url }, u.url))))));
 }
 
+function matchupLine(m) {
+  if (!m) return null;
+  return el('div', { class: 'matchup' }, 'Mod', img(m.icon, m.name), el('b', {}, m.name),
+    m.winRate != null ? `${pct(m.winRate)} WR · ${num(m.games)} kampe` : el('span', { class: 'muted' }, 'ingen matchup-data'));
+}
+
 function render(s) {
   $app.replaceChildren();
   if (!s) return;
-  if (['127.0.0.1', 'localhost'].includes(location.hostname)) $app.append(toolbar());
+  if (['127.0.0.1', 'localhost'].includes(location.hostname)) $app.append(toolbar(s));
   if (s.live) return renderLive(s);
   if (!s.champion) {
     $app.append(
@@ -336,7 +358,7 @@ function render(s) {
   $app.append(
     el('header', {},
       img(s.champion.icon, s.champion.name, 'champ'),
-      el('div', {}, el('h1', {}, s.champion.name), el('div', { class: 'meta' }, `${s.position} · patch ${s.patch || '?'} · ${s.gameMode}`), statusLine(s)),
+      el('div', {}, el('h1', {}, s.champion.name), el('div', { class: 'meta' }, `${s.position} · patch ${s.patch || '?'} · ${s.gameMode}`), statusLine(s), matchupLine(s.matchup)),
       s.winRate != null ? el('div', { class: 'right' }, el('div', { class: 'wr' }, pct(s.winRate)), el('div', { class: 'meta' }, `${num(s.games)} kampe · ${s.statsScope}`)) : null),
     s.position !== 'ARAM' ? el('div', { class: 'roles' },
       el('button', { class: role ? '' : 'active', onclick: () => post('/api/role', { position: null }) }, 'Auto'),
@@ -400,6 +422,7 @@ function overlayContent(s) {
           el('div', { class: 'r' }, a.reasons.find((r) => !r.startsWith('Du er i gang')) || a.reasons[0])),
         el('div', { class: 'c' + (a.canAfford ? ' ok' : '') }, a.canAfford ? 'RÅD NU' : `mangler ${num(Math.round(a.cost - L.gold))}`))),
       L.enemy.fed.length ? el('div', { class: 'ov-foot' }, 'Fed: ' + L.enemy.fed.join(', ')) : null,
+      L.matchup && L.matchup.winRate != null ? el('div', { class: 'ov-foot' }, `Mod ${L.matchup.name}: ${pct(L.matchup.winRate)} WR`) : null,
     ];
   }
   if (s && s.champion) {
@@ -409,6 +432,7 @@ function overlayContent(s) {
       el('div', { class: 'ov-head' }, el('b', {}, `${s.champion.name} ${s.position}`), el('span', { class: 'muted' }, s.winRate != null ? pct(s.winRate) : '')),
       r ? el('div', { class: 'ov-row' }, img(r.primaryRunes[0].icon, r.primaryRunes[0].name), el('div', { class: 't' }, el('div', { class: 'n' }, r.primaryRunes[0].name), el('div', { class: 'r' }, r.secondary.name))) : null,
       core ? el('div', { class: 'ov-row' }, core.items.map((it) => img(it.icon, it.name)), el('div', { class: 'r' }, 'Core')) : null,
+      s.matchup && s.matchup.winRate != null ? el('div', { class: 'ov-foot' }, `Mod ${s.matchup.name}: ${pct(s.matchup.winRate)} WR`) : null,
     ];
   }
   return [el('div', { class: 'muted' }, s ? s.status : 'Starter...')];
@@ -434,8 +458,12 @@ function trackAffordable(s) {
   affordable = now;
 }
 
-function toolbar() {
+function toolbar(s) {
   return el('div', { class: 'toolbar' },
+    s.autostart != null ? el('button', {
+      title: 'Starter programmet i baggrunden når du logger ind (uden at åbne browseren)',
+      onclick: () => post('/api/autostart', { enabled: !s.autostart }),
+    }, s.autostart ? 'Autostart: til' : 'Autostart: fra') : null,
     el('button', { onclick: () => { settings.sound = !settings.sound; saveSettings(); render(lastState); } }, settings.sound ? 'Lyd: til' : 'Lyd: fra'),
     el('button', { onclick: openOverlay, title: 'Lille vindue der altid ligger øverst - kræver Borderless i League' }, pip ? 'Overlay åben' : 'Overlay'));
 }

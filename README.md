@@ -21,6 +21,15 @@ Når du har **låst** en champion:
 
 Rolle: tildelt rolle i draft/ranked, ellers championens hovedrolle. ARAM har egne data. Arena springes over.
 
+## Matchup, hastighed og autostart
+
+- **Lane-modstander:** den modstander hvis OP.GG-rollefordeling passer bedst til din rolle (min. 25%), eller den du klikker på i vinduet. Under kampen: samme `position` i live-API'en.
+- **Matchup-data:** `?target_champion=<id>` på OP.GG giver runer/items kun fra kampe mod den champion. Bruges kun med mindst 150 kampe: "Mod X"-rune-side først og start-items. Win rate mod modstanderen fra `counters`.
+- **Din side er din:** når modstanderen kendes efter du har låst, skiftes runerne kun hvis den aktive side stadig er programmets urørte auto-side (`/lol-perks/v1/currentpage`).
+- **Hurtigt:** buildet hentes mens du hover; OP.GG-svar caches i hukommelsen og i `cache/` i 6 timer.
+- **Én kopi:** startes programmet igen, åbner det bare det kørende vindue.
+- **Autostart:** knap i vinduet. Windows: genvej i Start-mappen (minimeret). macOS: LaunchAgent `~/Library/LaunchAgents/dk.tvginvest.lolrunehelper.plist`. Starter med `--autostart` (åbner ikke browseren).
+
 ## Under kampen (live)
 
 Læser spillets [Live Client Data API](https://developer.riotgames.com/docs/lol) (`https://127.0.0.1:2999/liveclientdata/allgamedata`) hvert 2. sekund og viser i vinduet:

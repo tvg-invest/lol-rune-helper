@@ -2,3 +2,5 @@
 .DS_Store
 dist/
 remote-token.txt
+cache/
+lol-helper.log
