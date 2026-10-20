@@ -73,6 +73,43 @@
   .empty .big { font-size: 20px; color: var(--gold2); margin-bottom: 6px; }
   pre.log { margin: 0; white-space: pre-wrap; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; color: var(--muted); max-height: 220px; overflow: auto; }
   details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  /* Live */
+  .live-badge { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .1em; color: #fff; background: var(--red); border-radius: 4px; padding: 1px 6px; margin-right: 6px; vertical-align: middle; }
+  .gold { font-size: 26px; font-weight: 700; color: var(--gold); }
+  .advice { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  .pick { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .pick.adapted { border-color: var(--blue); }
+  .pick .top { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+  .pick .top img { width: 52px; height: 52px; border-radius: 8px; border: 1px solid var(--line); flex: none; }
+  .pick .name { font-weight: 600; color: var(--gold2); }
+  .badge { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; margin-top: 3px; }
+  .badge.ok { background: rgba(63,191,127,.15); color: var(--green); }
+  .badge.no { background: rgba(139,149,167,.15); color: var(--muted); }
+  .pick ul { margin: 0; padding-left: 18px; font-size: 13px; }
+  .pick .part { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .pick .part img { width: 22px; height: 22px; border-radius: 4px; }
+  .team { margin-bottom: 14px; }
+  .team-head { display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .team-head b { color: var(--text); font-size: 14px; }
+  .team.enemy .team-head b { color: var(--red); }
+  .team.ally .team-head b { color: var(--blue); }
+  .prow { display: grid; grid-template-columns: 34px minmax(90px, 1.2fr) 70px 40px minmax(0, 3fr); gap: 8px; align-items: center; padding: 5px 0; border-top: 1px solid var(--line); font-size: 13px; }
+  .prow.me { background: rgba(200,170,110,.08); }
+  .prow.dead { opacity: .45; }
+  .prow > img { width: 34px; height: 34px; border-radius: 6px; }
+  .prow .pn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prow .lvl { color: var(--muted); font-size: 11px; }
+  .fedtag { font-size: 10px; font-weight: 700; color: #111; background: var(--gold); border-radius: 3px; padding: 0 4px; margin-left: 4px; }
+  .prow .its { display: flex; gap: 3px; flex-wrap: wrap; }
+  .prow .its img { width: 24px; height: 24px; border-radius: 4px; border: 1px solid var(--line); }
+  @media (max-width: 640px) {
+    .prow { grid-template-columns: 34px minmax(0, 1fr) 64px; }
+    .prow .cs { display: none; }
+    .prow .its { grid-column: 2 / -1; }
+  }
+  .phone { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .phone .qr { background: #fff; padding: 8px; border-radius: 8px; }
+  .phone a { color: var(--gold2); word-break: break-all; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -167,12 +204,108 @@ function enemyCard(s) {
     s.notes.length ? el('ul', { class: 'notes' }, s.notes.map((n) => el('li', {}, n))) : el('div', { class: 'muted', style: 'margin-top:8px' }, 'Intet særligt at tilpasse.'));
 }
 
+const gold = (x) => num(Math.round(x)) + ' g';
+const clock = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+
+function adviceCard(L) {
+  return el('div', { class: 'card' },
+    el('h2', {}, 'Overvej at købe'),
+    el('div', { class: 'muted', style: 'font-size:12px;margin:-6px 0 12px' }, 'Forslag ud fra dit build og hvad modstanderne bygger - du bestemmer.'),
+    L.advice.length ? el('div', { class: 'advice' }, L.advice.map((a) =>
+      el('div', { class: 'pick' + (a.adapted ? ' adapted' : '') },
+        el('div', { class: 'top' }, img(a.icon, a.name),
+          el('div', {}, el('div', { class: 'name' }, a.name),
+            a.canAfford ? el('span', { class: 'badge ok' }, `Råd nu · ${gold(a.cost)}`) : el('span', { class: 'badge no' }, `${gold(a.cost)} · mangler ${gold(a.cost - L.gold)}`))),
+        el('ul', {}, a.reasons.map((r) => el('li', {}, r))),
+        a.part ? el('div', { class: 'part' }, 'Råd nu til delen', img(a.part.icon, a.part.name), `${a.part.name} (${gold(a.part.cost)})`) : null)))
+      : el('div', { class: 'muted' }, 'Ingen forslag endnu - mangler build-data for championen.'));
+}
+
+function enemyLiveCard(L) {
+  const e = L.enemy;
+  const line = (label, list) => list.length ? el('li', {}, el('b', {}, label + ': '), list.join(', ')) : null;
+  const lines = [line('Fed', e.fed), line('Bygger armor', e.armorStackers), line('Bygger magic resist', e.mrStackers), line('Healing', e.healers)].filter(Boolean);
+  return el('div', { class: 'card' },
+    el('h2', {}, 'Modstanderne'),
+    el('div', { class: 'bar' },
+      el('div', { class: 'ad', style: `width:${e.adShare * 100}%` }),
+      el('div', { class: 'ap', style: `width:${e.apShare * 100}%` })),
+    el('div', { class: 'muted', style: 'font-size:12px' }, `Trussel: AD ${pct(e.adShare)} · AP ${pct(e.apShare)} (vægtet efter items og kills)`),
+    lines.length ? el('ul', { class: 'notes' }, lines) : el('div', { class: 'muted', style: 'margin-top:8px' }, 'Ingen særlige trusler endnu.'));
+}
+
+function teamBlock(t, label, cls, diff) {
+  return el('div', { class: 'team ' + cls },
+    el('div', { class: 'team-head' },
+      el('b', {}, label),
+      [`${t.kills} kills`, `item-guld ${gold(t.itemGold)}` + (diff ? ` (${diff > 0 ? '+' : ''}${num(diff)})` : ''),
+        `drager ${t.dragons}`, `baron ${t.barons}`, `herald ${t.heralds}`, `tårne ${t.turrets}`].map((x) => el('span', {}, x))),
+    t.players.map((p) => el('div', { class: 'prow' + (p.me ? ' me' : '') + (p.isDead ? ' dead' : '') },
+      img(p.champion.icon, p.champion.name),
+      el('div', { class: 'pn' }, p.champion.name, p.fed ? el('span', { class: 'fedtag' }, 'FED') : null, el('div', { class: 'lvl' }, `lvl ${p.level} · ${p.name}`)),
+      el('div', {}, `${p.kills}/${p.deaths}/${p.assists}`),
+      el('div', { class: 'cs muted' }, p.cs),
+      el('div', { class: 'its' }, p.items.map((it) => img(it.icon, it.name))))));
+}
+
+function renderLive(s) {
+  const L = s.live;
+  const diff = L.allies.itemGold - L.enemies.itemGold;
+  $app.append(
+    el('header', {},
+      img(L.me.champion.icon, L.me.champion.name, 'champ'),
+      el('div', {}, el('h1', {}, el('span', { class: 'live-badge' }, 'LIVE'), L.me.champion.name),
+        el('div', { class: 'meta' }, `${clock(L.gameTime)} · ${L.gameMode || ''} · ${L.me.kills}/${L.me.deaths}/${L.me.assists}`), statusLine(s)),
+      el('div', { class: 'right' }, el('div', { class: 'gold' }, gold(L.gold)), el('div', { class: 'meta' }, 'dit guld'))),
+    adviceCard(L),
+    el('div', { class: 'grid' },
+      el('div', { class: 'card' }, el('h2', {}, 'Scoreboard'),
+        teamBlock(L.allies, 'Dit hold', 'ally', diff),
+        teamBlock(L.enemies, 'Modstandere', 'enemy', -diff)),
+      el('div', {}, enemyLiveCard(L), phoneCard(s))),
+    logCard(s));
+}
+
+let qrLib = null;
+const qrCache = {};
+function loadQr() {
+  if (!qrLib) {
+    qrLib = new Promise((resolve, reject) => {
+      const sc = document.createElement('script');
+      sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+      sc.onload = resolve;
+      sc.onerror = reject;
+      document.head.append(sc);
+    });
+  }
+  return qrLib;
+}
+
+// Kun på computeren selv (telefonen har allerede nøglen).
+function phoneCard(s) {
+  if (!s.remote || !s.remote.urls.length || !['127.0.0.1', 'localhost'].includes(location.hostname)) return null;
+  const main = s.remote.urls[0];
+  // Samme QR-element genbruges ved hver opdatering, så den ikke tegnes forfra hvert 2. sekund.
+  if (!qrCache[main.url]) {
+    const node = el('div', { class: 'qr' });
+    qrCache[main.url] = node;
+    loadQr().then(() => new QRCode(node, { text: main.url, width: 132, height: 132 })).catch(() => node.remove());
+  }
+  const qr = qrCache[main.url];
+  return el('div', { class: 'card' }, el('h2', {}, 'Åbn på telefonen'),
+    el('div', { class: 'phone' }, qr,
+      el('div', {}, el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:6px' }, 'Scan koden. Telefonen skal være på samme wifi eller Tailscale.'),
+        s.remote.urls.map((u) => el('div', {}, el('span', { class: 'muted' }, u.label + ': '), el('a', { href: u.url }, u.url))))));
+}
+
 function render(s) {
   $app.replaceChildren();
+  if (s.live) return renderLive(s);
   if (!s.champion) {
     $app.append(
       el('div', { class: 'card empty' }, el('div', { class: 'big' }, 'LoL Rune Helper'), statusLine(s),
-        el('p', { class: 'muted' }, 'Lås en champion i champion select, så sætter jeg runer, summoners og items.')),
+        el('p', { class: 'muted' }, 'Lås en champion i champion select, så sætter jeg runer, summoners og items. Under kampen kommer købsforslag og scoreboard her.')),
+      phoneCard(s),
       logCard(s));
     return;
   }
@@ -187,7 +320,7 @@ function render(s) {
       s.positions.map((p) => el('button', { class: role === p ? 'active' : '', onclick: () => post('/api/role', { position: p }) }, p))) : null,
     el('div', { class: 'grid' },
       el('div', {}, runesCard(s), itemsCard(s)),
-      el('div', {}, spellsCard(s), enemyCard(s))),
+      el('div', {}, spellsCard(s), enemyCard(s), phoneCard(s))),
     logCard(s));
 }
 

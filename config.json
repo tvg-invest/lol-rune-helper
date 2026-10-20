@@ -6,7 +6,9 @@
   "flashKey": "keep",
   "setItemSet": true,
   "adaptToEnemies": true,
+  "liveAdvice": true,
   "openWindow": true,
+  "remoteAccess": false,
   "port": 3399,
   "pollMs": 1500
 }

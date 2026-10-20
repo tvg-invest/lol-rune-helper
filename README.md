@@ -1,6 +1,6 @@
 # LoL Rune Helper
 
-Sætter automatisk **runer**, **summoner spells** og et **item set** (anbefalede items i butikken), når du låser en champion i champion select. Items og støvler **tilpasses modstanderholdet**. Et lokalt vindue viser hele anbefalingen med ikoner. Virker på Windows og Mac.
+Sætter automatisk **runer**, **summoner spells** og et **item set** (anbefalede items i butikken), når du låser en champion i champion select. Items og støvler **tilpasses modstanderholdet**. **Under kampen** viser vinduet 2-3 begrundede købsforslag ud fra hvad modstanderne faktisk bygger + et live scoreboard - også på telefonen. Virker på Windows og Mac.
 
 Builds kommer fra OP.GG (nuværende patch, din rolle). Navne og ikoner kommer fra Riots Data Dragon.
 
@@ -21,6 +21,24 @@ Når du har **låst** en champion:
 
 Rolle: tildelt rolle i draft/ranked, ellers championens hovedrolle. ARAM har egne data. Arena springes over.
 
+## Under kampen (live)
+
+Læser spillets [Live Client Data API](https://developer.riotgames.com/docs/lol) (`https://127.0.0.1:2999/liveclientdata/allgamedata`) hvert 2. sekund og viser i vinduet:
+
+- **Overvej at købe:** 2-3 forslag fra championens egen item-pulje (min. 2% køber det), scoret efter popularitet + modstandernes **faktiske** builds:
+  - anti-heal mod healere (champions med meget healing eller lifesteal/omnivamp-items); findes intet anti-heal i puljen, bruges det der matcher din skadetype
+  - armor/MR mod en **fed** modstander (kills, items, level) af den skadetype, og når holdets trussel er AD- eller AP-tung
+  - armor/magic pen når mindst 2 stacker forsvar (eller én stacker meget)
+  - op til 2 tilpassede forslag, resten fra buildet; restpris med ejede dele trukket fra + hvilken del du har råd til nu
+- **Scoreboard:** items, KDA, CS, level, item-guld pr. hold og drager/baron/herald/tårne fra kill-feedet.
+- **Modstanderne:** AD/AP-trussel vægtet efter items og kills, hvem der er fed, stacker forsvar eller healer.
+
+Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General Policies](https://developer.riotgames.com/policies/general)) forbyder information spilleren ikke allerede kender og apps der bestemmer spillerens beslutninger, men tillader at fremhæve vigtige beslutninger og give flere valg. Derfor: kun TAB-information, 2-3 begrundede forslag, ingen timere. Bemærk at Riot kræver at produkter registreres i Developer Portal.
+
+## Telefon
+
+`"remoteAccess": true` lytter på alle netværk (ellers kun 127.0.0.1). Andre enheder skal have en hemmelig nøgle (QR-kode i vinduet, gemt i `remote-token.txt`), som bliver til en cookie. POST kræver JSON, så fremmede hjemmesider ikke kan ændre noget.
+
 ## Indstillinger (`config.json` ved siden af programmet)
 
 | Felt | Betydning |
@@ -38,7 +56,8 @@ Rolle: tildelt rolle i draft/ranked, ellers championens hovedrolle. ARAM har egn
 - Kør fra kilde: `node lol-helper.js` (Node 18+), eller `start-windows.bat` / `start-mac.command`.
 - Test mod falsk League-klient: `node test/fake-lcu.test.js`
   - `HELPER_BIN="dist/LoL-Rune-Helper-Mac/LoL Rune Helper"` tester den færdige programfil.
-  - `SCREENSHOT=gui.png` tager et billede af vinduet (headless Chrome).
+  - Dækker champion select, modstandere, vindue-API, rolleskift, live-kamp (forslag, restpris, scoreboard, objectives) og telefon-nøglen.
+  - Screenshot: `HOLD_LIVE=25000 node test/fake-lcu.test.js` (eller `HOLD_SELECT`), og `node test/screenshot.js <url fra HOLD-linjen> fil.png [bredde] [højde]`. Bruger en ren Chrome-profil og melder billeder der ikke er indlæst.
 - Byg programfiler (på macOS): `bash scripts/build.sh` -> `dist/LoL-Rune-Helper-Windows.zip` og `dist/LoL-Rune-Helper-Mac.zip` (universal). Bruger Node "single executable applications"; henter Node-binærer fra nodejs.org og `postject` via npx.
 
 ## Er det tilladt?

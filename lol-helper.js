@@ -2,15 +2,18 @@
 'use strict';
 // LoL Rune Helper - sætter runer, summoner spells og et item set automatisk,
 // når du låser en champion i champion select. Virker på Windows og macOS.
-// Taler kun med League-klientens lokale API (LCU) + OP.GG (builds) + Data Dragon (navne/ikoner).
-// Viser anbefalingen i et lokalt vindue (http://127.0.0.1:3399).
+// Under kampen læser den Riots Live Client Data API (kun det du også ser på TAB)
+// og viser 2-3 begrundede købsforslag + scoreboard.
+// Taler kun med League-klientens lokale API'er + OP.GG (builds) + Data Dragon (navne/ikoner).
+// Viser det hele i et lokalt vindue (http://127.0.0.1:3399).
 
 const https = require('https');
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
-const { randomUUID } = require('crypto');
+const { randomUUID, randomBytes } = require('crypto');
 
 let sea = null;
 try { sea = require('node:sea'); } catch {}
@@ -28,7 +31,9 @@ const DEFAULT_CONFIG = {
   flashKey: 'keep',       // 'keep' = Flash bliver på den tast, du allerede har den på. Ellers 'D' eller 'F'.
   setItemSet: true,
   adaptToEnemies: true,   // tilpas items/støvler til modstanderholdet
+  liveAdvice: true,       // købsforslag + scoreboard under kampen
   openWindow: true,       // åbn vinduet i browseren ved start
+  remoteAccess: false,    // true = vinduet kan åbnes fra telefonen (Tailscale/wifi) med en hemmelig nøgle
   port: 3399,
   pollMs: 1500,
 };
@@ -116,19 +121,28 @@ async function findClient() {
 }
 
 function lcu(client, method, urlPath, body) {
+  const headers = { Authorization: 'Basic ' + Buffer.from(`riot:${client.password}`).toString('base64') };
+  return localJson(client.protocol, client.port, method, urlPath, headers, body, 10000);
+}
+
+// Spillets Live Client Data API (port 2999) - kun tilgængelig mens en kamp kører.
+const LIVE = (() => {
+  const [protocol, port] = (process.env.LOL_HELPER_LIVE || 'https:2999').split(':');
+  return { protocol, port: Number(port) };
+})();
+const liveGet = (urlPath) => localJson(LIVE.protocol, LIVE.port, 'GET', urlPath, {}, undefined, 3000);
+
+function localJson(protocol, port, method, urlPath, extraHeaders, body, timeout) {
   return new Promise((resolve, reject) => {
     const data = body === undefined ? null : JSON.stringify(body);
-    const headers = {
-      Authorization: 'Basic ' + Buffer.from(`riot:${client.password}`).toString('base64'),
-      Accept: 'application/json',
-    };
+    const headers = { Accept: 'application/json', ...extraHeaders };
     if (data) {
       headers['Content-Type'] = 'application/json';
       headers['Content-Length'] = Buffer.byteLength(data);
     }
-    const mod = client.protocol === 'http' ? http : https;
-    // Klienten bruger et selvsigneret certifikat på 127.0.0.1, derfor rejectUnauthorized: false.
-    const req = mod.request({ host: '127.0.0.1', port: client.port, path: urlPath, method, headers, rejectUnauthorized: false, timeout: 10000 }, (res) => {
+    const mod = protocol === 'http' ? http : https;
+    // Klienten og spillet bruger selvsignerede certifikater på 127.0.0.1, derfor rejectUnauthorized: false.
+    const req = mod.request({ host: '127.0.0.1', port, path: urlPath, method, headers, rejectUnauthorized: false, timeout }, (res) => {
       let text = '';
       res.setEncoding('utf8');
       res.on('data', (c) => (text += c));
@@ -152,7 +166,7 @@ async function getJson(url) {
   return res.json();
 }
 
-const dd = { version: '', champions: {}, items: {}, runes: {}, spells: {} };
+const dd = { version: '', champions: {}, championKeyById: {}, items: {}, runes: {}, spells: {} };
 
 async function loadStaticData() {
   const [version] = await getJson('https://ddragon.leagueoflegends.com/api/versions.json');
@@ -162,10 +176,23 @@ async function loadStaticData() {
   );
   dd.version = version;
   for (const c of Object.values(champs.data)) {
-    dd.champions[c.key] = { id: c.id, name: c.name, tags: c.tags, info: c.info, icon: `${base}/img/champion/${c.image.full}` };
+    dd.champions[c.key] = { key: c.key, id: c.id, name: c.name, tags: c.tags, info: c.info, icon: `${base}/img/champion/${c.image.full}` };
+    dd.championKeyById[c.id.toLowerCase()] = c.key;
   }
   for (const [id, it] of Object.entries(items.data)) {
-    dd.items[id] = { name: it.name, tags: it.tags || [], antiheal: /Grievous Wounds/.test(it.description || ''), icon: `${base}/img/item/${id}.png` };
+    dd.items[id] = {
+      name: it.name,
+      tags: it.tags || [],
+      antiheal: /Grievous Wounds/.test(it.description || ''),
+      icon: `${base}/img/item/${id}.png`,
+      gold: it.gold?.total || 0,
+      from: it.from || [],
+      into: it.into || [],
+      depth: it.depth || 1,
+      stats: it.stats || {},
+      purchasable: it.gold?.purchasable !== false,
+      maps: it.maps || {},
+    };
   }
   for (const style of styles) {
     dd.runes[style.id] = { name: style.name, icon: `https://ddragon.leagueoflegends.com/cdn/img/${style.icon}` };
@@ -397,6 +424,248 @@ async function applyItemSet(client, championId, title, blocks) {
   await lcu(client, 'PUT', url, { accountId: current.accountId ?? summoner.accountId, itemSets, timestamp: Date.now() });
 }
 
+// ---------- Live i kampen ----------
+// Bruger kun det spilleren selv kan se (TAB-scoreboard, kill-feed, eget guld) - jf. Riots regler
+// giver vi 2-3 begrundede forslag i stedet for at bestemme for spilleren.
+
+const LIVE_POSITION = { TOP: 'TOP', JUNGLE: 'JUNGLE', MIDDLE: 'MID', BOTTOM: 'ADC', UTILITY: 'SUPPORT' };
+const OBJECTIVES = { DragonKill: 'dragons', BaronKill: 'barons', HeraldKill: 'heralds' };
+
+const playerName = (p) => p.riotId || p.summonerName || '';
+const shortName = (p) => p.riotIdGameName || playerName(p).split('#')[0];
+
+function championOf(p) {
+  const raw = /game_character_displayname_(.+)$/.exec(p.rawChampionName || '')?.[1];
+  const key = (raw && dd.championKeyById[raw.toLowerCase()])
+    || Object.values(dd.champions).find((c) => c.name === p.championName)?.key;
+  return key ? dd.champions[key] : null;
+}
+
+const isCompleted = (it) => it && !it.tags.includes('Consumable') && !it.tags.includes('Trinket') &&
+  (it.tags.includes('Boots') ? it.depth >= 2 : it.into.length === 0 && it.gold >= 1500);
+
+// Skadetype ud fra de items de faktisk har købt (fanger fx AP Shaco); ellers championens profil.
+function damageProfile(champ, itemIds) {
+  let ad = 0;
+  let ap = 0;
+  for (const id of itemIds) {
+    const it = dd.items[id];
+    if (!it) continue;
+    const phys = it.stats.FlatPhysicalDamageMod > 0 || it.tags.includes('CriticalStrike');
+    const magic = it.stats.FlatMagicDamageMod > 0;
+    if (phys && magic) { ad += it.gold / 2; ap += it.gold / 2; } else if (phys) ad += it.gold; else if (magic) ap += it.gold;
+  }
+  if (ad + ap >= 2500) return { ad: ad / (ad + ap), ap: ap / (ad + ap) };
+  const total = (champ?.info.attack || 5) + (champ?.info.magic || 5);
+  return { ad: (champ?.info.attack || 5) / total, ap: (champ?.info.magic || 5) / total };
+}
+
+function livePlayer(p) {
+  const champ = championOf(p);
+  const itemIds = [];
+  for (const i of p.items || []) for (let n = 0; n < (i.count || 1); n++) itemIds.push(String(i.itemID));
+  const itemGold = itemIds.reduce((sum, id) => sum + (dd.items[id]?.gold || 0), 0);
+  const s = p.scores || {};
+  return {
+    key: playerName(p),
+    name: shortName(p),
+    champ,
+    team: p.team,
+    level: p.level || 1,
+    kills: s.kills || 0,
+    deaths: s.deaths || 0,
+    assists: s.assists || 0,
+    cs: s.creepScore || 0,
+    isDead: Boolean(p.isDead),
+    itemIds,
+    itemGold,
+    dmg: damageProfile(champ, itemIds),
+    armor: itemIds.reduce((sum, id) => sum + (dd.items[id]?.stats.FlatArmorMod || 0), 0),
+    mr: itemIds.reduce((sum, id) => sum + (dd.items[id]?.stats.FlatSpellBlockMod || 0), 0),
+    healing: HEALERS.has(champ?.id) || itemIds.some((id) => dd.items[id]?.tags.some((t) => t === 'LifeSteal' || t === 'SpellVamp')),
+  };
+}
+
+// Pris tilbage når de dele du allerede ejer trækkes fra (hver ejet del tælles én gang).
+function remainingCost(id, ownedIds) {
+  const owned = [...ownedIds];
+  let cost = dd.items[id]?.gold || 0;
+  // Ejer du en del, trækkes hele dens pris fra; ellers kigges på dens egne dele.
+  const take = (x) => {
+    for (const c of dd.items[x]?.from || []) {
+      const i = owned.indexOf(c);
+      if (i !== -1) { owned.splice(i, 1); cost -= dd.items[c].gold; } else take(c);
+    }
+  };
+  take(id);
+  return Math.max(0, cost);
+}
+
+function affordablePart(id, ownedIds, gold) {
+  const parts = new Set();
+  const walk = (x) => { for (const c of dd.items[x]?.from || []) { parts.add(c); walk(c); } };
+  walk(id);
+  return [...parts]
+    .filter((p) => !ownedIds.includes(p) && dd.items[p]?.gold <= gold)
+    .sort((a, b) => dd.items[b].gold - dd.items[a].gold)[0] || null;
+}
+
+function threatOf(p) {
+  return p.itemGold + p.kills * 300 + p.assists * 100 + p.level * 150 - p.deaths * 100;
+}
+
+function analyzeLive(data, build) {
+  const all = (data.allPlayers || []).map(livePlayer);
+  const activeName = data.activePlayer?.riotId || data.activePlayer?.summonerName || '';
+  const me = all.find((p) => p.key === activeName) || all.find((p) => activeName && activeName.split('#')[0] === p.name);
+  if (!me) return null;
+  const allies = all.filter((p) => p.team === me.team);
+  const enemies = all.filter((p) => p.team !== me.team);
+  const gold = Math.floor(data.activePlayer?.currentGold || 0);
+
+  // Objectives fra kill-feedet
+  const teamOf = new Map();
+  for (const p of data.allPlayers || []) for (const n of [playerName(p), shortName(p), p.summonerName]) if (n) teamOf.set(n, p.team);
+  const score = { ORDER: { dragons: 0, barons: 0, heralds: 0, turrets: 0 }, CHAOS: { dragons: 0, barons: 0, heralds: 0, turrets: 0 } };
+  for (const e of data.events?.Events || []) {
+    if (OBJECTIVES[e.EventName]) {
+      const team = teamOf.get(e.KillerName);
+      if (team && score[team]) score[team][OBJECTIVES[e.EventName]]++;
+    } else if (e.EventName === 'TurretKilled') {
+      // Turret_T1_... tilhører ORDER, så CHAOS får point (og omvendt).
+      const owner = /_T([12])_/.exec(e.TurretKilled || '')?.[1];
+      if (owner) score[owner === '1' ? 'CHAOS' : 'ORDER'].turrets++;
+    }
+  }
+
+  // Modstanderne
+  const threats = enemies.map((p) => ({ p, t: threatOf(p) }));
+  const avgThreat = threats.reduce((s, x) => s + x.t, 0) / (threats.length || 1);
+  const fed = threats
+    .filter(({ p, t }) => (p.kills - p.deaths >= 3 && p.kills >= 4) || (t >= avgThreat * 1.4 && p.kills >= 3))
+    .sort((a, b) => b.t - a.t).map((x) => x.p);
+  const totalThreat = threats.reduce((s, x) => s + Math.max(x.t, 1), 0) || 1;
+  const adShare = threats.reduce((s, x) => s + Math.max(x.t, 1) * x.p.dmg.ad, 0) / totalThreat;
+  const apShare = 1 - adShare;
+  const armorStackers = enemies.filter((p) => p.armor >= 40);
+  const mrStackers = enemies.filter((p) => p.mr >= 40);
+  const healers = enemies.filter((p) => p.healing);
+  // Pen-items først når mindst 2 stacker forsvar, eller én stacker meget (én tank med ét item er normalt).
+  const armorHeavy = armorStackers.length >= 2 || armorStackers.some((p) => p.armor >= 80);
+  const mrHeavy = mrStackers.length >= 2 || mrStackers.some((p) => p.mr >= 80);
+  const enemy = { fed, adShare, apShare, armorStackers, mrStackers, armorHeavy, mrHeavy, healers };
+
+  const advice = liveAdvice(build, me, enemy, gold, data.gameData?.mapNumber || 11);
+  return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice };
+}
+
+// 2-3 forslag fra championens egen item-pulje, scoret efter popularitet + modstandernes faktiske builds.
+function liveAdvice(build, me, enemy, gold, mapNumber) {
+  if (!build) return [];
+  const pop = new Map();
+  for (const c of build.core_items || []) for (const id of c.ids) pop.set(String(id), (pop.get(String(id)) || 0) + (c.pick_rate || 0));
+  for (const x of build.last_items || []) { const id = String(x.ids[0]); pop.set(id, Math.max(pop.get(id) || 0, x.pick_rate || 0)); }
+  for (const x of build.boots || []) { const id = String(x.ids[0]); pop.set(id, Math.max(pop.get(id) || 0, x.pick_rate || 0)); }
+
+  const owned = me.itemIds;
+  const hasBoots = owned.some((id) => dd.items[id]?.tags.includes('Boots') && dd.items[id].depth >= 2);
+  const hasAntiheal = owned.some((id) => dd.items[id]?.antiheal);
+  const iAmAD = me.dmg.ad >= 0.5;
+  const names = (list) => list.slice(0, 3).map((p) => p.champ?.name || p.name).join(', ');
+  const kda = (p) => `${p.kills}/${p.deaths}/${p.assists}`;
+
+  // Healere men intet anti-heal i championens pulje: tag det anti-heal-item der passer til din skadetype.
+  const poolHasAntiheal = [...pop].some(([id, p]) => p >= 0.02 && dd.items[id]?.antiheal && isCompleted(dd.items[id]));
+  if (enemy.healers.length && !hasAntiheal && !poolHasAntiheal) {
+    const stat = iAmAD ? 'FlatPhysicalDamageMod' : 'FlatMagicDamageMod';
+    const fallback = Object.keys(dd.items).find((id) => {
+      const it = dd.items[id];
+      return it.antiheal && isCompleted(it) && it.purchasable && it.maps[mapNumber] !== false && it.stats[stat] > 0;
+    });
+    if (fallback) pop.set(fallback, -1); // -1 = fallback, slipper for minimums-popularitet
+  }
+
+  const scored = [];
+  for (const [id, popularity] of pop) {
+    const it = dd.items[id];
+    if (!isCompleted(it) || !it.purchasable || it.maps[mapNumber] === false || owned.includes(id)) continue;
+    if (hasBoots && it.tags.includes('Boots')) continue;
+    if (hasAntiheal && it.antiheal) continue;
+    // Sjældne køb i puljen (fx Randuin's på en mage) passer sjældent til championen.
+    if (popularity >= 0 && popularity < 0.02) continue;
+    let score = Math.max(popularity, 0) * 100;
+    const reasons = [];
+    if (it.antiheal && enemy.healers.length) { score += 30 + 15 * enemy.healers.length; reasons.push(`Anti-heal mod ${names(enemy.healers)}`); }
+    if (it.tags.includes('ArmorPenetration') && iAmAD && enemy.armorHeavy) { score += 35; reasons.push(`${names(enemy.armorStackers)} bygger armor`); }
+    if (it.tags.includes('MagicPenetration') && !iAmAD && enemy.mrHeavy) { score += 35; reasons.push(`${names(enemy.mrStackers)} bygger magic resist`); }
+    const fedAD = enemy.fed.find((p) => p.dmg.ad >= 0.6);
+    const fedAP = enemy.fed.find((p) => p.dmg.ap >= 0.6);
+    if (it.tags.includes('Armor') && fedAD) { score += 30; reasons.push(`${fedAD.champ?.name || fedAD.name} er fed (${kda(fedAD)}) og laver AD-skade`); }
+    if (it.tags.includes('SpellBlock') && fedAP) { score += 30; reasons.push(`${fedAP.champ?.name || fedAP.name} er fed (${kda(fedAP)}) og laver AP-skade`); }
+    if (it.tags.includes('Armor') && enemy.adShare >= 0.65) { score += 15; reasons.push(`${pct(enemy.adShare)} af deres trussel er AD`); }
+    if (it.tags.includes('SpellBlock') && enemy.apShare >= 0.55) { score += 15; reasons.push(`${pct(enemy.apShare)} af deres trussel er AP`); }
+    if (!reasons.length) reasons.push(`Fast del af buildet (${pct(Math.min(popularity, 1))} køber det)`);
+    const cost = remainingCost(id, owned);
+    const part = cost > gold ? affordablePart(id, owned, gold) : null;
+    scored.push({ id, score, reasons, cost, canAfford: cost <= gold, part, adapted: reasons.length && !reasons[0].startsWith('Fast del') });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  // Op til 2 tilpassede forslag (der er en konkret grund), resten fyldes med det bedste fra buildet.
+  // Max ét anti-heal-item.
+  const out = [];
+  const add = (s) => {
+    if (out.includes(s) || out.length === 3) return;
+    if (dd.items[s.id].antiheal && out.some((o) => dd.items[o.id].antiheal)) return;
+    out.push(s);
+  };
+  scored.filter((s) => s.adapted).slice(0, 2).forEach(add);
+  scored.forEach(add);
+  return out.sort((a, b) => b.score - a.score);
+}
+
+async function updateLive(data) {
+  const activeName = data.activePlayer?.riotId || data.activePlayer?.summonerName || '';
+  const meRaw = (data.allPlayers || []).find((p) => playerName(p) === activeName)
+    || (data.allPlayers || []).find((p) => activeName && activeName.split('#')[0] === shortName(p));
+  const champ = meRaw && championOf(meRaw);
+  if (!champ) { app.live = null; return; }
+
+  // Genbrug buildet fra champion select; ellers hent det (fx hvis programmet startes midt i kampen).
+  if (app.liveBuild?.championKey !== champ.key) {
+    let build = null;
+    if (app.build && app.pick?.championId === Number(champ.key)) build = app.build.build;
+    else {
+      const aram = data.gameData?.gameMode === 'ARAM';
+      try {
+        build = (await getBuild(app.cfg, Number(champ.key), aram ? null : LIVE_POSITION[meRaw.position] || null, aram ? 'ARAM' : 'CLASSIC')).build;
+      } catch (e) { log(`Kunne ikke hente build til live-forslag: ${e.message}`); }
+    }
+    app.liveBuild = { championKey: champ.key, build };
+  }
+  const first = !app.live;
+  app.live = analyzeLive(data, app.liveBuild.build);
+  if (first && app.live) log(`Live: ${champ.name} - forslag og scoreboard vises i vinduet.`);
+  broadcast();
+}
+
+async function liveLoop() {
+  for (;;) {
+    let wait = 2000;
+    try {
+      const data = await liveGet('/liveclientdata/allgamedata');
+      if (data?.allPlayers?.length && data.activePlayer) await updateLive(data);
+    } catch (e) {
+      if (app.live) {
+        app.live = null;
+        app.liveBuild = null;
+        log('Kampen er slut.');
+      }
+      wait = 3000;
+    }
+    await sleep(wait);
+  }
+}
+
 // ---------- Tilstand + vindue ----------
 
 const app = {
@@ -409,15 +678,73 @@ const app = {
   build: null,         // { build, position }
   rec: null,
   applied: { pickKey: null, itemKey: null },
+  live: null,          // analyse af den igangværende kamp
+  liveBuild: null,     // { championKey, build }
+  remote: { enabled: false, token: null, urls: [] },
 };
 
 // Kører LCU-ændringer én ad gangen, så vinduet og løkken ikke kolliderer.
 let queue = Promise.resolve();
 const serial = (fn) => (queue = queue.then(fn, fn));
 
+function liveView() {
+  const L = app.live;
+  if (!L) return null;
+  const item = (id) => ({ id, name: itemName(id), icon: dd.items[id]?.icon });
+  const player = (p) => ({
+    name: p.name,
+    champion: { name: p.champ?.name || '?', icon: p.champ?.icon },
+    level: p.level, kills: p.kills, deaths: p.deaths, assists: p.assists, cs: p.cs,
+    isDead: p.isDead,
+    items: p.itemIds.filter((id) => !dd.items[id]?.tags.includes('Trinket')).map(item),
+    itemGold: p.itemGold,
+    fed: L.enemy.fed.includes(p),
+    me: p === L.me,
+  });
+  const team = (players, side) => ({
+    players: players.map(player),
+    kills: players.reduce((s, p) => s + p.kills, 0),
+    itemGold: players.reduce((s, p) => s + p.itemGold, 0),
+    ...L.score[side],
+  });
+  const enemySide = L.me.team === 'ORDER' ? 'CHAOS' : 'ORDER';
+  const names = (list) => list.map((p) => p.champ?.name || p.name);
+  return {
+    gameTime: L.gameTime,
+    gameMode: L.gameMode,
+    gold: L.gold,
+    me: player(L.me),
+    allies: team(L.allies, L.me.team),
+    enemies: team(L.enemies, enemySide),
+    advice: L.advice.map((a) => ({
+      ...item(a.id),
+      cost: a.cost,
+      canAfford: a.canAfford,
+      reasons: a.reasons,
+      adapted: a.adapted,
+      part: a.part && { ...item(a.part), cost: dd.items[a.part].gold },
+    })),
+    enemy: {
+      adShare: L.enemy.adShare,
+      apShare: L.enemy.apShare,
+      fed: names(L.enemy.fed),
+      armorStackers: names(L.enemy.armorStackers),
+      mrStackers: names(L.enemy.mrStackers),
+      healers: names(L.enemy.healers),
+    },
+  };
+}
+
 function viewModel() {
   const { pick, build: b, rec } = app;
-  const base = { status: app.status, log: logLines.slice(-12), positions: POSITIONS, ddVersion: dd.version };
+  const base = {
+    status: app.status,
+    log: logLines.slice(-12),
+    positions: POSITIONS,
+    ddVersion: dd.version,
+    live: liveView(),
+    remote: app.remote.enabled ? { urls: app.remote.urls } : null,
+  };
   if (!pick || !b || !rec) return base;
   const champ = dd.champions[pick.championId] || { name: `Champion ${pick.championId}` };
   const stats = roleStats(b);
@@ -478,10 +805,52 @@ function readBody(req) {
   });
 }
 
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+// Telefon-adgang: hemmelig nøgle gemt ved siden af programmet, så QR-koden virker igen næste gang.
+function setupRemote(cfg) {
+  if (!cfg.remoteAccess) return;
+  const file = path.join(APP_DIR, 'remote-token.txt');
+  let token;
+  try { token = fs.readFileSync(file, 'utf8').trim(); } catch {}
+  if (!/^[a-f0-9]{32}$/.test(token || '')) {
+    token = randomBytes(16).toString('hex');
+    try { fs.writeFileSync(file, token); } catch { log('Kunne ikke gemme telefon-nøglen - den skifter ved næste start.'); }
+  }
+  app.remote = { enabled: true, token, urls: [] };
+}
+
+function remoteUrls(port) {
+  const urls = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const a of list || []) {
+      if (a.family !== 'IPv4' || a.internal) continue;
+      const [x, y] = a.address.split('.').map(Number);
+      const label = x === 100 && y >= 64 && y <= 127 ? 'Tailscale' : 'Wifi/netværk';
+      urls.push({ label, url: `http://${a.address}:${port}/?token=${app.remote.token}` });
+    }
+  }
+  return urls.sort((a, b) => (a.label === 'Tailscale' ? -1 : 1) - (b.label === 'Tailscale' ? -1 : 1));
+}
+
 function startWindowServer(port) {
   const html = readAsset('gui.html');
   const server = http.createServer(async (req, res) => {
     const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+    if (!LOOPBACK.has(req.socket.remoteAddress)) {
+      const { token } = app.remote;
+      const query = new URL(req.url, 'http://x').searchParams.get('token');
+      if (token && query === token) {
+        res.writeHead(302, { 'Set-Cookie': `lrh=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`, Location: '/' });
+        return res.end();
+      }
+      if (!token || !(req.headers.cookie || '').split(/;\s*/).includes(`lrh=${token}`)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('Mangler nøgle - scan QR-koden i vinduet på computeren.');
+      }
+    }
+    // POST kun som JSON: en fremmed hjemmeside kan ikke sende det uden CORS-forespørgsel, som vi ikke besvarer.
+    if (req.method === 'POST' && req.headers['content-type'] !== 'application/json') return json(415, { error: 'Kun JSON' });
     if (req.method === 'GET' && req.url === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(html);
@@ -522,8 +891,8 @@ function startWindowServer(port) {
         if (e.code === 'EADDRINUSE' && attempts > 0) return tryListen(p + 1, attempts - 1);
         reject(e);
       });
-      // Kun 127.0.0.1: vinduet kan ikke nås fra andre maskiner.
-      server.listen(p, '127.0.0.1', () => resolve(server.address().port));
+      // Uden telefon-adgang kun 127.0.0.1: vinduet kan ikke nås fra andre maskiner.
+      server.listen(p, app.remote.enabled ? '0.0.0.0' : '127.0.0.1', () => resolve(server.address().port));
     };
     tryListen(port, 10);
   });
@@ -645,13 +1014,20 @@ async function main() {
   app.cfg = loadConfig();
   if (process.env.LOL_HELPER_PORT) app.cfg.port = Number(process.env.LOL_HELPER_PORT);
   if (process.env.LOL_HELPER_NO_WINDOW) app.cfg.openWindow = false;
+  if (process.env.LOL_HELPER_REMOTE) app.cfg.remoteAccess = true;
   log('LoL Rune Helper starter...');
   const ddVersion = await loadStaticData();
   log(`Data Dragon ${ddVersion} hentet. Builds fra OP.GG (${app.cfg.region}, ${app.cfg.buildChoice}).`);
+  setupRemote(app.cfg);
   const port = await startWindowServer(app.cfg.port);
   const url = `http://127.0.0.1:${port}`;
   log(`Vindue: ${url}`);
+  if (app.remote.enabled) {
+    app.remote.urls = remoteUrls(port);
+    for (const u of app.remote.urls) log(`Telefon (${u.label}): ${u.url}`);
+  }
   if (app.cfg.openWindow) openBrowser(url);
+  if (app.cfg.liveAdvice) liveLoop();
 
   for (;;) {
     let wait = app.cfg.pollMs;

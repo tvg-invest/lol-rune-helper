@@ -2,6 +2,8 @@
 // Falsk League-klient: spiller en champion select igennem og tjekker hvad lol-helper sender.
 // Kør: node test/fake-lcu.test.js  (kræver internet til OP.GG + Data Dragon)
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const assert = require('assert');
 const { spawn } = require('child_process');
@@ -61,6 +63,46 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// Falsk Live Client Data API (spillets port 2999). Felter som i Riots dokumentation/eksempel.
+const live = { data: null };
+const liveServer = http.createServer((req, res) => {
+  if (req.url === '/liveclientdata/allgamedata' && live.data) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(live.data));
+  }
+  res.writeHead(404);
+  res.end();
+});
+const player = (name, raw, team, position, items, [kills, deaths, assists], level) => ({
+  championName: raw, rawChampionName: `game_character_displayname_${raw}`, isBot: false, isDead: false,
+  items: items.map((id, slot) => ({ itemID: id, count: 1, slot, displayName: '', price: 0, canUse: false, consumable: false })),
+  level, position, riotId: `${name}#EUW`, riotIdGameName: name, riotIdTagLine: 'EUW', summonerName: `${name}#EUW`,
+  scores: { kills, deaths, assists, creepScore: 120, wardScore: 5 }, team, respawnTimer: 0, runes: {}, skinID: 0, summonerSpells: {},
+});
+function liveGame(zhonyaPart) {
+  return {
+    activePlayer: { riotId: 'Mig#EUW', riotIdGameName: 'Mig', summonerName: 'Mig#EUW', currentGold: 1400, level: 11 },
+    allPlayers: [
+      player('Mig', 'Ahri', 'ORDER', 'MIDDLE', [1056, 3020, zhonyaPart], [3, 2, 4], 11),
+      player('Topper', 'Garen', 'ORDER', 'TOP', [3047], [1, 3, 2], 10),
+      player('Jungle', 'Vi', 'ORDER', 'JUNGLE', [3047], [2, 3, 5], 10),
+      player('Adc', 'Jinx', 'ORDER', 'BOTTOM', [3006], [2, 2, 3], 10),
+      player('Supp', 'Leona', 'ORDER', 'UTILITY', [3047], [0, 3, 7], 9),
+      player('Fedzed', 'Zed', 'CHAOS', 'MIDDLE', [3142, 6692, 3158], [9, 1, 3], 13),
+      player('Tank', 'Darius', 'CHAOS', 'TOP', [3075, 4401, 3047], [2, 3, 2], 11),
+      player('Jg', 'Graves', 'CHAOS', 'JUNGLE', [3006], [1, 2, 3], 10),
+      player('Bot', 'Jhin', 'CHAOS', 'BOTTOM', [3006], [1, 2, 2], 10),
+      player('Heal', 'Soraka', 'CHAOS', 'UTILITY', [3158], [0, 2, 6], 9),
+    ],
+    events: { Events: [
+      { EventID: 0, EventName: 'GameStart', EventTime: 0 },
+      { EventID: 1, EventName: 'DragonKill', EventTime: 600, DragonType: 'Fire', Stolen: 'False', KillerName: 'Jungle', Assisters: [] },
+      { EventID: 2, EventName: 'TurretKilled', EventTime: 700, TurretKilled: 'Turret_T2_C_05_A', KillerName: 'Mig', Assisters: [] },
+    ] },
+    gameData: { gameMode: 'CLASSIC', gameTime: 1234.5, mapName: 'Map11', mapNumber: 11, mapTerrain: 'Default' },
+  };
+}
+
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(fn, ms, what) {
   const end = Date.now() + ms;
@@ -72,15 +114,26 @@ const runePosts = () => calls.filter((c) => c.method === 'POST' && c.url === '/l
 const autoSet = () => state.itemSets.itemSets.find((s) => s.title.startsWith('Auto: '));
 const autoPage = () => state.pages.find((p) => p.name.startsWith('Auto: '));
 
+liveServer.listen(0, '127.0.0.1');
 server.listen(0, '127.0.0.1', async () => {
   const port = server.address().port;
+  const livePort = liveServer.address().port;
   // HELPER_BIN=sti tester den færdige programfil i stedet for scriptet.
   const [cmd, args] = process.env.HELPER_BIN
     ? [path.resolve(process.env.HELPER_BIN), []]
     : [process.execPath, [path.join(__dirname, '..', 'lol-helper.js')]];
   const child = spawn(cmd, args, {
-    env: { ...process.env, LOL_HELPER_LCU: `http:${port}:${PASSWORD}`, LOL_HELPER_PORT: '0', LOL_HELPER_NO_WINDOW: '1' },
+    env: {
+      ...process.env,
+      LOL_HELPER_LCU: `http:${port}:${PASSWORD}`,
+      LOL_HELPER_LIVE: `http:${livePort}`,
+      LOL_HELPER_PORT: '0',
+      LOL_HELPER_NO_WINDOW: '1',
+      LOL_HELPER_REMOTE: process.env.NO_REMOTE ? '' : '1',
+    },
   });
+  const tokenFile = path.join(process.env.HELPER_BIN ? path.dirname(cmd) : path.join(__dirname, '..'), 'remote-token.txt');
+  const hadToken = fs.existsSync(tokenFile);
   let out = '';
   child.stdout.on('data', (d) => (out += d));
   child.stderr.on('data', (d) => (out += d));
@@ -139,18 +192,10 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(autoPage().selectedPerkIds[0], calls.filter((c) => c.method === 'POST').pop().body.selectedPerkIds[0]);
     assert.strictEqual(state.pages.filter((p) => p.name.startsWith('Auto: ')).length, 1, 'stadig kun én auto-side');
 
-    // Valgfrit: SCREENSHOT=fil.png tager et billede af vinduet med headless Chrome (macOS).
-    if (process.env.SCREENSHOT) {
-      const base = /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
-      await new Promise((resolve) => {
-        const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', [
-          '--headless=new', '--disable-gpu', '--hide-scrollbars', `--user-data-dir=${require('os').tmpdir()}/lol-helper-chrome`, `--window-size=${process.env.SCREENSHOT_SIZE || '1100,1250'}`,
-          '--timeout=5000', `--screenshot=${path.resolve(process.env.SCREENSHOT)}`, base,
-        ]);
-        chrome.stderr.on('data', (d) => { if (/written|rror/.test(d)) console.log('chrome:', String(d).trim().slice(0, 200)); });
-        const t = setTimeout(() => chrome.kill(), 30000);
-        chrome.on('exit', () => { clearTimeout(t); resolve(); });
-      });
+    // Valgfrit: HOLD_SELECT=ms holder champion select åben, fx til node test/screenshot.js <url>.
+    if (process.env.HOLD_SELECT) {
+      console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
+      await wait(Number(process.env.HOLD_SELECT));
     }
 
     // 5) Vinduet: skift rolle til TOP -> alt sættes igen med TOP-data
@@ -173,16 +218,103 @@ server.listen(0, '127.0.0.1', async () => {
     assert(autoSet().title.endsWith('MID'), 'rolle-override nulstillet');
     assert.strictEqual(state.pages.filter((p) => p.name.startsWith('Auto: ')).length, 1, 'stadig kun én auto-side');
     assert.strictEqual(state.itemSets.itemSets.filter((s) => s.title.startsWith('Auto: ')).length, 1, 'stadig kun ét auto-set');
+    // 7) Kampen starter: live-forslag + scoreboard
+    const items = (await (await fetch(`https://ddragon.leagueoflegends.com/cdn/${st.ddVersion}/data/en_US/item.json`)).json()).data;
+    const zhonyaPart = Number(items['3157'].from[0]);
+    state.phase = 'InProgress';
+    live.data = liveGame(zhonyaPart);
+    await waitFor(() => out.includes('Live: Ahri'), 15000, 'live start');
+    await wait(500);
+    const L = (await gui('GET', '/state')).body.live;
+    assert(L, 'live-visning');
+    assert.strictEqual(L.gold, 1400);
+    assert.strictEqual(L.allies.players.length, 5);
+    assert.strictEqual(L.enemies.players.length, 5);
+    assert(L.allies.players.find((p) => p.me).champion.name === 'Ahri', 'jeg er markeret');
+    assert.strictEqual(L.allies.dragons, 1, 'drage til mit hold');
+    assert.strictEqual(L.allies.turrets, 1, 'tårn (T2) til mit hold');
+    assert.deepStrictEqual(L.enemy.fed, ['Zed'], 'Zed er fed');
+    assert(L.enemy.healers.includes('Soraka') && L.enemy.healers.includes('Darius'), 'healere');
+    assert(L.enemy.armorStackers.includes('Darius'), 'Darius bygger armor');
+    assert(L.enemy.adShare > 0.6, `AD-tung trussel: ${L.enemy.adShare}`);
+    assert(L.advice.length >= 2 && L.advice.length <= 3, `2-3 forslag: ${L.advice.length}`);
+    for (const a of L.advice) assert(a.reasons.length && a.cost > 0, 'forslag har begrundelse og pris');
+    assert(!L.advice.some((a) => ['1056', '3020', String(zhonyaPart)].includes(a.id)), 'foreslår ikke noget jeg ejer');
+    assert(L.advice.some((a) => a.reasons.some((r) => r.includes('Zed er fed'))), 'reagerer på fed Zed');
+    assert(L.advice.some((a) => a.reasons.some((r) => r.startsWith('Anti-heal'))), 'anti-heal mod Soraka/Darius');
+    assert(L.advice.some((a) => !a.adapted), 'mindst ét fast build-item med');
+    const zh = L.advice.find((a) => a.id === '3157');
+    assert(zh, "Zhonya's foreslås mod fed AD-Zed");
+    assert.strictEqual(zh.cost, items['3157'].gold.total - items[String(zhonyaPart)].gold.total, 'restpris trækker ejet del fra');
+    console.log('Live-forslag:', JSON.stringify(L.advice.map((a) => ({ item: a.name, cost: a.cost, råd: a.canAfford, del: a.part?.name, hvorfor: a.reasons }))));
+
+    // Valgfrit: HOLD_LIVE=ms holder kampen åben, fx til node test/screenshot.js <url>.
+    if (process.env.HOLD_LIVE) {
+      console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
+      await wait(Number(process.env.HOLD_LIVE));
+    }
+
+    // Vinduet må ikke få nye data hvert 2. sekund, når intet har ændret sig (unødig gentegning).
+    {
+      const base = /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
+      const ctrl = new AbortController();
+      const res = await fetch(base + '/events', { signal: ctrl.signal });
+      const reader = res.body.getReader();
+      const msgs = new Set();
+      let buf = '';
+      const end = Date.now() + 6000;
+      while (Date.now() < end) {
+        const r = await Promise.race([reader.read(), wait(end - Date.now()).then(() => null)]);
+        if (!r || r.done) break;
+        buf += Buffer.from(r.value).toString();
+        for (const m of buf.split('\n\n').slice(0, -1)) msgs.add(m);
+        buf = buf.split('\n\n').pop();
+      }
+      ctrl.abort();
+      assert(msgs.size <= 1, `vinduet fik ${msgs.size} forskellige beskeder uden ændringer`);
+    }
+
+    // 8) Kampen slutter
+    live.data = null;
+    await waitFor(() => out.includes('Kampen er slut.'), 15000, 'kamp slut');
+    assert.strictEqual((await gui('GET', '/state')).body.live, null);
+
+    // 9) Telefon-adgang: kræver nøgle udefra, POST kun som JSON
+    if (process.env.NO_REMOTE) throw new Error('SKIP_REMOTE');
+    const base = /Vindue: http:\/\/127\.0\.0\.1:(\d+)/.exec(out)[1];
+    const lan = Object.values(os.networkInterfaces()).flat().find((a) => a.family === 'IPv4' && !a.internal);
+    assert(/Telefon \(/.test(out), 'telefon-links i loggen');
+    const token = fs.readFileSync(tokenFile, 'utf8').trim();
+    const noJson = await fetch(`http://127.0.0.1:${base}/api/role`, { method: 'POST', body: 'position=TOP', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    assert.strictEqual(noJson.status, 415, 'POST uden JSON afvises');
+    if (lan) {
+      const remote = `http://${lan.address}:${base}`;
+      assert.strictEqual((await fetch(remote + '/state')).status, 403, 'ingen nøgle -> 403');
+      assert.strictEqual((await fetch(remote + '/?token=forkert', { redirect: 'manual' })).status, 403, 'forkert nøgle -> 403');
+      const login = await fetch(`${remote}/?token=${token}`, { redirect: 'manual' });
+      assert.strictEqual(login.status, 302, 'rigtig nøgle -> redirect');
+      const cookie = login.headers.get('set-cookie').split(';')[0];
+      assert.strictEqual((await fetch(remote + '/state', { headers: { cookie } })).status, 200, 'cookie giver adgang');
+    } else {
+      console.log('(Intet netværksinterface - springer test af fjernadgang over)');
+    }
+
     assert(!/Fejl:/.test(out), 'ingen fejl i loggen');
 
     console.log(out);
     console.log('ALLE TESTS BESTÅET');
   } catch (e) {
+    if (e.message === 'SKIP_REMOTE') {
+      console.log('ALLE TESTS BESTÅET (uden telefon-adgang)');
+      return;
+    }
     console.log(out);
     console.error('FEJL:', e.message);
     process.exitCode = 1;
   } finally {
     child.kill();
     server.close();
+    liveServer.close();
+    if (!hadToken) fs.rmSync(tokenFile, { force: true });
   }
 });
