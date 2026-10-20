@@ -109,6 +109,25 @@
     .prow .cs { display: none; }
     .prow .its { grid-column: 2 / -1; }
   }
+  .toolbar { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 8px; }
+  .toolbar button { font-size: 12px; padding: 4px 10px; background: var(--panel); }
+  /* Overlay (Picture-in-Picture-vindue, altid øverst) */
+  body.ov { background: rgba(10,14,20,.96); }
+  body.ov main { padding: 10px; }
+  .ov-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .ov-head .gold { font-size: 20px; }
+  .ov-row { display: flex; gap: 8px; align-items: center; padding: 6px; border-radius: 8px; background: var(--panel2); margin-bottom: 6px; border: 1px solid var(--line); }
+  .ov-row.progress { border-color: var(--gold); }
+  .ov-row.afford { border-color: var(--green); }
+  .ov-row.flash { animation: flash 1.2s ease-out 3; }
+  @keyframes flash { 0%, 100% { background: var(--panel2); } 50% { background: rgba(63,191,127,.35); } }
+  .ov-row img { width: 34px; height: 34px; border-radius: 6px; flex: none; }
+  .ov-row .t { min-width: 0; flex: 1; }
+  .ov-row .n { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ov-row .r { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ov-row .c { font-size: 12px; font-weight: 700; white-space: nowrap; }
+  .ov-row .c.ok { color: var(--green); }
+  .ov-foot { font-size: 11px; color: var(--muted); margin-top: 4px; }
   .phone { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
   .phone .qr { background: #fff; padding: 8px; border-radius: 8px; }
   .phone a { color: var(--gold2); word-break: break-all; font-size: 12px; }
@@ -302,6 +321,8 @@ function phoneCard(s) {
 
 function render(s) {
   $app.replaceChildren();
+  if (!s) return;
+  if (['127.0.0.1', 'localhost'].includes(location.hostname)) $app.append(toolbar());
   if (s.live) return renderLive(s);
   if (!s.champion) {
     $app.append(
@@ -326,6 +347,99 @@ function render(s) {
     logCard(s));
 }
 
+// ---------- Overlay: lille vindue der altid ligger øverst (Document Picture-in-Picture, Chrome/Edge) ----------
+let pip = null;
+let lastState = null;
+const settings = (() => { try { return JSON.parse(localStorage.getItem('lrh') || '{}'); } catch { return {}; } })();
+const saveSettings = () => { try { localStorage.setItem('lrh', JSON.stringify(settings)); } catch {} };
+if (settings.sound === undefined) settings.sound = true;
+
+let audio = null;
+function beep() {
+  if (!settings.sound) return;
+  try {
+    audio = audio || new AudioContext();
+    const o = audio.createOscillator();
+    const g = audio.createGain();
+    o.frequency.value = 880;
+    g.gain.setValueAtTime(0.15, audio.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.35);
+    o.connect(g).connect(audio.destination);
+    o.start();
+    o.stop(audio.currentTime + 0.35);
+  } catch {}
+}
+
+async function openOverlay() {
+  if (!('documentPictureInPicture' in window)) {
+    alert('Overlay kræver Google Chrome eller Microsoft Edge (version 116 eller nyere). Åbn vinduet i en af dem.');
+    return;
+  }
+  if (pip) { pip.focus(); return; }
+  pip = await documentPictureInPicture.requestWindow({ width: 330, height: 360 });
+  const style = pip.document.createElement('style');
+  style.textContent = document.querySelector('style').textContent;
+  pip.document.head.append(style);
+  pip.document.title = 'LoL Rune Helper';
+  pip.document.body.className = 'ov';
+  pip.addEventListener('pagehide', () => { pip = null; if (lastState) render(lastState); });
+  if (audio === null) { try { audio = new AudioContext(); } catch {} } // lyd kræver et klik - det er det her
+  renderOverlay(lastState);
+  if (lastState) render(lastState);
+}
+
+function overlayContent(s) {
+  const L = s && s.live;
+  if (L) {
+    return [
+      el('div', { class: 'ov-head' }, el('span', { class: 'gold' }, gold(L.gold)), el('span', { class: 'muted' }, clock(L.gameTime))),
+      L.advice.map((a) => el('div', { class: 'ov-row' + (a.inProgress ? ' progress' : '') + (a.canAfford ? ' afford' : '') + (justAffordable.has(a.id) ? ' flash' : ''), 'data-id': a.id },
+        img(a.icon, a.name),
+        el('div', { class: 't' }, el('div', { class: 'n' }, a.name, a.inProgress ? el('span', { class: 'progtag' }, 'I GANG') : null),
+          // "I GANG"-mærket viser allerede fremdriften; vis hellere hvorfor.
+          el('div', { class: 'r' }, a.reasons.find((r) => !r.startsWith('Du er i gang')) || a.reasons[0])),
+        el('div', { class: 'c' + (a.canAfford ? ' ok' : '') }, a.canAfford ? 'RÅD NU' : `mangler ${num(Math.round(a.cost - L.gold))}`))),
+      L.enemy.fed.length ? el('div', { class: 'ov-foot' }, 'Fed: ' + L.enemy.fed.join(', ')) : null,
+    ];
+  }
+  if (s && s.champion) {
+    const r = s.runeOptions[s.runeIndex] || s.runeOptions[0];
+    const core = s.blocks.find((b) => b.title.startsWith('Core'));
+    return [
+      el('div', { class: 'ov-head' }, el('b', {}, `${s.champion.name} ${s.position}`), el('span', { class: 'muted' }, s.winRate != null ? pct(s.winRate) : '')),
+      r ? el('div', { class: 'ov-row' }, img(r.primaryRunes[0].icon, r.primaryRunes[0].name), el('div', { class: 't' }, el('div', { class: 'n' }, r.primaryRunes[0].name), el('div', { class: 'r' }, r.secondary.name))) : null,
+      core ? el('div', { class: 'ov-row' }, core.items.map((it) => img(it.icon, it.name)), el('div', { class: 'r' }, 'Core')) : null,
+    ];
+  }
+  return [el('div', { class: 'muted' }, s ? s.status : 'Starter...')];
+}
+
+function renderOverlay(s) {
+  if (!pip) return;
+  const main = pip.document.createElement('main');
+  main.append(...overlayContent(s).flat().filter(Boolean).map((n) => pip.document.importNode(n, true)));
+  pip.document.body.replaceChildren(main);
+}
+
+// Bip + blink når et forslag går fra "mangler guld" til "råd nu".
+let affordable = new Set();
+let justAffordable = new Set();
+let wasLive = false;
+function trackAffordable(s) {
+  const now = new Set((s.live?.advice || []).filter((a) => a.canAfford).map((a) => a.id));
+  justAffordable = new Set([...now].filter((id) => !affordable.has(id)));
+  // Ikke ved første live-besked (så bipper den ikke bare fordi vinduet åbnes).
+  if (s.live && wasLive && justAffordable.size) beep();
+  wasLive = Boolean(s.live);
+  affordable = now;
+}
+
+function toolbar() {
+  return el('div', { class: 'toolbar' },
+    el('button', { onclick: () => { settings.sound = !settings.sound; saveSettings(); render(lastState); } }, settings.sound ? 'Lyd: til' : 'Lyd: fra'),
+    el('button', { onclick: openOverlay, title: 'Lille vindue der altid ligger øverst - kræver Borderless i League' }, pip ? 'Overlay åben' : 'Overlay'));
+}
+
 let lastJson = '';
 function connect() {
   const es = new EventSource('/events');
@@ -333,7 +447,10 @@ function connect() {
     if (e.data === lastJson) return;
     lastJson = e.data;
     const open = document.querySelector('details')?.open;
-    render(JSON.parse(e.data));
+    lastState = JSON.parse(e.data);
+    trackAffordable(lastState);
+    render(lastState);
+    renderOverlay(lastState);
     if (open) document.querySelector('details').open = true;
   };
   es.onerror = () => {

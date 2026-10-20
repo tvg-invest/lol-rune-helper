@@ -25,6 +25,15 @@ Et vindue åbner i din browser (http://127.0.0.1:3399).
 Lad programmet køre, mens du spiller. Rækkefølgen er ligegyldig.
 Tip: læg vinduet på en anden skærm, eller åbn det på telefonen (se nedenfor).
 
+OVERLAY OVER SPILLET
+Klik "Overlay" øverst i vinduet: et lille vindue der altid ligger øverst med dit guld,
+de 3 forslag ("RÅD NU" eller hvad du mangler) og hvem der er fed. Det bipper og blinker,
+når du får råd til et af forslagene (slå lyden fra med "Lyd: til/fra").
+- Kræver Google Chrome eller Microsoft Edge (version 116+).
+- Sæt League til Borderless: Indstillinger -> Video -> Window Mode -> Borderless.
+  I ægte fuldskærm dækker spillet alle andre vinduer.
+- Træk overlayet hen hvor det ikke er i vejen (fx over minimap-hjørnet).
+
 PÅ TELEFONEN
 1. Sæt "remoteAccess": true i config.json og genstart programmet.
 2. Scan QR-koden i vinduet med telefonen (samme wifi eller Tailscale).

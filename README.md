@@ -35,6 +35,10 @@ Læser spillets [Live Client Data API](https://developer.riotgames.com/docs/lol)
 
 Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General Policies](https://developer.riotgames.com/policies/general)) forbyder information spilleren ikke allerede kender og apps der bestemmer spillerens beslutninger, men tillader at fremhæve vigtige beslutninger og give flere valg. Derfor: kun TAB-information, 2-3 begrundede forslag, ingen timere. Bemærk at Riot kræver at produkter registreres i Developer Portal.
 
+## Overlay
+
+Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozilla.org/en-US/docs/Web/API/Document_Picture-in-Picture_API)-vindue (Chrome/Edge 116+), som altid ligger øverst: guld, de 3 forslag (RÅD NU / mangler X) og hvem der er fed. Bip + blink når et forslag skifter til "råd nu" (kun dit eget guld). Intet injiceres i spillet - det er et almindeligt browservindue, så League skal køre i Borderless.
+
 ## Telefon
 
 `"remoteAccess": true` lytter på alle netværk (ellers kun 127.0.0.1). Andre enheder skal have en hemmelig nøgle (QR-kode i vinduet, gemt i `remote-token.txt`), som bliver til en cookie. POST kræver JSON, så fremmede hjemmesider ikke kan ændre noget.
