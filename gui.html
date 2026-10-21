@@ -377,17 +377,34 @@ const gold = (x) => num(Math.round(x)) + ' g';
 const clock = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
 
 function adviceCard(L) {
+  const inv = L.inventory || {};
+  const empty = inv.full
+    ? 'Ingen grund til at bytte noget ud lige nu.'
+    : 'Ingen forslag endnu - mangler build-data for championen.';
   return el('div', { class: 'card' },
-    el('h2', {}, 'Overvej at købe'),
-    el('div', { class: 'muted', style: 'font-size:12px;margin:-6px 0 12px' }, 'Forslag ud fra dit build og hvad modstanderne bygger - du bestemmer.'),
-    L.advice.length ? el('div', { class: 'advice' }, L.advice.map((a) =>
-      el('div', { class: 'pick' + (a.inProgress ? ' progress' : a.adapted ? ' adapted' : '') },
+    el('div', { class: 'plan-head', style: 'margin-bottom:4px' },
+      el('h2', { style: 'margin:0' }, inv.full ? 'Fuldt build' : 'Overvej at købe'),
+      inv.slotsUsed != null ? el('span', { class: 'pill', style: 'margin-left:auto' }, `Pladser: ${inv.slotsUsed}/6 · færdige items: ${inv.completed}`) : null),
+    el('div', { class: 'muted', style: 'font-size:12px;margin:0 0 12px' }, inv.full
+      ? 'Du har 6 færdige items. Herunder: elixir og mulige bytninger - du bestemmer.'
+      : 'Forslag ud fra dit build og hvad modstanderne bygger - du bestemmer.'),
+    inv.elixir ? el('div', { class: 'pick', style: 'margin-bottom:10px' },
+      el('div', { class: 'top', style: 'margin:0' }, img(inv.elixir.icon, inv.elixir.name),
+        el('div', {}, el('div', { class: 'name' }, inv.elixir.name),
+          el('span', { class: 'badge ' + (inv.elixir.canAfford ? 'ok' : 'no') }, inv.elixir.canAfford ? `Råd nu · ${gold(inv.elixir.cost)}` : `${gold(inv.elixir.cost)} · mangler ${gold(inv.elixir.cost - L.gold)}`),
+          el('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, 'Fylder ingen plads - giver stats i 3 min.')))) : null,
+    L.advice.length ? el('div', { class: 'advice' }, L.advice.map((a) => {
+      const extra = (a.sell && a.sell.value) || (a.swap && a.swap.value) || 0;
+      return el('div', { class: 'pick' + (a.inProgress ? ' progress' : a.adapted ? ' adapted' : '') },
         el('div', { class: 'top' }, img(a.icon, a.name),
           el('div', {}, el('div', { class: 'name' }, a.name, a.inProgress ? el('span', { class: 'progtag' }, 'I GANG') : null),
-            a.canAfford ? el('span', { class: 'badge ok' }, `Råd nu · ${gold(a.cost)}`) : el('span', { class: 'badge no' }, `${gold(a.cost)} · mangler ${gold(a.cost - L.gold)}`))),
+            a.canAfford ? el('span', { class: 'badge ok' }, `Råd nu · ${gold(a.cost)}`) : el('span', { class: 'badge no' }, `${gold(a.cost)} · mangler ${gold(a.cost - L.gold - extra)}`))),
         el('ul', {}, a.reasons.map((r) => el('li', {}, r))),
-        a.part ? el('div', { class: 'part' }, 'Råd nu til delen', img(a.part.icon, a.part.name), `${a.part.name} (${gold(a.part.cost)})`) : null)))
-      : el('div', { class: 'muted' }, 'Ingen forslag endnu - mangler build-data for championen.'));
+        a.swap ? el('div', { class: 'part' }, 'Byt ud:', img(a.swap.icon, a.swap.name), `${a.swap.name} (+${gold(a.swap.value)})`) : null,
+        a.sell ? el('div', { class: 'part' }, 'Sælg:', img(a.sell.icon, a.sell.name), `${a.sell.name} (+${gold(a.sell.value)})`) : null,
+        a.part ? el('div', { class: 'part' }, 'Råd nu til delen', img(a.part.icon, a.part.name), `${a.part.name} (${gold(a.part.cost)})`) : null);
+    }))
+      : el('div', { class: 'muted' }, empty));
 }
 
 function enemyLiveCard(L) {
@@ -506,7 +523,9 @@ function render(s) {
   put(
     el('header', {},
       img(s.champion.icon, s.champion.name, 'champ'),
-      el('div', {}, el('h1', {}, s.champion.name), el('div', { class: 'meta' }, `${s.position} · patch ${s.patch || '?'} · ${s.gameMode}`), statusLine(s), matchupLine(s.matchup)),
+      el('div', {}, el('h1', {}, s.champion.name), el('div', { class: 'meta' }, `${s.position} · patch ${s.patch || '?'} · ${s.gameMode}`),
+        s.patchNote ? el('div', { class: 'meta', style: 'color:var(--gold)' }, s.patchNote) : null,
+        statusLine(s), matchupLine(s.matchup)),
       s.winRate != null ? el('div', { class: 'right' }, el('div', { class: 'wr' }, pct(s.winRate)), el('div', { class: 'meta' }, `${num(s.games)} kampe · ${s.statsScope}`)) : null),
     s.position !== 'ARAM' ? el('div', { class: 'roles' },
       el('button', { class: role ? '' : 'active', onclick: () => post('/api/role', { position: null }) }, 'Auto'),
@@ -564,6 +583,8 @@ function overlayContent(s) {
   if (L) {
     return [
       el('div', { class: 'ov-head' }, el('span', { class: 'gold' }, gold(L.gold)), skillLine(L, true), el('span', { class: 'muted' }, clock(L.gameTime))),
+      L.inventory && L.inventory.full ? el('div', { class: 'ov-foot', style: 'margin:0 0 6px' },
+        'Fuldt build' + (L.inventory.elixir ? ` · ${L.inventory.elixir.name}${L.inventory.elixir.canAfford ? ' (råd nu)' : ''}` : '')) : null,
       L.advice.map((a) => el('div', { class: 'ov-row' + (a.inProgress ? ' progress' : '') + (a.canAfford ? ' afford' : '') + (justAffordable.has(a.id) ? ' flash' : ''), 'data-id': a.id },
         img(a.icon, a.name),
         el('div', { class: 't' }, el('div', { class: 'n' }, a.name, a.inProgress ? el('span', { class: 'progtag' }, 'I GANG') : null),

@@ -41,6 +41,17 @@ Klik "Autostart: fra" øverst i vinduet for at starte programmet i baggrunden, n
 logger ind (det åbner ikke browseren). Starter du det igen, åbner det bare vinduet.
 Builds gemmes i mappen "cache" i 6 timer, så champion select går hurtigt.
 
+INVENTORY OG FULDT BUILD
+Købsforslagene tæller dine 6 pladser. Er de fyldt, foreslår den at sælge et starter-item
+(Doran's, Dark Seal, Cull) for at få plads. Har du 6 færdige items (fuldt build), foreslår
+den ikke flere køb - kun en elixir og evt. at bytte et item ud, når der er en konkret grund
+(fx anti-heal mod healere). Items med samme unikke passiv (fx to Spellblade- eller
+Lifeline-items) foreslås ikke sammen.
+
+NY PATCH
+De første dage af en patch har OP.GG næsten ingen kampe. Så bruger programmet den forrige
+patch, indtil der er nok data (vises i vinduet).
+
 UNDER KAMPEN (live)
 Vinduet viser 2-3 købsforslag med begrundelse ud fra dit guld, dit build og hvad
 modstanderne faktisk bygger (fx anti-heal mod healere, armor mod en fed AD-spiller,

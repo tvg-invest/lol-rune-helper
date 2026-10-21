@@ -51,6 +51,14 @@ Læser spillets [Live Client Data API](https://developer.riotgames.com/docs/lol)
 
 Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General Policies](https://developer.riotgames.com/policies/general)) forbyder information spilleren ikke allerede kender og apps der bestemmer spillerens beslutninger, men tillader at fremhæve vigtige beslutninger og give flere valg. Derfor: kun TAB-information, 2-3 begrundede forslag, ingen timere. Bemærk at Riot kræver at produkter registreres i Developer Portal.
 
+## Inventory, fuldt build og ny patch
+
+- **Pladser:** live-API'ens `slot` (0-5 = inventory). Nyt item uden ejede dele og ingen ledig plads -> "sælg Doran's/Dark Seal/Cull" (Dark Seal beholdes hvis Mejai's er i buildet); ingen "råd nu til delen" uden plads.
+- **Fuldt build** (6 færdige items): ingen almindelige køb; højst 2 begrundede bytninger (det mindst brugte af dine items, støvler beholdes) + elixir efter skadetype (Wrath/Sorcery/Iron).
+- **Unikke passiver:** items der deler et `<passive>`-navn i Data Dragon (Spellblade, Lifeline, Cleave, Manaflow, Annul ...) foreslås ikke oven i hinanden.
+- **Ny patch:** under 20.000 kampe på den nye patch -> OP.GG `?version=<forrige>` bruges (også for matchup-data), vises i vinduet.
+- Ingen notifikationer om modstanderens level 6 / "har ult" (Overwolfs Riot-regler forbyder modstander-power-spike-notifikationer).
+
 ## Gameplan mod lane-modstanderen
 
 - **Fast del** (champion select og kamp): win rate i matchuppet (OP.GG `counters`), lane-fordel / flest solo kills / spillestil + tip-tekst fra OP.GG's offentlige MCP-tjeneste (`https://mcp-api.op.gg/mcp`, værktøj `lol_get_lane_matchup_guide`; navne i UPPER_SNAKE_CASE, kun engelsk; udokumenteret - fejler den, laves planen uden), skalering ud fra begge champions' `game_lengths`, og begges typiske core build.

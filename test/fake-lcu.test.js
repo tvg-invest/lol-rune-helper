@@ -484,6 +484,35 @@ server.listen(0, '127.0.0.1', async () => {
     await wait(2500);
     L2 = (await gui('GET', '/state')).body.live;
     assert(!L2.advice.some((a) => a.inProgress), 'en billig del gør ikke et item "i gang"');
+
+    // 7e) Fuldt build (6 færdige items): ingen almindelige køb, kun begrundede bytninger + elixir
+    const passivesOf = (id) => [...(items[id]?.description || '').matchAll(/<passive>([^<]+)<\/passive>/g)].map((m) => m[1].trim());
+    const fullBuild = [3118, 4645, 3157, 3089, 3135, 3020];
+    setMyItems(fullBuild);
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert.strictEqual(L2.inventory.full, true, 'fuldt build genkendt');
+    assert.strictEqual(L2.inventory.slotsUsed, 6);
+    assert.strictEqual(L2.inventory.elixir?.id, '2139', `elixir til AP: ${JSON.stringify(L2.inventory.elixir)}`);
+    assert(L2.advice.length <= 2, 'højst 2 bytte-forslag');
+    assert(L2.advice.every((a) => a.swap && a.adapted && a.reasons[0].startsWith('Fuldt build: byt')), `kun begrundede bytninger: ${JSON.stringify(L2.advice.map((a) => a.reasons))}`);
+    assert(!L2.advice.some((a) => fullBuild.map(String).includes(a.id)), 'foreslår ikke noget du har');
+    const ownedPassives = new Set(fullBuild.flatMap((id) => passivesOf(String(id))));
+    assert(!L2.advice.some((a) => passivesOf(a.id).some((p) => ownedPassives.has(p))), 'ingen dobbelt unik passiv');
+    console.log('Fuldt build:', JSON.stringify({ elixir: L2.inventory.elixir.name, byt: L2.advice.map((a) => `${a.swap.name} -> ${a.name}`) }));
+
+    // 7f) Alle 6 pladser brugt (starter-items + potions) -> nye items kræver salg, ingen del-forslag
+    setMyItems([1056, 1082, 3020, 3157, 3089, 2003]);
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert.strictEqual(L2.inventory.full, false);
+    assert.strictEqual(L2.inventory.slotsUsed, 6);
+    assert(L2.advice.length >= 1, 'stadig forslag');
+    assert(L2.advice.every((a) => !a.part), 'ingen "råd nu til delen" uden plads');
+    const needSlot = L2.advice.filter((a) => a.sell);
+    assert(needSlot.length >= 1 && needSlot.every((a) => ['1056', '1082'].includes(a.sell.id) && a.reasons.some((r) => r.startsWith('Kræver en ledig plads: sælg'))),
+      `salg for at få plads: ${JSON.stringify(L2.advice.map((a) => [a.name, a.sell?.name, a.reasons]))}`);
+    console.log('Fyldte pladser:', L2.advice.map((a) => `${a.name}${a.sell ? ` (sælg ${a.sell.name})` : ''}`).join(', '));
     live.data = liveGame(zhonyaPart);
     await wait(2500);
 
@@ -540,10 +569,11 @@ server.listen(0, '127.0.0.1', async () => {
     assert(g, 'kampoversigt');
     assert.strictEqual(g.champion, 'Ahri');
     assert.strictEqual(g.result, 'Sejr', 'resultat fra GameEnd');
-    const zBuy = g.buys.find((b) => b.id === '3157');
-    assert(zBuy && zBuy.suggested && zBuy.adapted, `Zhonya-køb markeret som foreslået/tilpasset: ${JSON.stringify(g.buys)}`);
-    assert.strictEqual(g.buys.length, 1, 'kun færdige items tæller som køb');
-    assert.strictEqual(g.followed, 1);
+    // (7e/7f gav dig også nogle items, så der er flere køb - Zhonya's fra 7d skal være foreslået og tilpasset)
+    assert(g.buys.some((b) => b.id === '3157' && b.suggested && b.adapted), `Zhonya-køb markeret som foreslået/tilpasset: ${JSON.stringify(g.buys)}`);
+    assert(g.buys.every((b) => isFinite(b.t) && b.id), 'køb har tid og item');
+    assert(!g.buys.some((b) => ['1056', '1082', '2003'].includes(b.id)), 'kun færdige items tæller som køb');
+    assert(g.followed > 0 && g.followed <= 1, `andel fulgte forslag: ${g.followed}`);
     assert.strictEqual(after.history.champions[0].champion, 'Ahri');
     assert(fs.existsSync(env.LOL_HELPER_HISTORY), 'historik gemt på disk');
     assert(out.includes('Kampoversigt: Ahri'), 'log med kampoversigt');

@@ -193,7 +193,9 @@ async function getJson(url) {
 const dd = { version: '', champions: {}, championKeyById: {}, items: {}, runes: {}, spells: {} };
 
 async function loadStaticData() {
-  const [version] = await getJson('https://ddragon.leagueoflegends.com/api/versions.json');
+  const versions = await getJson('https://ddragon.leagueoflegends.com/api/versions.json');
+  const [version] = versions;
+  dd.versions = versions.slice(0, 10);
   const base = `https://ddragon.leagueoflegends.com/cdn/${version}`;
   const [champs, items, styles, spells] = await Promise.all(
     ['champion', 'item', 'runesReforged', 'summoner'].map((f) => getJson(`${base}/data/en_US/${f}.json`)),
@@ -210,6 +212,9 @@ async function loadStaticData() {
       antiheal: /Grievous Wounds/.test(it.description || ''),
       icon: `${base}/img/item/${id}.png`,
       gold: it.gold?.total || 0,
+      sell: it.gold?.sell || 0,
+      // Navngivne passiver ("Spellblade", "Lifeline", "Cleave" ...): to items med samme navn virker ikke sammen.
+      passives: [...new Set([...(it.description || '').matchAll(/<passive>([^<]+)<\/passive>/g)].map((m) => m[1].trim()))],
       from: it.from || [],
       into: it.into || [],
       depth: it.depth || 1,
@@ -287,13 +292,35 @@ function cachedJson(key, loader) {
   return promise;
 }
 
+// I starten af en ny patch har OP.GG næsten ingen kampe (fx 280 i stedet for 80.000).
+// Så bruges den forrige patch, indtil den nye har nok data.
+const THIN_PATCH_GAMES = 20000;
+
+// Forrige patch ud fra Data Dragons versionsliste: "16.21" -> "16.20".
+function previousPatch(version) {
+  const majorMinor = (v) => String(v || '').split('.').slice(0, 2).join('.');
+  const current = majorMinor(version);
+  const prev = (dd.versions || []).map(majorMinor).find((v) => v && v !== current && /^\d+\.\d+$/.test(v));
+  return current && prev ? prev : null;
+}
+
 function fetchBuild(region, mode, championId, position, target) {
   const key = `${region}_${mode}_${championId}_${position}${target ? `_vs${target}` : ''}`;
   return cachedJson(key, async () => {
     const url = `https://lol-api-champion.op.gg/api/${region}/champions/${mode}/${championId}/${position}` +
       (target ? `?target_champion=${target}` : '');
     const j = await getJson(url);
-    return { ...j.data, version: j.meta?.version };
+    const data = { ...j.data, version: j.meta?.version };
+    const games = data.summary?.average_stats?.play || 0;
+    const prev = games < THIN_PATCH_GAMES ? previousPatch(j.meta?.version) : null;
+    if (prev) {
+      try {
+        const p = await getJson(`${url}${url.includes('?') ? '&' : '?'}version=${prev}`);
+        const prevGames = p.data?.summary?.average_stats?.play || 0;
+        if (prevGames >= games * 3) return { ...p.data, version: p.meta?.version || prev, newestVersion: j.meta?.version, thinPatch: true };
+      } catch {} // forrige patch utilgængelig: brug de tynde data
+    }
+    return data;
   });
 }
 
@@ -440,7 +467,7 @@ function trackOpponent(L) {
       if (i !== -1) before.splice(i, 1);
       else add('opp-item', `${plan.opponent} har købt ${itemName(id)}`);
     }
-    if (plan.seen.level < 6 && opp.level >= 6) add('opp-level', `${plan.opponent} er level 6`);
+    // Bevidst ingen besked når han når level 6: Riot/Overwolf forbyder notifikationer om modstanderens power spikes.
   }
   plan.seen = { items: completed, level: opp.level };
 }
@@ -453,10 +480,8 @@ function planNow(plan, L) {
   const n = plan.opponent;
   const num = (x) => Math.round(x).toLocaleString('da-DK');
   const lines = [];
-  let lvl = `Level: dig ${me.level}, ${n} ${opp.level}`;
-  if (me.level >= 6 && opp.level < 6) lvl += ` - du har ult, ${n} har ikke endnu`;
-  else if (opp.level >= 6 && me.level < 6) lvl += ` - ${n} har ult, du har ikke endnu`;
-  lines.push(lvl);
+  // Kun levels (står på TAB) - ingen "han har ult"-fortolkning (modstanderens power spikes må ikke fremhæves).
+  lines.push(`Level: dig ${me.level}, ${n} ${opp.level}`);
   const diff = me.itemGold - opp.itemGold;
   lines.push(`Items: dig ${num(me.itemGold)} g, ${n} ${num(opp.itemGold)} g (${diff >= 0 ? '+' : ''}${num(diff)} til dig)`);
   lines.push(`KDA: dig ${me.kills}/${me.deaths}/${me.assists}, ${n} ${opp.kills}/${opp.deaths}/${opp.assists}`);
@@ -884,7 +909,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -1004,6 +1029,8 @@ function livePlayer(p) {
     isDead: Boolean(p.isDead),
     itemIds,
     itemGold,
+    // Optagede inventory-pladser (0-5; plads 6 er trinket). En stak potions fylder én plads.
+    slotsUsed: (p.items || []).filter((i) => (typeof i.slot === 'number' ? i.slot < 6 : !dd.items[String(i.itemID)]?.tags.includes('Trinket'))).length,
     dmg: damageProfile(champ, itemIds),
     armor: itemIds.reduce((sum, id) => sum + (dd.items[id]?.stats.FlatArmorMod || 0), 0),
     mr: itemIds.reduce((sum, id) => sum + (dd.items[id]?.stats.FlatSpellBlockMod || 0), 0),
@@ -1030,6 +1057,25 @@ function remainingCost(id, ownedIds) {
 
 // Dele for mindst så meget guld betyder at du er i gang med itemet (en enkelt Amplifying Tome gør ikke).
 const IN_PROGRESS_GOLD = 700;
+
+// Starter-items man sælger for at få plads: Doran's Shield/Blade/Ring, Dark Seal, Cull.
+const SELLABLE_STARTERS = new Set(['1054', '1055', '1056', '1082', '1083']);
+const ELIXIR = { ad: '2140', ap: '2139', tank: '2138' }; // Wrath, Sorcery, Iron (500 g, fylder ingen plads)
+
+// Inventory-overblik: pladser, fuldt build og elixir der passer til dig (ved fuldt build).
+function inventoryInfo(me, gold, mapNumber) {
+  const completed = me.itemIds.filter((id) => isCompleted(dd.items[id]));
+  const full = completed.length >= 6;
+  const kind = me.champ?.tags?.[0] === 'Tank' ? 'tank' : me.dmg.ad >= 0.5 ? 'ad' : 'ap';
+  const elixirId = ELIXIR[kind];
+  const elixirOk = full && dd.items[elixirId] && dd.items[elixirId].maps[mapNumber] !== false;
+  return {
+    slotsUsed: Math.min(6, me.slotsUsed ?? me.itemIds.length),
+    completed: completed.length,
+    full,
+    elixir: elixirOk ? { id: elixirId, cost: dd.items[elixirId].gold, canAfford: dd.items[elixirId].gold <= gold } : null,
+  };
+}
 
 function affordablePart(id, ownedIds, gold) {
   const owned = [...ownedIds];
@@ -1126,7 +1172,8 @@ function analyzeLive(data, build) {
   const opponent = me.position ? enemies.find((p) => p.position === me.position) : null;
   const matchup = opponent && { player: opponent, stats: matchupStats(build, opponent.champ?.key) };
   const skill = skillHint(data.activePlayer, build);
-  return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice, matchup, skill };
+  const inventory = inventoryInfo(me, gold, data.gameData?.mapNumber || 11);
+  return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice, matchup, skill, inventory };
 }
 
 // 2-3 forslag fra championens egen item-pulje, scoret efter popularitet + modstandernes faktiske builds.
@@ -1141,6 +1188,22 @@ function liveAdvice(build, me, enemy, gold, mapNumber) {
   const hasBoots = owned.some((id) => dd.items[id]?.tags.includes('Boots') && dd.items[id].depth >= 2);
   const hasAntiheal = owned.some((id) => dd.items[id]?.antiheal);
   const iAmAD = me.dmg.ad >= 0.5;
+
+  // Inventory: 6 pladser. Fuldt build = 6 færdige items -> kun "byt ud"-forslag.
+  const completedOwned = owned.filter((id) => isCompleted(dd.items[id]));
+  const full = completedOwned.length >= 6;
+  const freeSlots = Math.max(0, 6 - (me.slotsUsed ?? owned.length));
+  // Unikke passiver du allerede har (to Spellblade-/Lifeline-/Hydra-items virker ikke sammen).
+  const ownedPassives = new Set(completedOwned.flatMap((id) => dd.items[id].passives));
+  // Starter-items der kan sælges for at få plads (billigste/mindst værdifulde først).
+  const buildingMejais = (pop.get('3041') || 0) >= 0.05;
+  const sellable = [...new Set(owned)]
+    .filter((id) => SELLABLE_STARTERS.has(id) && !(id === '1082' && buildingMejais))
+    .sort((a, b) => dd.items[a].sell - dd.items[b].sell);
+  // Ved fuldt build: det af dine items der er mindst brugt i buildet (støvler beholdes).
+  const swapOut = full
+    ? completedOwned.filter((id) => !dd.items[id].tags.includes('Boots')).sort((a, b) => (pop.get(a) || 0) - (pop.get(b) || 0))[0]
+    : null;
   const names = (list) => list.slice(0, 3).map((p) => p.champ?.name || p.name).join(', ');
   const kda = (p) => `${p.kills}/${p.deaths}/${p.assists}`;
 
@@ -1161,6 +1224,7 @@ function liveAdvice(build, me, enemy, gold, mapNumber) {
     if (!isCompleted(it) || !it.purchasable || it.maps[mapNumber] === false || owned.includes(id)) continue;
     if (hasBoots && it.tags.includes('Boots')) continue;
     if (hasAntiheal && it.antiheal) continue;
+    if (it.passives.some((p) => ownedPassives.has(p))) continue; // samme unikke passiv som noget du har
     const { cost, used } = remainingCost(id, owned);
     const paid = it.gold - cost;
     const inProgress = paid >= IN_PROGRESS_GOLD;
@@ -1183,16 +1247,34 @@ function liveAdvice(build, me, enemy, gold, mapNumber) {
     if (it.tags.includes('SpellBlock') && enemy.apShare >= 0.55) { score += 15; reasons.push(`${pct(enemy.apShare)} af deres trussel er AP`); }
     const adapted = reasons.length > (inProgress ? 1 : 0);
     if (!reasons.length) reasons.push(`Fast del af buildet (${pct(Math.min(Math.max(popularity, 0), 1))} køber det)`);
-    const part = cost > gold ? affordablePart(id, owned, gold) : null;
-    scored.push({ id, score, reasons, cost, canAfford: cost <= gold, part, adapted, inProgress, used });
+    let budget = gold;
+    let sell = null;
+    let swap = null;
+    if (full) {
+      // Fuldt build: kun bytte når der er en konkret grund (anti-heal, armor, MR ...).
+      if (!adapted || !swapOut) continue;
+      swap = swapOut;
+      budget += dd.items[swapOut].sell;
+      reasons.unshift(`Fuldt build: byt ${itemName(swapOut)} ud (sælges for ${dd.items[swapOut].sell} g)`);
+    } else if (!used.length && freeSlots === 0) {
+      // Nyt item uden ejede dele kræver en ledig plads.
+      if (!sellable.length) continue;
+      sell = sellable[0];
+      budget += dd.items[sell].sell;
+      reasons.push(`Kræver en ledig plads: sælg ${itemName(sell)} (+${dd.items[sell].sell} g)`);
+    }
+    // En del fylder en plads: kun forslag om del hvis der er plads.
+    const part = cost > budget && freeSlots > 0 && !full ? affordablePart(id, owned, gold) : null;
+    scored.push({ id, score, reasons, cost, canAfford: cost <= budget, part, adapted, inProgress, used, sell, swap });
   }
   scored.sort((a, b) => b.score - a.score);
   // Rækkefølge: det item du er i gang med (dine dele er ikke spildt), så op til 2 tilpassede forslag,
   // resten fyldes med det bedste fra buildet. Hver ejet del bruges kun til ét "i gang"-item.
   // Max ét anti-heal-item.
   const out = [];
+  const maxOut = full ? 2 : 3;
   const add = (s) => {
-    if (out.includes(s) || out.length === 3) return false;
+    if (out.includes(s) || out.length === maxOut) return false;
     if (dd.items[s.id].antiheal && out.some((o) => dd.items[o.id].antiheal)) return false;
     out.push(s);
     return true;
@@ -1373,6 +1455,10 @@ function liveView() {
     gameMode: L.gameMode,
     gold: L.gold,
     skill: L.skill,
+    inventory: L.inventory && {
+      ...L.inventory,
+      elixir: L.inventory.elixir && { ...L.inventory.elixir, name: itemName(L.inventory.elixir.id), icon: dd.items[L.inventory.elixir.id]?.icon },
+    },
     matchup: L.matchup && {
       name: L.matchup.player.champ?.name || L.matchup.player.name,
       icon: L.matchup.player.champ?.icon,
@@ -1390,6 +1476,8 @@ function liveView() {
       adapted: a.adapted,
       inProgress: a.inProgress,
       part: a.part && { ...item(a.part), cost: dd.items[a.part].gold },
+      sell: a.sell && { ...item(a.sell), value: dd.items[a.sell].sell },
+      swap: a.swap && { ...item(a.swap), value: dd.items[a.swap].sell },
     })),
     enemy: {
       adShare: L.enemy.adShare,
@@ -1498,6 +1586,7 @@ function viewModel() {
     roleOverride: app.roleOverride,
     gameMode: pick.gameMode,
     patch: b.build.version,
+    patchNote: b.build.thinPatch ? `Patch ${b.build.newestVersion} er ny og har for få kampe endnu - bruger ${b.build.version}` : null,
     games: stats?.play,
     winRate: stats?.winRate,
     statsScope: stats?.scope,
@@ -1843,6 +1932,7 @@ async function handlePick(pick, pickKey, itemKey) {
   if (fullApply) {
     const stats = roleStats(app.build);
     log(`${champName} (${app.build.position}) - patch ${app.build.build.version || '?'}` +
+      (app.build.build.thinPatch ? ` (${app.build.build.newestVersion} har for få kampe endnu)` : '') +
       (stats ? `, ${stats.play.toLocaleString('da-DK')} kampe, ${pct(stats.winRate)} WR (${stats.scope})` : ''));
     if (cfg.setRunes && app.rec.runeOptions.length) await applyRuneChoice(0);
     if (cfg.setSpells && app.rec.spells) {
