@@ -57,7 +57,28 @@ for dir in "$WIN" "$MAC"; do
   cp config.json "$dir/"
   cp LAES-MIG.txt "$dir/LÆS MIG.txt"
 done
-(cd "$DIST" && zip -qry LoL-Rune-Helper-Windows.zip LoL-Rune-Helper-Windows && zip -qry LoL-Rune-Helper-Mac.zip LoL-Rune-Helper-Mac)
+# Windows-zip med Python: navne med æøå får UTF-8-flaget (0x800). Info-ZIP's zip på macOS sætter det ikke,
+# og så viser Stifinder "LÆS MIG.txt" som "L├åS MIG.txt".
+python3 - "$DIST" LoL-Rune-Helper-Windows <<'PY'
+import os, sys, zipfile
+dist, name = sys.argv[1], sys.argv[2]
+out = os.path.join(dist, name + '.zip')
+with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+    for root, dirs, files in os.walk(os.path.join(dist, name)):
+        dirs.sort()
+        for f in sorted(files):
+            if f == '.DS_Store':
+                continue
+            full = os.path.join(root, f)
+            z.write(full, os.path.relpath(full, dist))
+with zipfile.ZipFile(out) as z:
+    bad = [i.filename for i in z.infolist() if not i.filename.isascii() and not i.flag_bits & 0x800]
+    if bad:
+        sys.exit('Mangler UTF-8-flag i zip: %s' % bad)
+    if not any(i.filename.endswith('/L\u00c6S MIG.txt') for i in z.infolist()):
+        sys.exit('L\u00c6S MIG.txt mangler i Windows-zip')
+PY
+(cd "$DIST" && zip -qry LoL-Rune-Helper-Mac.zip LoL-Rune-Helper-Mac)
 
 # 6) Rå programfiler til automatiske opdateringer (navne som programmet leder efter i udgivelsen)
 mkdir -p "$DIST/release"
