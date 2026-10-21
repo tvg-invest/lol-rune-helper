@@ -1319,6 +1319,11 @@ async function installUpdate() {
     fs.rmSync(exeNew, { force: true }); // ingen 87 MB-rest, hvis et trin fejlede
   }
   const rollback = () => {
+    // Slet aldrig programfilen, hvis der ikke er en backup at lægge tilbage.
+    if (!fs.existsSync(exeOld)) {
+      log(`Kunne ikke lægge den gamle version tilbage: ${path.basename(exeOld)} findes ikke - beholder den nuværende fil`);
+      return;
+    }
     try { fs.rmSync(exe, { force: true }); fs.renameSync(exeOld, exe); } catch (e) { log(`Kunne ikke lægge den gamle version tilbage: ${e.message}`); }
   };
 
@@ -2997,7 +3002,8 @@ async function main() {
     // Ryd op efter en opdatering først nu, hvor vi lytter: indtil da kan den gamle version rulle tilbage til .old.
     // På Windows er .old låst, til den gamle proces er lukket - prøv derfor igen lidt senere.
     fs.rm(UPDATE_PIDFILE, { force: true }, () => {});
-    const rmOld = () => fs.rm(`${process.execPath}.old`, { force: true }, () => {});
+    // Aldrig mens en opdatering kører: så er .old den backup, der skal rulles tilbage til.
+    const rmOld = () => { if (!updateRunning) fs.rm(`${process.execPath}.old`, { force: true }, () => {}); };
     rmOld();
     setTimeout(rmOld, 5000).unref();
     setTimeout(rmOld, 60000).unref();
