@@ -676,8 +676,24 @@ function matchupChoices(myBuild, matchupBuild, oppName) {
   return out;
 }
 
+// Champion-specifikke noter pr. fase (fra docs/research-tryndamere-evelynn.md, patch 26.20).
+const CHAMPION_COACH = {
+  Tryndamere: {
+    lane: ['Level 2-3 er dit første spike: E + Q giver et stærkt all-in.'],
+    spike: ['Level 6: R (Undying Rage) gør dig udødelig i 5 sekunder - det er dit dive-vindue.', 'Ravenous Hydra giver waveclear og gør dig stærk til split-push.'],
+    mid: ['Med Hydra kan du presse en sidelane og trække modstandere væk fra objectives.'],
+    late: ['Infinity Edge er dit crit-spike.', 'Mod armor-stackere: se armor pen-forslagene (fx Lord Dominik\'s Regards / Mortal Reminder).'],
+  },
+  Evelynn: {
+    lane: ['Du er svag før level 6: farm og undgå kampe.', 'Camps spawner 0:55 (Gromp/Krugs 1:07, scuttle 2:55). Full clear ca. 3:07, og recall til Dark Seal er standard.'],
+    spike: ['Level 6: camouflage + R - gank isolerede mål.', 'Control Wards, Oracle Lens og Scryer\'s Bloom afslører dig (under kampen står det under "Modstanderne").'],
+    mid: ['Lanes hvor din holdkammerat er foran (se "Gank-overblik"), er de nemmeste ganks.'],
+    late: [],
+  },
+};
+
 // Matchup-plan i faser ud fra OP.GG-data: laning, første power spikes, midgame og lategame.
-function planPhases({ myBuild, oppBuild, matchupBuild, oppName, laneAdvantage, soloKill, playStyle, scaling, myCore, oppCore, position }) {
+function planPhases({ myBuild, oppBuild, matchupBuild, oppName, laneAdvantage, soloKill, playStyle, scaling, myCore, oppCore, position, myId }) {
   const gold = (id) => dd.items[id]?.gold || 0;
   const g = (x) => x.toLocaleString('da-DK');
   const jungle = position === 'JUNGLE';
@@ -721,6 +737,8 @@ function planPhases({ myBuild, oppBuild, matchupBuild, oppName, laneAdvantage, s
     if (curve.drop <= -0.03) late.push('Din win rate falder i lange kampe - brug dine fordele til objectives og tårne tidligt.');
     else if (curve.drop >= 0.03) late.push('Din win rate stiger i lange kampe - kommer du bagud, så farm og spil efter lategame.');
   }
+  const own = CHAMPION_COACH[myId];
+  if (own) for (const [k, list] of [['lane', lane], ['spike', spike], ['mid', mid], ['late', late]]) list.unshift(...own[k]);
   return [
     { key: 'lane', title: jungle ? 'Start (level 1-5)' : 'Laning (level 1-5)', lines: lane },
     { key: 'spike', title: 'Level 6 og første item', lines: spike },
@@ -739,7 +757,8 @@ function phaseNow(L, plan) {
 
 // Styrkeforhold mellem dig og din lane-modstander: level, ult, færdige items og item-guld (står alt på TAB).
 const completedCount = (p) => p.itemIds.filter((id) => isCompleted(dd.items[id]) && !isBoots(dd.items[id])).length;
-function balanceOf(me, opp, name) {
+// aName: navn på den første spiller (standard "dig").
+function balanceOf(me, opp, name, aName = null) {
   const g = (x) => Math.round(x).toLocaleString('da-DK');
   let score = 0;
   const why = [];
@@ -747,13 +766,13 @@ function balanceOf(me, opp, name) {
   if (lv) { score += lv; why.push(`${Math.abs(lv)} level ${lv > 0 ? 'foran' : 'bagud'}`); }
   const ultMe = me.level >= 6;
   const ultHim = opp.level >= 6;
-  if (ultMe !== ultHim) { score += ultMe ? 1.5 : -1.5; why.push(ultMe ? 'du har ult' : `${name} har ult`); }
+  if (ultMe !== ultHim) { score += ultMe ? 1.5 : -1.5; why.push(ultMe ? (aName ? `${aName} har ult` : 'du har ult') : `${name} har ult`); }
   const items = completedCount(me) - completedCount(opp);
   if (items) { score += items * 1.5; why.push(`${Math.abs(items)} ${Math.abs(items) > 1 ? 'færdige items' : 'færdigt item'} ${items > 0 ? 'foran' : 'bagud'}`); }
   const gold = me.itemGold - opp.itemGold;
   if (Math.abs(gold) >= 500) { score += gold / 1000; why.push(`${g(Math.abs(gold))} g item-guld ${gold > 0 ? 'foran' : 'bagud'}`); }
   const side = score >= 1.5 ? 'me' : score <= -1.5 ? 'opp' : 'even';
-  return { side, label: side === 'me' ? 'Fordel dig' : side === 'opp' ? `Fordel ${name}` : 'Jævnt', why, score: Math.round(score * 10) / 10 };
+  return { side, label: side === 'me' ? `Fordel ${aName || 'dig'}` : side === 'opp' ? `Fordel ${name}` : 'Jævnt', why, score: Math.round(score * 10) / 10 };
 }
 
 // Kort styrke-kontekst til en duel: "level 6 mod 7, 800 g bagud i items".
@@ -804,7 +823,7 @@ async function buildPlan(myKey, oppKey, position, myBuild) {
     scaling,
     myCore,
     oppCore,
-    phases: planPhases({ myBuild, oppBuild, matchupBuild, oppName, laneAdvantage, soloKill, playStyle, scaling, myCore, oppCore, position }),
+    phases: planPhases({ myBuild, oppBuild, matchupBuild, oppName, laneAdvantage, soloKill, playStyle, scaling, myCore, oppCore, position, myId: dd.champions[myKey]?.id }),
     // Items du faktisk bygger: core + sene items som mindst 2% køber (ikke fx Randuin's på en mage).
     matchupBuild,
     myPool: [
@@ -1309,9 +1328,19 @@ const history = (() => {
 function trackGame(data, L) {
   const t = L.gameTime;
   if (!app.game || app.game.championKey !== L.me.champ?.key) {
-    app.game = { championKey: L.me.champ?.key, seen: new Map(), adapted: new Set(), buys: [], lastItems: [...L.me.itemIds], result: null };
+    app.game = { championKey: L.me.champ?.key, seen: new Map(), adapted: new Set(), buys: [], lastItems: [...L.me.itemIds], result: null, deaths: [], events: new Set() };
   }
   const g = app.game;
+  // Dine dødsfald fra kill-feedet: hvem, med hvor mange hjælpere, og styrkeforholdet mod drabsmanden.
+  for (const e of data.events?.Events || []) {
+    if (e.EventName !== 'ChampionKill' || g.events.has(e.EventID)) continue;
+    g.events.add(e.EventID);
+    if (L.gameTime - (e.EventTime || 0) > 15) continue; // gamle kills (programmet startet midt i kampen)
+    if (e.VictimName !== L.me.key && e.VictimName !== L.me.name) continue;
+    const killer = L.enemies.find((p) => e.KillerName && (p.key === e.KillerName || p.name === e.KillerName));
+    const what = killer ? killer.champ?.name || killer.name : /turret/i.test(e.KillerName || '') ? 'tårn' : /minion/i.test(e.KillerName || '') ? 'minions' : 'andet';
+    g.deaths.push({ t: e.EventTime, killer: what, helpers: (e.Assisters || []).length, context: killer ? duelContext(L.me, killer) : null });
+  }
   for (const a of L.advice) {
     if (!g.seen.has(a.id)) g.seen.set(a.id, t);
     if (a.adapted) g.adapted.add(a.id);
@@ -1340,6 +1369,44 @@ function clearPick() {
   app.planKey = null;
   app.jungle = null;
   app.jungleKey = null;
+}
+
+const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+// Første færdige item der ikke er støvler (tid i sek.), fra en kamps køb.
+const firstItemTime = (game) => (game.buys || []).find((b) => !isBoots(dd.items[b.id]))?.t ?? null;
+
+// "Læring" efter kampen: sammenligning med dine egne seneste kampe på samme champion + mønstre i dødsfald/dueller.
+function lessonsFor(s, prev) {
+  const out = [];
+  const avg = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  const dec = (x) => String(Math.round(x * 10) / 10).replace('.', ',');
+  if (prev.length >= 3) {
+    const cs = avg(prev.map((x) => x.csPerMin || 0));
+    out.push(`CS/min ${dec(s.csPerMin)} - dit snit med ${s.champion} er ${dec(cs)} (${prev.length} kampe)${s.csPerMin >= cs + 0.5 ? ', bedre end normalt' : s.csPerMin <= cs - 0.5 ? ', under normalt' : ''}`);
+    const d = avg(prev.map((x) => x.deaths || 0));
+    out.push(`${s.deaths} dødsfald - dit snit er ${dec(d)}${s.deaths >= d + 2 ? ', flere end normalt' : s.deaths <= d - 2 ? ', færre end normalt' : ''}`);
+    const times = prev.map(firstItemTime).filter((t) => t != null);
+    const mine = firstItemTime(s);
+    if (mine != null && times.length >= 3) {
+      const a = avg(times);
+      out.push(`Første færdige item ${mmss(mine)} - dit snit er ${mmss(a)}${mine <= a - 60 ? ', hurtigere end normalt' : mine >= a + 60 ? ', langsommere end normalt' : ''}`);
+    }
+  } else out.push(`Sammenligning med dine egne kampe kommer efter 3 kampe med ${s.champion} (${prev.length} indtil nu).`);
+  const early = (s.deathLog || []).filter((d) => d.t < 14 * 60);
+  if (early.length >= 2) {
+    const by = new Map();
+    for (const d of early) by.set(d.killer, (by.get(d.killer) || 0) + 1);
+    out.push(`${early.length} dødsfald før 14 min (${[...by].map(([k, n]) => (n > 1 ? `${n}x ` : '') + k).join(', ')})`);
+  }
+  const ganged = (s.deathLog || []).filter((d) => d.helpers >= 2).length;
+  if (ganged >= 2) out.push(`${ganged} af dine dødsfald var mod 3 eller flere`);
+  const lost = (s.duels || []).filter((d) => !d.won);
+  if (lost.length && lost.length > (s.duels || []).length - lost.length) {
+    const behind = lost.filter((d) => /bagud/.test(d.context)).length;
+    out.push(`Du tabte ${lost.length} af ${s.duels.length} dueller mod ${s.matchup?.champion}` +
+      (behind ? ` - ${behind} af dem mens du var bagud i items` : ''));
+  }
+  return out;
 }
 
 function finishGame() {
@@ -1377,6 +1444,8 @@ function finishGame() {
     summary.duels = plan.duels.map((d) => ({ t: d.t, won: d.won, solo: d.solo, context: d.context }));
     summary.balanceEnd = balanceOf(L.me, opp, plan.opponent).label;
   }
+  summary.deathLog = g.deaths;
+  summary.lessons = lessonsFor(summary, srGames().filter((x) => x.championId === summary.championId).slice(0, 10));
   history.games.unshift(summary);
   history.games.length = Math.min(history.games.length, 100);
   try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 1)); } catch (e) { log(`Kunne ikke gemme historik: ${e.message}`); }
@@ -1387,7 +1456,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.15.0';
+const VERSION = '1.16.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -2359,6 +2428,7 @@ function liveView() {
     me: player(L.me),
     side: L.me.team === 'CHAOS' ? 'RED' : 'BLUE', // ORDER = blå side
     vision: visionView(L),
+    lanes: laneView(L),
     allies: team(L.allies, L.me.team),
     enemies: team(L.enemies, enemySide),
     advice: L.advice.map((a) => ({
@@ -2391,6 +2461,23 @@ function visionView(L) {
   if (!STEALTH_CHAMPS.has(L.me.champ?.id)) return null;
   const who = (id) => L.enemies.filter((p) => p.itemIds.includes(id)).map((p) => p.champ?.name || p.name);
   return { lens: who('3364'), ward: who('2055') };
+}
+
+// Styrkeforhold i hver lane (level, ult, items - som på TAB). For junglere: gank-overblik.
+const LANES = [['TOP', 'Top'], ['JUNGLE', 'Jungle'], ['MIDDLE', 'Mid'], ['BOTTOM', 'Bot'], ['UTILITY', 'Support']];
+function laneView(L) {
+  if (!L.me.position) return null;
+  const rows = [];
+  for (const [pos, lane] of LANES) {
+    const a = L.allies.find((p) => p.position === pos);
+    const b = L.enemies.find((p) => p.position === pos);
+    if (!a || !b) continue;
+    const name = (p) => p.champ?.name || p.name;
+    const bal = balanceOf(a, b, name(b), a === L.me ? null : name(a));
+    const side = (p) => ({ name: name(p), icon: p.champ?.icon, level: p.level, dead: p.isDead, kda: `${p.kills}/${p.deaths}/${p.assists}` });
+    rows.push({ lane, me: a === L.me, ally: side(a), enemy: side(b), side: bal.side, label: bal.label, why: bal.why.slice(0, 2) });
+  }
+  return rows.length ? { jungle: L.me.position === 'JUNGLE', rows } : null;
 }
 
 const champView = (id) => ({ id, name: dd.champions[id]?.name || String(id), icon: dd.champions[id]?.icon });

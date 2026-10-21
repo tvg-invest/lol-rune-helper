@@ -18,7 +18,7 @@ const ctx = vm.createContext({
 });
 vm.runInContext(src.slice(0, cut), ctx, { filename: file });
 const H = vm.runInContext(`({ dd, app, loadStaticData, isCompleted, isBoots, coreOf, nextInBuild, liveAdvice, inventoryInfo,
-  starterAdvice, affordablePart, sellableIds, livePlayer, counterItems, recommend, planNow, remainingCost })`, ctx);
+  starterAdvice, affordablePart, sellableIds, livePlayer, counterItems, recommend, planNow, remainingCost, planPhases, lessonsFor, balanceOf })`, ctx);
 
 const noEnemy = { healers: [], fed: [], armorStackers: [], mrStackers: [], adShare: 0.5, apShare: 0.5, armorHeavy: false, mrHeavy: false };
 const meWith = (ids, dmg = { ad: 0.2, ap: 0.8 }) => ({ itemIds: ids.map(String), slotsUsed: ids.length, dmg, level: 11, itemGold: 0, kills: 0, deaths: 0, assists: 0 });
@@ -146,6 +146,33 @@ const eve = {
   // Svag grund (kun AD-andel) giver ingen tilpasset plads
   const share = H.liveAdvice(armorBuild, meWith([]), { ...noEnemy, adShare: 0.8 }, 5000, 11).find((a) => a.id === '3157');
   assert(share && !share.adapted, 'AD-andel alene er ikke en tilpasset grund');
+
+  // Coach: champion-specifikke noter står først i fasen
+  const trPhases = H.planPhases({ myBuild: {}, oppBuild: null, matchupBuild: null, oppName: 'Darius', laneAdvantage: 'jævn', soloKill: null, playStyle: null, scaling: null, myCore: ['6698'], oppCore: [], position: 'TOP', myId: 'Tryndamere' });
+  assert(trPhases.find((p) => p.key === 'spike').lines[0].startsWith('Level 6: R (Undying Rage)'), JSON.stringify(trPhases));
+  assert(trPhases.find((p) => p.key === 'lane').lines[0].startsWith('Level 2-3'), 'Trynd laning-note først');
+  const evePhases = H.planPhases({ myBuild: {}, oppName: 'Graves', laneAdvantage: 'Graves', myCore: [], oppCore: [], position: 'JUNGLE', myId: 'Evelynn' });
+  assert(evePhases[0].title.startsWith('Start') && evePhases[0].lines[0].startsWith('Du er svag før level 6'), JSON.stringify(evePhases[0]));
+  assert(evePhases[0].lines.some((l) => l.startsWith('Graves er stærkest tidligt')), 'jungle-formulering');
+  // Styrkeforhold mellem to holdkammerater/modstandere med navne
+  const pl = (level, ids) => ({ level, itemIds: ids.map(String), itemGold: ids.reduce((s, id) => s + (it(String(id))?.gold || 0), 0) });
+  const lb = H.balanceOf(pl(6, [3074]), pl(5, []), 'Darius', 'Garen');
+  assert.strictEqual(lb.label, 'Fordel Garen');
+  assert(lb.why.includes('Garen har ult'), JSON.stringify(lb.why));
+  // Læring: sammenligning med dine egne kampe + mønstre i dødsfald og dueller
+  const game = (cs, deaths, firstT) => ({ csPerMin: cs, deaths, buys: [{ id: '3020', t: 300 }, { id: '3074', t: firstT }] });
+  const cur = { champion: 'Tryndamere', csPerMin: 5.1, deaths: 9, buys: [{ id: '3074', t: 900 }], matchup: { champion: 'Darius' },
+    deathLog: [{ t: 200, killer: 'Darius', helpers: 0 }, { t: 500, killer: 'Darius', helpers: 2 }, { t: 700, killer: 'Graves', helpers: 3 }],
+    duels: [{ won: false, context: 'level 5 mod 6, 800 g bagud i items' }, { won: false, context: 'level 6 mod 6, lige i items' }, { won: true, context: 'x' }] };
+  const lessons = H.lessonsFor(cur, [game(7, 4, 780), game(7.4, 5, 800), game(6.8, 3, 760)]);
+  assert(lessons[0].startsWith('CS/min 5,1 - dit snit med Tryndamere er 7,1 (3 kampe), under normalt'), lessons[0]);
+  assert(lessons[1].startsWith('9 dødsfald - dit snit er 4, flere end normalt'), lessons[1]);
+  assert.strictEqual(lessons[2], 'Første færdige item 15:00 - dit snit er 13:00, langsommere end normalt');
+  assert(lessons.includes('3 dødsfald før 14 min (2x Darius, Graves)'), JSON.stringify(lessons));
+  assert(lessons.includes('2 af dine dødsfald var mod 3 eller flere'), JSON.stringify(lessons));
+  assert(lessons.includes('Du tabte 2 af 3 dueller mod Darius - 1 af dem mens du var bagud i items'), JSON.stringify(lessons));
+  assert(H.lessonsFor(cur, [])[0].startsWith('Sammenligning med dine egne kampe kommer efter 3 kampe'), 'for få kampe');
+  console.log('Læring:', lessons.join(' | '));
 
   console.log('ALLE ITEM-TESTS BESTÅET');
 })().catch((e) => { console.error(e); process.exit(1); });

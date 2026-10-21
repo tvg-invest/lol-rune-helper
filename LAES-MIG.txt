@@ -23,6 +23,12 @@ DUELLER: når du dræber eller dør til din lane-modstander, noteres det med sty
 i det øjeblik (fx "Du døde til Darius - level 6 mod 7, 800 g bagud i items"). Efter kampen
 står duellerne i kampoversigten, og næste gang du møder samme champion, viser gameplanen
 dine egne kampe og dueller mod ham.
+Spiller du Tryndamere eller Evelynn, står der også faste noter om dine power spikes i
+hver fase (fx "Level 6: R gør dig udødelig i 5 sekunder").
+LANES LIGE NU: styrkeforholdet i alle 5 lanes (for junglere "Gank-overblik").
+LÆRING EFTER KAMPEN: dine dødsfald (hvem, hvor mange, styrkeforholdet) og en sammenligning
+med dine egne kampe på samme champion: CS/min, dødsfald, hvornår dit første item var færdigt,
+dødsfald før 14 min og tabte dueller.
 Spillestil og tip vises kun i
 champion select. Det er fakta og valg - du bestemmer selv hvornår du går ind (Riot
 tillader ikke apps der træffer beslutninger for dig).

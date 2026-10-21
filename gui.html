@@ -189,6 +189,13 @@
   .duels { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; font-size: 12px; }
   .duel { padding: 3px 8px; border-radius: 6px; background: var(--panel2); border: 1px solid var(--line); }
   .duel.won { border-color: var(--green); } .duel.lost { border-color: var(--red); }
+  table.lanes { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.lanes td { padding: 5px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
+  table.lanes tr.me td { background: var(--panel2); }
+  .lane-p { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .lane-p img { width: 24px; height: 24px; border-radius: 5px; }
+  .lane-p.dead img { filter: grayscale(1); opacity: .6; }
+  .deadtag { font-size: 10px; font-weight: 700; color: var(--red); }
   .version { color: var(--muted); font-size: 11px; text-align: right; margin-top: 6px; }
   .phone { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
   .phone .qr { background: #fff; padding: 8px; border-radius: 8px; }
@@ -410,6 +417,10 @@ function historyCards(s) {
         el('div', { class: 'plan-sub' }, `Dueller mod ${g.matchup.champion}: ${g.duels.filter((d) => d.won).length}-${g.duels.filter((d) => !d.won).length}`),
         el('div', { class: 'duels' }, g.duels.map((d) => el('div', { class: 'duel ' + (d.won ? 'won' : 'lost') },
           `${clock(d.t)} ${d.won ? 'Dræbte' : 'Døde'}${d.solo ? '' : ' (hjælp)'} · ${d.context}`)))] : null,
+      g.lessons && g.lessons.length ? [el('div', { class: 'plan-sub' }, 'Læring'), el('ul', { class: 'notes', style: 'margin-top:4px' }, g.lessons.map((l) => el('li', {}, l)))] : null,
+      g.deathLog && g.deathLog.length ? [el('div', { class: 'plan-sub' }, `Dine dødsfald (${g.deathLog.length})`),
+        el('div', { class: 'duels' }, g.deathLog.map((d) => el('div', { class: 'duel lost', title: d.context || '' },
+          `${clock(d.t)} ${d.killer}${d.helpers ? ` +${d.helpers}` : ''}` + (d.context ? ` · ${d.context}` : ''))))] : null,
       g.balanceEnd && g.matchup ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, `Styrkeforhold mod ${g.matchup.champion} ved slut: ${g.balanceEnd}`) : null),
     el('div', { class: 'card' }, el('h2', {}, 'Dine champions'),
       el('div', { class: 'tablewrap' }, el('table', { class: 'hist' },
@@ -540,6 +551,19 @@ function adviceCard(L) {
       : el('div', { class: 'muted' }, empty));
 }
 
+// Styrkeforhold i hver lane; for junglere et gank-overblik (grøn = din holdkammerat er foran).
+function lanesCard(lanes) {
+  if (!lanes) return null;
+  const who = (p) => el('span', { class: 'lane-p' + (p.dead ? ' dead' : '') }, img(p.icon, p.name), `${p.name} ${p.level}`, p.dead ? el('span', { class: 'deadtag' }, 'DØD') : null);
+  return el('div', { class: 'card' },
+    el('h2', {}, lanes.jungle ? 'Gank-overblik' : 'Lanes lige nu'),
+    el('div', { class: 'tablewrap' }, el('table', { class: 'lanes' }, lanes.rows.map((r) => el('tr', { class: r.me ? 'me' : '' },
+      el('td', { class: 'muted' }, r.lane), el('td', {}, who(r.ally)), el('td', { class: 'muted' }, 'mod'), el('td', {}, who(r.enemy)),
+      el('td', {}, el('b', { class: r.side === 'me' ? 'good' : r.side === 'opp' ? 'bad' : '' }, r.label),
+        r.why.length ? el('div', { class: 'muted', style: 'font-size:11px' }, r.why.join(' · ')) : null))))),
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' }, 'Level, ult, færdige items og item-guld fra TAB.'));
+}
+
 function enemyLiveCard(L) {
   const e = L.enemy;
   const line = (label, list) => list.length ? el('li', {}, el('b', {}, label + ': '), list.join(', ')) : null;
@@ -594,6 +618,7 @@ function renderLive(s) {
     adviceCard(L),
     L.gameTime < 300 ? jungleCard(s.jungle, L.side) : null, // de første 5 min
     gameplanCard(s.plan, true),
+    lanesCard(L.lanes),
     el('div', { class: 'grid' },
       el('div', { class: 'card' }, el('h2', {}, 'Scoreboard'),
         teamBlock(L.allies, 'Dit hold', 'ally', diff),

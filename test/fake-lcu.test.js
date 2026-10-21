@@ -612,6 +612,11 @@ server.listen(0, '127.0.0.1', async () => {
     assert(/^level 11 mod 13, [\d.]+ g bagud i items$/.test(lp.duels[0].context), lp.duels[0].context);
     assert(lp.log.some((l) => l.text.startsWith('Du døde til Zed - level 11 mod 13')), `duel i loggen: ${JSON.stringify(lp.log)}`);
     assert(lp.log.some((l) => l.text.startsWith('Du dræbte Zed (med hjælp)')), 'kill i loggen');
+    // Lanes lige nu: alle 5 lanes med styrkeforhold
+    const lanes = (await gui('GET', '/state')).body.live.lanes;
+    assert.deepStrictEqual(lanes?.rows.map((r) => r.lane), ['Top', 'Jungle', 'Mid', 'Bot', 'Support'], JSON.stringify(lanes));
+    assert(!lanes.jungle && lanes.rows[2].me && lanes.rows[2].label === 'Fordel Zed', JSON.stringify(lanes.rows[2]));
+    assert.strictEqual(lanes.rows[0].label, 'Fordel Darius', JSON.stringify(lanes.rows[0]));
 
     // Live-API'et uden roller -> lane-modstanderen fra champion select bruges stadig
     const meLive = live.data.allPlayers[0];
@@ -854,6 +859,9 @@ server.listen(0, '127.0.0.1', async () => {
     assert(out.includes('Kampoversigt: Ahri'), 'log med kampoversigt');
     assert.deepStrictEqual(g.duels?.map((d) => d.won), [false, true], `dueller i historikken: ${JSON.stringify(g.duels)}`);
     assert.strictEqual(g.balanceEnd, 'Fordel Zed', 'styrkeforhold ved slut');
+    assert.deepStrictEqual(g.deathLog?.map((d) => [d.t, d.killer, d.helpers]), [[1230, 'Zed', 0]], `dødsfald: ${JSON.stringify(g.deathLog)}`);
+    assert(/^level 11 mod 13/.test(g.deathLog[0].context), g.deathLog[0].context);
+    assert(g.lessons?.[0]?.startsWith('Sammenligning med dine egne kampe kommer efter 3 kampe med Ahri'), JSON.stringify(g.lessons));
     assert(out.includes('dueller mod Zed: 1-1'), 'dueller i kampoversigten');
     if (process.env.HOLD_END) {
       state.phase = 'EndOfGame';
