@@ -32,8 +32,7 @@ const DEFAULT_CONFIG = {
   setItemSet: true,
   adaptToEnemies: true,   // tilpas items/støvler til modstanderholdet
   liveAdvice: true,       // købsforslag + scoreboard under kampen
-  voice: true,            // sig "Råd til ...", "Level op: Q", "X er fed" højt (virker også i ægte fuldskærm)
-  voiceEnemy: true,       // sig også når din lane-modstander køber et item eller når level 6 (ren fakta fra TAB)
+  voice: true,            // sig "Råd til ...", "Level op: Q", "Level 6" og færdige core-items højt - kun din egen tilstand (virker også i ægte fuldskærm)
   openWindow: true,       // åbn vinduet i browseren ved start
   remoteAccess: false,    // true = vinduet kan åbnes fra telefonen (Tailscale/wifi) med en hemmelig nøgle
   autoUpdate: true,       // tjek for nye versioner (opdatering sker først når du klikker)
@@ -523,6 +522,12 @@ function parseJungleRoutes(html) {
     const total = routes.reduce((s, r) => s + r.play, 0) || 1;
     if (routes.length) out[side] = routes.slice(0, 3).map((r) => ({ ...r, share: r.play / total }));
   }
+  // Hvor de starter (procent pr. side): "rate":{"team_key":"BLUE","blue":52,"red":17,"raptors":29}
+  const rate = {};
+  for (const m of text.matchAll(/"rate":\{"team_key":"(BLUE|RED)","blue":(\d+),"red":(\d+),"raptors":(\d+)\}/g)) {
+    rate[m[1]] = { blue: Number(m[2]), red: Number(m[3]), raptors: Number(m[4]) };
+  }
+  if (Object.keys(rate).length) out.rate = rate;
   return out.BLUE || out.RED ? out : null;
 }
 
@@ -658,23 +663,23 @@ function ensurePlan(myKey, oppKey, position, myBuild) {
     .catch((e) => log(`Gameplan fejlede: ${e.message}`));
 }
 
-// Modstanderens nye færdige items og level 6 -> ændringslog (+ stemme hvis slået til).
+// Modstanderens nye færdige items -> ændringslog i hovedvinduet (passiv TAB-info).
+// Bevidst ingen stemme/overlay-besked: Riot/Overwolf forbyder notifikationer om modstanderens power spikes.
 function trackOpponent(L) {
   const plan = app.plan;
   const opp = L.matchup?.player;
   if (!plan || !opp || String(opp.champ?.key) !== plan.oppKey) return;
   const completed = opp.itemIds.filter((id) => isCompleted(dd.items[id]));
-  const add = (kind, text) => {
+  const add = (text) => {
     plan.log.unshift({ t: L.gameTime, text });
     plan.log.length = Math.min(plan.log.length, 12);
-    if (app.cfg.voiceEnemy) speak(kind, text);
   };
   if (plan.seen) {
     const before = [...plan.seen.items];
     for (const id of completed) {
       const i = before.indexOf(id);
       if (i !== -1) before.splice(i, 1);
-      else add('opp-item', `${plan.opponent} har købt ${itemName(id)}`);
+      else add(`${plan.opponent} har købt ${itemName(id)}`);
     }
     // Bevidst ingen besked når han når level 6: Riot/Overwolf forbyder notifikationer om modstanderens power spikes.
   }
@@ -843,7 +848,7 @@ function recommend(build, cfg, enemyIds, matchup, mapNumber = 11) {
   const skills = { start: skillOrder.slice(0, 3), max: build.skill_masteries?.[0]?.ids || [] };
 
   const vsName = matchup && (dd.champions[matchup.id]?.name || 'modstanderen');
-  if (matchup?.stats) notes.push(`Mod ${vsName}: ${pct(matchup.stats.winRate)} WR i ${matchup.stats.games.toLocaleString('da-DK')} kampe`);
+  if (matchup?.stats) notes.push(`Mod ${vsName}: ${pct(matchup.stats.winRate)} WR i ${matchup.stats.games.toLocaleString('da-DK')} kampe${matchup.stats.games < MATCHUP_MIN_GAMES ? ' (få kampe - usikkert tal)' : ''}`);
   const mStart = matchup?.build?.starter_items?.[0];
   const useMStart = mStart && mStart.play >= MATCHUP_MIN_GAMES;
   const start = useMStart ? mStart : rankOptions(build.starter_items, { buildChoice: 'popular' })[0];
@@ -1045,7 +1050,7 @@ async function analyzeDraft(cfg, position, enemyIds, unavailable) {
 // Kører i baggrunden, så champion select-løkken ikke venter på OP.GG.
 function updateDraft(session, me) {
   const position = app.roleOverride || POSITION_MAP[me.assignedPosition];
-  if (!POSITIONS.includes(position)) { app.draft = null; return; }
+  if (!POSITIONS.includes(position)) { app.draft = null; app.draftStatus = 'unsupported'; return; }
   const actions = (session.actions || []).flat();
   const unavailable = [
     ...actions.filter((a) => a.type === 'ban' && a.completed && a.championId).map((a) => a.championId),
@@ -1064,13 +1069,18 @@ function updateDraft(session, me) {
     return;
   }
   app.draftKey = key;
+  app.draftStatus = 'loading';
   analyzeDraft(app.cfg, position, enemyIds, unavailable)
     .then((d) => {
       if (app.draftKey !== key) return;
       app.draft = { ...d, myBanTurn: app.draftBanTurn };
+      app.draftStatus = null;
       broadcast();
     })
-    .catch((e) => log(`Draft-hjælp fejlede: ${e.message}`));
+    .catch((e) => {
+      log(`Draft-hjælp fejlede: ${e.message}`);
+      if (app.draftKey === key) { app.draftStatus = 'error'; broadcast(); }
+    });
 }
 
 // ---------- Kampoversigt og historik ----------
@@ -1723,53 +1733,132 @@ function liveAdvice(build, me, enemy, gold, mapNumber, ctx = {}) {
 
 // ---------- Stemme (virker også i ægte fuldskærm, hvor intet vindue kan ses) ----------
 
+// Én besked ad gangen (kø), så beskederne ikke taler oven i hinanden. Pr. slags højst én hvert 8. sekund,
+// og en besked der har ventet for længe i køen droppes (gammelt nyt midt i en kamp er bare støj).
 const lastSpoken = new Map();
+const speech = { queue: [], busy: false, voiceLogged: false, macVoice: undefined, errors: new Set() };
+const SPEECH_MAX_WAIT = 6000;
+
+// Returnerer true hvis beskeden kommer i køen (false = stemmen er slået fra eller samme slags for nylig).
 function speak(kind, text) {
-  if (!app.cfg.voice) return;
-  // Højst én besked af hver slags hvert 8. sekund, så den ikke snakker i munden på sig selv.
-  if (Date.now() - (lastSpoken.get(kind) || 0) < 8000) return;
+  if (!app.cfg.voice) return false;
+  if (Date.now() - (lastSpoken.get(kind) || 0) < 8000) return false;
   lastSpoken.set(kind, Date.now());
-  log(`Stemme: ${text}`);
-  const done = () => {};
-  if (process.env.LOL_HELPER_SAY_CMD) return execFile(process.env.LOL_HELPER_SAY_CMD, [text], done); // test-hook
-  if (process.platform === 'win32') {
-    // Windows' indbyggede talesyntese; teksten via miljøvariabel, så anførselstegn i navne er sikre.
-    execFile('powershell.exe', ['-NoProfile', '-Command',
-      'Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Rate = 1; $s.Speak($env:LRH_SAY)'],
-    { windowsHide: true, env: { ...process.env, LRH_SAY: text } }, done);
-  } else if (process.platform === 'darwin') {
-    execFile('say', [text], done);
-  }
+  speech.queue.push({ text, at: Date.now() });
+  speakNext();
+  return true;
 }
 
-// Sig kun det der er NYT siden sidste tjek (ikke alt sammen når kampen starter).
+function speakNext() {
+  if (speech.busy) return;
+  speech.queue = speech.queue.filter((q) => Date.now() - q.at < SPEECH_MAX_WAIT);
+  const next = speech.queue.shift();
+  if (!next) return;
+  speech.busy = true;
+  log(`Stemme: ${next.text}`);
+  sayNow(next.text, (err, stdout) => {
+    speech.busy = false;
+    if (err) {
+      const msg = err.killed ? 'tog for lang tid' : String(err.message).split('\n')[0];
+      if (!speech.errors.has(msg)) { speech.errors.add(msg); log(`Stemmen fejlede: ${msg}`); }
+    }
+    const m = /VOICE=(.*)\|(.*)/.exec(stdout || '');
+    if (m) logVoice(m[1].trim(), m[2].trim());
+    speakNext();
+  });
+}
+
+// Hvilken stemme der læser op - logges én gang, så man kan se hvis der ikke er en dansk.
+function logVoice(name, culture) {
+  if (speech.voiceLogged) return;
+  speech.voiceLogged = true;
+  if (/^da/i.test(culture)) log(`Talesyntese: bruger ${name} (${culture}).`);
+  else log(`Talesyntese: ingen dansk stemme fundet - bruger ${name || 'standardstemmen'}${culture ? ` (${culture})` : ''}. Beskederne er på dansk.`);
+}
+
+// Windows' indbyggede talesyntese; teksten via miljøvariabel, så anførselstegn i navne er sikre.
+// Vælger en dansk stemme (da-DK) hvis der er en, ellers standardstemmen.
+const WIN_SAY = [
+  'Add-Type -AssemblyName System.Speech',
+  '$s = New-Object System.Speech.Synthesis.SpeechSynthesizer',
+  "$v = $s.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -eq 'da-DK' } | Select-Object -First 1",
+  'if ($v) { $s.SelectVoice($v.VoiceInfo.Name) }',
+  "Write-Output ('VOICE=' + $s.Voice.Name + '|' + $s.Voice.Culture.Name)",
+  '$s.Rate = 1',
+  '$s.Speak($env:LRH_SAY)',
+].join('; ');
+
+function sayNow(text, done) {
+  const opts = { timeout: 20000, windowsHide: true };
+  if (process.env.LOL_HELPER_SAY_CMD) return execFile(process.env.LOL_HELPER_SAY_CMD, [text], opts, done); // test-hook
+  if (process.platform === 'win32') {
+    return execFile('powershell.exe', ['-NoProfile', '-Command', WIN_SAY], { ...opts, env: { ...process.env, LRH_SAY: text } }, done);
+  }
+  if (process.platform === 'darwin') {
+    // macOS: find en dansk stemme (fx Sara) første gang.
+    if (speech.macVoice === undefined) {
+      return execFile('say', ['-v', '?'], opts, (err, out) => {
+        const m = /^(.+?)\s+da_DK\b/m.exec(err ? '' : out || '');
+        speech.macVoice = m ? m[1].trim() : null;
+        logVoice(speech.macVoice || '', m ? 'da_DK' : '');
+        sayNow(text, done);
+      });
+    }
+    return execFile('say', [...(speech.macVoice ? ['-v', speech.macVoice] : []), text], opts, done);
+  }
+  done(null, '');
+}
+
+// Sig kun det der er NYT. Kun din egen tilstand: dit guld, dine skill-points, dine items og dit level.
+// Bevidst intet om modstandernes items, levels eller "fed" (Riot/Overwolf: ingen power spike-notifikationer).
 function announce(L) {
   const v = app.voice;
-  const afford = new Set(L.advice.filter((a) => a.canAfford).map((a) => a.id));
-  const fed = new Set(L.enemy.fed.map((p) => p.champ?.name || p.name));
+  // Når stemmen er slået fra, tæller alt som sagt (så den ikke siger gamle nyheder når den slås til).
+  const say = (kind, text) => !app.cfg.voice || speak(kind, text);
+  // Kun forslag du kan købe uden først at sælge eller bytte noget.
+  const afford = L.advice.filter((a) => a.canAfford && !a.sell && !a.swap).map((a) => a.id);
   // Dine færdige core-items (core fra gameplanen, ellers fra buildet).
   const coreList = app.plan?.myCore?.length ? app.plan.myCore : coreOf(app.liveBuild?.build);
   const core = coreList.filter((id) => L.me.itemIds.includes(id) && isCompleted(dd.items[id]));
-  if (v && !v.core) v.core = core; // første gang efter opdatering: intet at annoncere
-  // Startitems: siges én gang ved kampstart.
+  // Startitems: siges én gang ved kampstart - men først når gameplanen mod lane-modstanderen er klar,
+  // så den nævner matchuppets startitems og ikke de generelle (højst 5 sek. ventetid).
   const st = L.inventory?.starter;
-  if (st && !app.starterAnnounced) {
-    app.starterAnnounced = true;
-    speak('start', `Start: ${st.items.map((i) => `${i.count > 1 ? `${i.count} ` : ''}${itemName(i.id)}`).join(' og ')}`);
-  }
-  if (v) {
-    const newAfford = [...afford].filter((id) => !v.afford.has(id));
-    // Kun det vigtigste forslag (de står i prioriteret rækkefølge) - kort besked midt i en kamp.
-    if (newAfford.length) speak('afford', `Råd til ${itemName(newAfford[0])}`);
-    if (L.skill.next && !v.skillNext) speak('skill', `Level op: ${L.skill.next}`);
-    // Dit eget power spike: et item fra dit core build er færdigt (egen tilstand - tilladt).
-    for (const id of core.filter((c) => !v.core.includes(c))) {
-      speak('core', `${itemName(id)} færdig - ${core.length} af ${coreList.length} i dit core build`);
+  if (st && app.starterAnnounced !== true) {
+    if (!app.starterAnnounced) app.starterAnnounced = Date.now();
+    const oppKey = L.matchup?.player?.champ?.key;
+    const planReady = !oppKey || app.plan?.oppKey === String(oppKey);
+    if (planReady || Date.now() - app.starterAnnounced > 5000) {
+      app.starterAnnounced = true;
+      speak('start', `Start: ${st.items.map((i) => `${i.count > 1 ? `${i.count} ` : ''}${itemName(i.id)}`).join(' og ')}`);
     }
-    const newFed = [...fed].filter((n) => !v.fed.has(n));
-    if (newFed.length) speak('fed', `${newFed.join(' og ')} er fed`);
   }
-  app.voice = { afford, fed, skillNext: L.skill.next, core };
+  if (!v || !v.core) {
+    // Første gang i kampen (eller efter opdatering): intet at annoncere, bare husk tilstanden.
+    app.voice = { afford: new Set(afford), skillNext: L.skill.next, core, level: L.me.level };
+    return;
+  }
+  // "Råd til": et forslag du ikke længere har råd til, må siges igen senere. Et der bare falder ud af listen, glemmes ikke.
+  for (const a of L.advice) if (!a.canAfford) v.afford.delete(a.id);
+  const newAfford = afford.filter((id) => !v.afford.has(id));
+  // Kun det vigtigste forslag (de står i prioriteret rækkefølge) - kort besked midt i en kamp.
+  // Blev beskeden ikke sagt (samme slags for nylig), prøves den igen næste gang.
+  if (newAfford.length && say('afford', `Råd til ${itemName(newAfford[0])}`)) newAfford.forEach((id) => v.afford.add(id));
+  // Dit eget level 6 (egen tilstand - tilladt). Evelynn får også camouflage.
+  let level6 = false;
+  if (v.level < 6 && L.me.level >= 6) {
+    level6 = true;
+    say('level6', L.me.champ?.id === 'Evelynn' ? 'Level 6 - camouflage og R' : 'Level 6 - R');
+  }
+  let skillNext = L.skill.next ? v.skillNext : null;
+  if (L.skill.next && !v.skillNext) {
+    // "Level 6 - R" dækker allerede R-pointet.
+    if ((level6 && L.skill.next === 'R') || say('skill', `Level op: ${L.skill.next}`)) skillNext = L.skill.next;
+  }
+  // Dit eget power spike: et item fra dit core build er færdigt (egen tilstand - tilladt). Ét ad gangen.
+  const newCore = core.filter((c) => !v.core.includes(c));
+  const done = core.filter((c) => v.core.includes(c));
+  if (newCore.length && say('core', `${itemName(newCore[0])} færdig - ${done.length + 1} af ${coreList.length} i dit core build`)) done.push(newCore[0]);
+  app.voice = { afford: v.afford, skillNext, core: done, level: L.me.level };
 }
 
 async function updateLive(data) {
@@ -1877,6 +1966,8 @@ const app = {
   jungleRetry: null,   // { key, at } når jungle-ruterne fejlede
   reconnecting: false, // spillet er væk, men klienten er stadig i kamp (crash/genforbindelse)
   shapesLogged: false, // klientens dataformat er gemt (lcu-shapes.json)
+  draftStatus: null,   // 'loading' | 'error' | 'unsupported' mens der ingen draft-data er
+  updating: false,     // en opdatering hentes/installeres lige nu
   game: null,          // køb og forslag i den igangværende kamp (til kampoversigten)
   update: null,        // { version, url, notes } hvis en nyere version findes
   server: null,
@@ -1933,6 +2024,8 @@ function liveView() {
       games: L.matchup.stats?.games ?? null,
     },
     me: player(L.me),
+    side: L.me.team === 'CHAOS' ? 'RED' : 'BLUE', // ORDER = blå side
+    vision: visionView(L),
     allies: team(L.allies, L.me.team),
     enemies: team(L.enemies, enemySide),
     advice: L.advice.map((a) => ({
@@ -1955,6 +2048,14 @@ function liveView() {
       healers: names(L.enemy.healers),
     },
   };
+}
+
+// Champions med camouflage/usynlighed. For dem vises (passivt, fra TAB) hvem der bærer Oracle Lens eller Control Ward.
+const STEALTH_CHAMPS = new Set(['Evelynn', 'Twitch', 'Shaco', 'Rengar', 'Khazix', 'Talon', 'Akali', 'Pyke', 'Vayne', 'MonkeyKing', 'Senna', 'Qiyana']);
+function visionView(L) {
+  if (!STEALTH_CHAMPS.has(L.me.champ?.id)) return null;
+  const who = (id) => L.enemies.filter((p) => p.itemIds.includes(id)).map((p) => p.champ?.name || p.name);
+  return { lens: who('3364'), ward: who('2055') };
 }
 
 const champView = (id) => ({ id, name: dd.champions[id]?.name || String(id), icon: dd.champions[id]?.icon });
@@ -2037,15 +2138,20 @@ function viewModel() {
     version: VERSION,
     pid: process.pid,
     voice: Boolean(app.cfg.voice),
-    update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA },
+    update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA, inProgress: Boolean(app.updating) },
+    draftStatus: app.draftStatus,
+    minGames: MATCHUP_MIN_GAMES, // matchup-tal med færre kampe vises som usikre
     updateCheck: { at: updateCheck.at || null, ok: updateCheck.ok, error: updateCheck.error },
     draft: draftView(),
     plan: planView(),
-    jungle: app.jungle && Object.fromEntries(Object.entries(app.jungle).map(([side, routes]) => [side, routes.map((r) => ({
-      camps: r.route.map((c) => CAMP_NAMES[c] || c),
-      games: r.play,
-      share: r.share,
-    }))])),
+    jungle: app.jungle && {
+      ...Object.fromEntries(['BLUE', 'RED'].filter((side) => app.jungle[side]).map((side) => [side, app.jungle[side].map((r) => ({
+        camps: r.route.map((c) => CAMP_NAMES[c] || c),
+        games: r.play,
+        share: r.share,
+      }))])),
+      rate: app.jungle.rate || null, // hvor de starter (procent) pr. side
+    },
     history: historyView(),
   };
   if (!pick || !b || !rec) return base;
@@ -2292,10 +2398,15 @@ async function handleRequest(req, res, html) {
   }
   if (req.method === 'POST' && req.url === '/api/update') {
     if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
+    // Kun én opdatering ad gangen (to samtidige ville kæmpe om .old/.new-filerne).
+    if (app.updating) return json(409, { error: 'Opdateringen er allerede i gang' });
+    app.updating = true;
     try {
       json(200, { ok: true });
+      broadcast();
       await applyUpdate();
     } catch (e) {
+      app.updating = false;
       log(`Fejl: opdatering mislykkedes: ${e.message}`);
     }
     return;
@@ -2573,7 +2684,7 @@ async function tick() {
     app.pickRetry = null;
     app.pickStatus = null;
     app.prefetched = null;
-    if (app.draft || app.draftKey) { app.draft = null; app.draftKey = null; }
+    if (app.draft || app.draftKey || app.draftStatus) { app.draft = null; app.draftKey = null; app.draftStatus = null; }
     // Tilbage i lobbyen uden kamp (fx dodge): vis ikke den gamle champion select.
     if (app.pick && ['None', 'Lobby', 'Matchmaking', 'ReadyCheck'].includes(phase)) { clearPick(); broadcast(); }
     return cfg.pollMs;

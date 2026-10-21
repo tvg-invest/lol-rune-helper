@@ -7,14 +7,15 @@ et item set i butikken. Items tilpasses modstanderholdet.
 
 GAMEPLAN MOD DIN LANE-MODSTANDER
 Så snart din lane-modstander (eller fjendens jungler) er kendt, laver programmet en
-gameplan: din win rate i matchuppet, hvem der har lane-fordel og flest solo kills,
-anbefalet spillestil, OP.GG's tip mod netop den champion, hvem der skalerer bedst, og
-jeres typiske builds. Under kampen opdateres den løbende med "Lige nu": level (og hvem
-der har ult), item-guld, KDA, hvor langt I er med jeres core builds, og hans armor/
-magic resist/anti-heal med de items i DIT build der svarer på det. Når han køber et
-item eller når level 6, kommer det i "Ændringer" og stemmen siger det
-(slå fra med "voiceEnemy": false). Det er fakta og valg - du bestemmer selv hvornår du
-går ind (Riot tillader ikke apps der træffer beslutninger for dig).
+gameplan: din win rate i matchuppet (grå og "få kampe" hvis tallet bygger på få kampe),
+hvem der har lane-fordel og flest solo kills, anbefalet spillestil, OP.GG's tip mod netop
+den champion, hvem der skalerer bedst, og jeres typiske builds. Under kampen står "Lige
+nu" øverst: begges level, item-guld, KDA, hvor langt I er med jeres core builds, og hans
+armor/magic resist/anti-heal med de items i DIT build der svarer på det. Når han køber et
+item, står det under "Ændringer" i vinduet (ingen stemme og intet i overlayet - Riot
+tillader ikke beskeder om modstandernes power spikes). Spillestil og tip vises kun i
+champion select. Det er fakta og valg - du bestemmer selv hvornår du går ind (Riot
+tillader ikke apps der træffer beslutninger for dig).
 
 BAN OG COUNTERPICK
 Før du låser, viser vinduet ban-forslag (de champions dine champions til rollen klarer
@@ -42,8 +43,9 @@ logger ind (det åbner ikke browseren). Starter du det igen, åbner det bare vin
 Builds gemmes i mappen "cache" i 6 timer, så champion select går hurtigt.
 
 JUNGLE-RUTER
-Spiller du jungle (fx Evelynn), viser vinduet de 3 mest spillede første clears for blå og
-rød side fra OP.GG - i champion select og de første 5 minutter af kampen.
+Spiller du jungle (fx Evelynn), viser vinduet de 3 mest spillede første clears fra OP.GG
+og hvor mange der starter ved Blue, Red og Raptors - i champion select for begge sider og
+de første 5 minutter af kampen kun for den side du er på.
 
 STEMME OM DIT CORE BUILD
 Når du færdiggør et item fra dit core build, siger stemmen fx
@@ -81,7 +83,8 @@ UNDER KAMPEN (live)
 Vinduet viser 2-3 købsforslag med begrundelse ud fra dit guld, dit build og hvad
 modstanderne faktisk bygger (fx anti-heal mod healere, armor mod en fed AD-spiller,
 penetration hvis de stacker forsvar) - plus et scoreboard med items, KDA, item-guld
-og objectives. Det bruger kun information du også kan se på TAB.
+og objectives. Spiller du en champion med camouflage (fx Evelynn), står der også hvem
+der har Oracle Lens eller Control Ward. Det bruger kun information du også kan se på TAB.
 Det er forslag - du bestemmer selv.
 
 START
@@ -98,7 +101,10 @@ Lad programmet køre, mens du spiller. Rækkefølgen er ligegyldig.
 Tip: læg vinduet på en anden skærm, eller åbn det på telefonen (se nedenfor).
 
 STEMME (VIRKER OGSÅ I ÆGTE FULDSKÆRM)
-Programmet siger højt: "Råd til <item>", "Level op: Q" og "<champion> er fed".
+Programmet siger højt - kun om dig selv: dine startitems, "Råd til <item>" (når du kan
+købe det uden først at sælge noget), "Level op: Q", "Level 6 - R" (Evelynn: "Level 6 -
+camouflage og R") og når et item i dit core build er færdigt. Én besked ad gangen.
+Er der en dansk stemme, bruges den (loggen viser hvilken stemme der bruges).
 Det virker uanset om spillet kører i fuldskærm, da det ikke kræver et vindue.
 Slå til/fra med "Stemme" øverst i vinduet (huskes i config.json).
 
@@ -111,9 +117,10 @@ spillet, og det gør dette program ikke (Riots anti-cheat). Brug i stedet:
 - Vinduet på en anden skærm eller på telefonen
 
 OVERLAY OVER SPILLET
-Klik "Overlay" øverst i vinduet: et lille vindue der altid ligger øverst med dit guld,
-de 3 forslag ("RÅD NU" eller hvad du mangler) og hvem der er fed. Det bipper og blinker,
-når du får råd til et af forslagene (slå lyden fra med "Lyd: til/fra").
+Klik "Overlay" øverst i vinduet: et lille vindue der altid ligger øverst med dit guld
+og de 3 forslag ("RÅD NU" eller hvad du mangler). Det bipper og blinker, når du får råd
+til et af forslagene (slå lyden fra med "Bip: til/fra"). Mister vinduet forbindelsen til
+programmet, står der "Forbindelse tabt" i stedet for gamle tal.
 - Kræver Google Chrome eller Microsoft Edge (version 116+).
 - Sæt League til Borderless: Indstillinger -> Video -> Window Mode -> Borderless.
   I ægte fuldskærm dækker spillet alle andre vinduer.
@@ -129,7 +136,7 @@ Slet remote-token.txt for at lave en ny nøgle.
 INDSTILLINGER (config.json ved siden af programmet)
 - region: GLOBAL (flest kampe), EUW, EUNE, NA, KR ...
 - buildChoice: "smart" (højeste win rate blandt populære builds) eller "popular"
-- setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice: true eller false
+- setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice / voice: true eller false
 - flashKey: "keep", "D" eller "F"
 - openWindow: false hvis browservinduet ikke skal åbne ved start
 - remoteAccess: true = vinduet kan åbnes fra telefonen
