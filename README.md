@@ -55,6 +55,7 @@ Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General 
 
 - **Næste item:** OP.GG's `core_items` er 3-item-kombinationer (antaget i byggerækkefølge - passer med data). Blandt kombinationer hvis første k items er dine færdige (ikke støvler), andelen der bygger item k+1 -> bonus + begrundelse. Det mest typiske næste item har altid en plads (efter et item du er i gang med).
 - **Matchup:** `last_items` mod lane-modstanderen (`?target_champion=`, min. 100 kampe) vs. generelt; ratio >= 1,3 -> bonus "Bygges oftere mod X".
+- **Startitems:** de første 3 min og før første køb (trinket tæller ikke): matchup-startitems (min. 150 kampe) ellers de mest købte; vises i vindue og overlay, siges én gang.
 - **Påmindelser** (linjer over forslagene): ingen færdige støvler efter 10 min (mest spillede fra buildet, restpris), ingen Control Ward efter 5 min når der er plads og 75 g.
 - Item-win rates bruges ikke som bonus (overlevelses-bias: dyre items færdiggøres mest i vundne kampe).
 

@@ -49,6 +49,12 @@ STEMME OM DIT CORE BUILD
 Når du færdiggør et item fra dit core build, siger stemmen fx
 "Ravenous Hydra færdig - 1 af 3 i dit core build".
 
+STARTITEMS VED KAMPSTART
+De første 3 minutter, før dit første køb, viser vinduet og overlayet dine startitems med
+pris (fx "Startitems mod Zed: Doran's Ring + 2x Health Potion, råd nu, 500 g"), og stemmen
+siger dem én gang. Er der nok kampe mod din lane-modstander, bruges startitems fra dét
+matchup.
+
 KLOGERE KØBSFORSLAG UNDER KAMPEN
 - Byggerækkefølge: ud fra de items du har færdige viser den, hvad spillere typisk
   bygger som næste item ("Typisk 2. item efter Malignance (65% af 41.861 kampe)").

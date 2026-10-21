@@ -966,7 +966,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.11.0';
+const VERSION = '1.12.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -1267,10 +1267,27 @@ function analyzeLive(data, build) {
   const matchup = opponent && { player: opponent, stats: matchupStats(build, opponent.champ?.key) };
   const skill = skillHint(data.activePlayer, build);
   const inventory = inventoryInfo(me, gold, data.gameData?.mapNumber || 11, data.gameData?.gameTime || 0, build);
+  inventory.starter = starterAdvice(build, plan, me, gold, data.gameData?.gameTime || 0);
   return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice, matchup, skill, inventory };
 }
 
 // 2-3 forslag fra championens egen item-pulje, scoret efter popularitet + modstandernes faktiske builds.
+// Startitems ved kampstart (før dit første køb, de første 3 min): fra matchuppet hvis der er nok kampe,
+// ellers de mest købte for din champion.
+function starterAdvice(build, plan, me, gold, gameTime) {
+  const bought = me.itemIds.filter((id) => !dd.items[id]?.tags.includes('Trinket'));
+  if (bought.length || gameTime > 180 || !build) return null;
+  const mStart = plan?.matchupBuild?.starter_items?.[0];
+  const useMatchup = mStart && mStart.play >= MATCHUP_MIN_GAMES;
+  const start = useMatchup ? mStart : rankOptions(build.starter_items, { buildChoice: 'popular' })[0];
+  if (!start) return null;
+  const counts = new Map();
+  for (const id of start.ids.map(String)) counts.set(id, (counts.get(id) || 0) + 1);
+  const items = [...counts].map(([id, count]) => ({ id, count }));
+  const cost = items.reduce((s, i) => s + (dd.items[i.id]?.gold || 0) * i.count, 0);
+  return { items, cost, canAfford: cost <= gold, vs: useMatchup ? plan.opponent : null, share: start.pick_rate || null };
+}
+
 // Næste item efter OP.GG's 3-item core-kombinationer: blandt kombinationer hvis første k items er dem
 // du har færdige, hvad er item nr. k+1? (Antager at kombinationerne står i byggerækkefølge - det passer
 // med dataene, fx starter alle Tryndamere-kombinationer med Ravenous Hydra.)
@@ -1469,6 +1486,12 @@ function announce(L) {
   const coreList = app.plan?.myCore?.length ? app.plan.myCore : coreOf(app.liveBuild?.build);
   const core = coreList.filter((id) => L.me.itemIds.includes(id) && isCompleted(dd.items[id]));
   if (v && !v.core) v.core = core; // første gang efter opdatering: intet at annoncere
+  // Startitems: siges én gang ved kampstart.
+  const st = L.inventory?.starter;
+  if (st && !app.starterAnnounced) {
+    app.starterAnnounced = true;
+    speak('start', `Start: ${st.items.map((i) => `${i.count > 1 ? `${i.count} ` : ''}${itemName(i.id)}`).join(' og ')}`);
+  }
   if (v) {
     const newAfford = [...afford].filter((id) => !v.afford.has(id));
     // Kun det vigtigste forslag (de står i prioriteret rækkefølge) - kort besked midt i en kamp.
@@ -1542,6 +1565,7 @@ async function liveLoop() {
       app.live = null;
       app.liveBuild = null;
       app.voice = null;
+      app.starterAnnounced = false;
       log('Kampen er slut.');
       finishGame();
       broadcast();
@@ -1616,6 +1640,10 @@ function liveView() {
       elixir: L.inventory.elixir && { ...L.inventory.elixir, name: itemName(L.inventory.elixir.id), icon: dd.items[L.inventory.elixir.id]?.icon },
       wardTip: L.inventory.wardTip && { ...L.inventory.wardTip, name: itemName('2055'), icon: dd.items['2055']?.icon },
       bootsTip: L.inventory.bootsTip && { ...L.inventory.bootsTip, name: itemName(L.inventory.bootsTip.id), icon: dd.items[L.inventory.bootsTip.id]?.icon },
+      starter: L.inventory.starter && {
+        ...L.inventory.starter,
+        items: L.inventory.starter.items.map((i) => ({ ...i, name: itemName(i.id), icon: dd.items[i.id]?.icon })),
+      },
     },
     matchup: L.matchup && {
       name: L.matchup.player.champ?.name || L.matchup.player.name,

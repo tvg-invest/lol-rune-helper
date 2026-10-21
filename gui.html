@@ -421,6 +421,14 @@ function adviceCard(L) {
         el('div', {}, el('div', { class: 'name' }, inv.elixir.name),
           el('span', { class: 'badge ' + (inv.elixir.canAfford ? 'ok' : 'no') }, inv.elixir.canAfford ? `Råd nu · ${gold(inv.elixir.cost)}` : `${gold(inv.elixir.cost)} · mangler ${gold(inv.elixir.cost - L.gold)}`),
           el('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, 'Fylder ingen plads - giver stats i 3 min.')))) : null,
+    inv.starter ? el('div', { class: 'pick progress', style: 'margin-bottom:10px' },
+      el('div', { class: 'name', style: 'margin-bottom:6px' }, 'Startitems' + (inv.starter.vs ? ` mod ${inv.starter.vs}` : ''),
+        el('span', { class: 'badge ' + (inv.starter.canAfford ? 'ok' : 'no'), style: 'margin-left:8px' },
+          inv.starter.canAfford ? `Råd nu · ${gold(inv.starter.cost)}` : `${gold(inv.starter.cost)} · mangler ${gold(inv.starter.cost - L.gold)}`)),
+      el('div', { class: 'items' }, inv.starter.items.map((it) =>
+        el('div', { class: 'item' }, img(it.icon, it.name), it.count > 1 ? el('span', { class: 'count' }, it.count) : null))),
+      el('div', { class: 'names' }, inv.starter.items.map((it) => `${it.count > 1 ? `${it.count}x ` : ''}${it.name}`).join(' · ')
+        + (inv.starter.share ? ` - ${pct(inv.starter.share)} starter sådan` : ''))) : null,
     inv.bootsTip ? el('div', { class: 'muted', style: 'font-size:12px;margin:0 0 8px;display:flex;align-items:center;gap:6px' },
       img(inv.bootsTip.icon, inv.bootsTip.name, 'tip-ic'),
       `Ingen færdige støvler efter ${inv.bootsTip.minutes} min - ${inv.bootsTip.name} (${inv.bootsTip.canAfford ? 'råd nu' : `mangler ${gold(inv.bootsTip.cost - L.gold)}`}).`) : null,
@@ -619,6 +627,10 @@ function overlayContent(s) {
   if (L) {
     return [
       el('div', { class: 'ov-head' }, el('span', { class: 'gold' }, gold(L.gold)), skillLine(L, true), el('span', { class: 'muted' }, clock(L.gameTime))),
+      L.inventory && L.inventory.starter ? el('div', { class: 'ov-row progress' },
+        L.inventory.starter.items.map((it) => img(it.icon, it.name)),
+        el('div', { class: 't' }, el('div', { class: 'n' }, 'Start'), el('div', { class: 'r' }, L.inventory.starter.items.map((it) => `${it.count > 1 ? `${it.count}x ` : ''}${it.name}`).join(', '))),
+        el('div', { class: 'c' + (L.inventory.starter.canAfford ? ' ok' : '') }, L.inventory.starter.canAfford ? 'RÅD NU' : gold(L.inventory.starter.cost))) : null,
       L.inventory && L.inventory.full ? el('div', { class: 'ov-foot', style: 'margin:0 0 6px' },
         'Fuldt build' + (L.inventory.elixir ? ` · ${L.inventory.elixir.name}${L.inventory.elixir.canAfford ? ' (råd nu)' : ''}` : '')) : null,
       L.advice.map((a) => el('div', { class: 'ov-row' + (a.inProgress ? ' progress' : '') + (a.canAfford ? ' afford' : '') + (justAffordable.has(a.id) ? ' flash' : ''), 'data-id': a.id },

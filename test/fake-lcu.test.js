@@ -412,11 +412,33 @@ server.listen(0, '127.0.0.1', async () => {
     const items = (await (await fetch(`https://ddragon.leagueoflegends.com/cdn/${st.ddVersion}/data/en_US/item.json`)).json()).data;
     const zhonyaPart = Number(items['3157'].from[0]);
     state.phase = 'InProgress';
-    live.data = liveGame(zhonyaPart);
+    // 7-start) Kampstart: 500 g, kun trinket -> startitems (fra matchuppet hvis nok kampe), stemmen siger dem én gang
+    const startGame = liveGame(zhonyaPart);
+    startGame.gameData.gameTime = 15;
+    startGame.activePlayer.currentGold = 500;
+    startGame.allPlayers[0].items = [{ itemID: 3340, count: 1, slot: 6 }]; // Stealth Ward (trinket)
+    live.data = startGame;
     await waitFor(() => out.includes('Live: Ahri'), 15000, 'live start');
-    await wait(500);
+    await wait(2500);
+    const S0 = (await gui('GET', '/state')).body.live;
+    const starter = S0.inventory.starter;
+    assert(starter && starter.items.length >= 1, `startitems ved kampstart: ${JSON.stringify(S0.inventory)}`);
+    assert(starter.cost > 0 && starter.cost <= 500 && starter.canAfford, `pris og råd: ${JSON.stringify(starter)}`);
+    assert(starter.items.every((i) => i.name && i.icon && i.count >= 1));
+    assert(/^Start: /m.test(said()), `stemme ved kampstart: ${said()}`);
+    console.log('Startitems:', starter.items.map((i) => `${i.count}x ${i.name}`).join(', '), `(${starter.cost} g)`, starter.vs ? `mod ${starter.vs}` : '(generelle)');
+    if (process.env.HOLD_START) {
+      console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
+      await wait(Number(process.env.HOLD_START));
+    }
+    await wait(2500);
+    assert.strictEqual(said().split('\n').filter((l) => l.startsWith('Start: ')).length, 1, 'startitems siges kun én gang');
+
+    live.data = liveGame(zhonyaPart);
+    await wait(2500);
     const L = (await gui('GET', '/state')).body.live;
     assert(L, 'live-visning');
+    assert.strictEqual(L.inventory.starter, null, 'ingen startitems når du har købt');
     assert.strictEqual(L.gold, 1400);
     assert.strictEqual(L.allies.players.length, 5);
     assert.strictEqual(L.enemies.players.length, 5);
@@ -432,7 +454,8 @@ server.listen(0, '127.0.0.1', async () => {
     const Lspent = (await gui('GET', '/state')).body.live;
     assert.strictEqual(Lspent.skill.unspent, 0);
     assert.strictEqual(Lspent.skill.next, null, 'intet forslag uden ubrugte points');
-    assert.strictEqual(said(), '', `intet siges når kampen starter: ${said()}`);
+    // Ved kampstart siges kun startitems (ikke alt det andet der allerede gælder)
+    assert.strictEqual(said().split('\n').filter((l) => l && !l.startsWith('Start: ')).join('|'), '', `kun startitems siges ved kampstart: ${said()}`);
     live.data.activePlayer.abilities.W.abilityLevel = 2; // nyt level -> ubrugt point igen
     await wait(2500);
     assert(said().includes('Level op: W'), `stemme ved level op: ${said()}`);
