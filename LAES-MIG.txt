@@ -13,7 +13,17 @@ den champion, hvem der skalerer bedst, og jeres typiske builds. Under kampen st�
 nu" øverst: begges level, item-guld, KDA, hvor langt I er med jeres core builds, og hans
 armor/magic resist/anti-heal med de items i DIT build der svarer på det. Når han køber et
 item, står det under "Ændringer" i vinduet (ingen stemme og intet i overlayet - Riot
-tillader ikke beskeder om modstandernes power spikes). Spillestil og tip vises kun i
+tillader ikke beskeder om modstandernes power spikes). Planen er delt i faser: laning (startitems, skill-max og evt. andre summoner spells mod
+netop ham), level 6 og første item (hvem der typisk når sit første item først), midgame
+(items der bygges oftere mod ham) og lategame (skalering og din win rate efter kamplængde).
+Under kampen vises den fase du er i; resten ligger under "Hele planen".
+STYRKEFORHOLD: "Fordel dig", "Jævnt" eller "Fordel Darius" ud fra level, ult, færdige items
+og item-guld - med årsagerne. Stemmen siger det, når det skifter (med enemyAlerts).
+DUELLER: når du dræber eller dør til din lane-modstander, noteres det med styrkeforholdet
+i det øjeblik (fx "Du døde til Darius - level 6 mod 7, 800 g bagud i items"). Efter kampen
+står duellerne i kampoversigten, og næste gang du møder samme champion, viser gameplanen
+dine egne kampe og dueller mod ham.
+Spillestil og tip vises kun i
 champion select. Det er fakta og valg - du bestemmer selv hvornår du går ind (Riot
 tillader ikke apps der træffer beslutninger for dig).
 

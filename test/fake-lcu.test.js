@@ -367,6 +367,14 @@ server.listen(0, '127.0.0.1', async () => {
     assert(plan.myCore.length >= 2 && plan.oppCore.length >= 2, 'core builds for begge');
     assert(plan.scaling && /skalerer/.test(plan.scaling), `skalering: ${plan.scaling}`);
     assert.strictEqual(plan.now, null, 'ingen "lige nu" før kampen');
+    // Matchup-plan i faser
+    const phase = (k) => plan.phases.find((x) => x.key === k);
+    assert(phase('lane')?.lines.some((l) => l.startsWith('Zed har lane-fordel')), `laning-fase: ${JSON.stringify(plan.phases)}`);
+    assert(phase('lane').lines.some((l) => /^Start/.test(l)) && phase('lane').lines.some((l) => /^(Max|Mod Zed maxer)/.test(l)), 'start og skill-max i laning-fasen');
+    assert(phase('spike')?.lines.some((l) => l.startsWith('Dit første power spike: ')), 'første power spike');
+    assert(phase('late')?.lines.some((l) => /skalerer/.test(l)), 'skalering i lategame-fasen');
+    assert.strictEqual(plan.phaseNow, null, 'ingen aktuel fase før kampen');
+    console.log('Faser:', plan.phases.map((x) => `${x.title}: ${x.lines.join(' / ')}`).join(' || '));
     console.log('Gameplan:', JSON.stringify({ lane: plan.laneAdvantage, solo: plan.soloKill, stil: plan.playStyle, skalering: plan.scaling, han: plan.oppCore.map((i) => i.name) }));
 
     const titles = autoSet().blocks.map((b) => b.type);
@@ -575,6 +583,35 @@ server.listen(0, '127.0.0.1', async () => {
     assert(said().includes("Zed har købt Serylda's Grudge"), `stemme om modstanderens køb: ${said()}`);
     zed.items.pop();
     console.log('Gameplan lige nu:', lp.now.join(' | '));
+
+    // Styrkeforhold + fase (øjebliksbilledet med Serylda's): Zed er 2 level og 3 færdige items foran -> fordel Zed; 20 min -> midgame
+    assert.strictEqual(lp.balance?.side, 'opp', `styrkeforhold: ${JSON.stringify(lp.balance)}`);
+    assert.strictEqual(lp.balance.label, 'Fordel Zed');
+    assert(lp.balance.why.includes('2 level bagud') && lp.balance.why.includes('3 færdige items bagud'), JSON.stringify(lp.balance.why));
+    assert.strictEqual(lp.phaseNow, 'mid', 'midgame efter 14 min');
+    // Det skifter (2 tjek i træk) -> stemmen siger det
+    const zedKeep = { items: zed.items, level: zed.level };
+    zed.items = [];
+    zed.level = 1;
+    await wait(5000);
+    lp = (await gui('GET', '/state')).body.plan;
+    assert.strictEqual(lp.balance.side, 'me', JSON.stringify(lp.balance));
+    assert(said().includes('Fordel dig mod Zed: 10 level foran, du har ult'), `stemme om styrkeforhold: ${said()}`);
+    assert(lp.log.some((l) => l.text.startsWith('Fordel dig mod Zed')), 'styrkeforhold i ændringsloggen');
+    Object.assign(zed, zedKeep);
+
+    // Dueller fra kill-feedet: du dør til Zed (solo), du dræber Zed (med hjælp); gamle kills ignoreres
+    live.data.events.Events.push(
+      { EventID: 20, EventName: 'ChampionKill', EventTime: 100, KillerName: 'Fedzed', VictimName: 'Mig', Assisters: [] },
+      { EventID: 21, EventName: 'ChampionKill', EventTime: 1230, KillerName: 'Fedzed', VictimName: 'Mig', Assisters: [] },
+      { EventID: 22, EventName: 'ChampionKill', EventTime: 1233, KillerName: 'Mig', VictimName: 'Fedzed', Assisters: ['Jungle'] },
+      { EventID: 23, EventName: 'ChampionKill', EventTime: 1233, KillerName: 'Mig', VictimName: 'Tank', Assisters: [] });
+    await wait(2500);
+    lp = (await gui('GET', '/state')).body.plan;
+    assert.deepStrictEqual(lp.duels.map((d) => [d.t, d.won, d.solo]), [[1230, false, true], [1233, true, false]], `dueller: ${JSON.stringify(lp.duels)}`);
+    assert(/^level 11 mod 13, [\d.]+ g bagud i items$/.test(lp.duels[0].context), lp.duels[0].context);
+    assert(lp.log.some((l) => l.text.startsWith('Du døde til Zed - level 11 mod 13')), `duel i loggen: ${JSON.stringify(lp.log)}`);
+    assert(lp.log.some((l) => l.text.startsWith('Du dræbte Zed (med hjælp)')), 'kill i loggen');
 
     // Live-API'et uden roller -> lane-modstanderen fra champion select bruges stadig
     const meLive = live.data.allPlayers[0];
@@ -815,6 +852,9 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(after.history.champions[0].champion, 'Ahri');
     assert(fs.existsSync(env.LOL_HELPER_HISTORY), 'historik gemt på disk');
     assert(out.includes('Kampoversigt: Ahri'), 'log med kampoversigt');
+    assert.deepStrictEqual(g.duels?.map((d) => d.won), [false, true], `dueller i historikken: ${JSON.stringify(g.duels)}`);
+    assert.strictEqual(g.balanceEnd, 'Fordel Zed', 'styrkeforhold ved slut');
+    assert(out.includes('dueller mod Zed: 1-1'), 'dueller i kampoversigten');
     if (process.env.HOLD_END) {
       state.phase = 'EndOfGame';
       console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);

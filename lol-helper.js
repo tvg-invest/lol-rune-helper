@@ -649,6 +649,120 @@ function scalingNote(myBuild, oppBuild, oppName) {
   return 'I skalerer nogenlunde ens (win rate i kampe under 25 min mod over 40 min).';
 }
 
+// Win rate pr. kamplængde ("59% under 25 min, 48% 25-30 min, ...") fra OP.GG's game_lengths.
+function lengthCurve(build) {
+  const g = (build?.game_lengths || []).filter((x) => typeof x.rate === 'number');
+  if (g.length < 2) return null;
+  const label = (x, i) => (i === 0 ? `under ${g[1].game_length} min`
+    : i === g.length - 1 ? `${x.game_length}+ min` : `${x.game_length}-${g[i + 1].game_length} min`);
+  return { text: g.map((x, i) => `${pct(x.rate)} ${label(x, i)}`).join(', '), drop: g[g.length - 1].rate - g[0].rate };
+}
+
+// Matchup-valg (spells, skill-max, start) der afviger fra det generelle - kun med nok kampe bag.
+function matchupChoices(myBuild, matchupBuild, oppName) {
+  const out = [];
+  const top = (list) => [...(list || [])].sort((a, b) => b.play - a.play)[0];
+  const same = (a, b) => a && b && [...a].map(String).sort().join() === [...b].map(String).sort().join();
+  const gSpells = top(myBuild?.summoner_spells);
+  const mSpells = top(matchupBuild?.summoner_spells);
+  if (mSpells?.play >= MATCHUP_MIN_GAMES && gSpells && !same(mSpells.ids, gSpells.ids)) {
+    out.push(`Mod ${oppName} tager flest ${mSpells.ids.map(spellName).join(' + ')} (generelt ${gSpells.ids.map(spellName).join(' + ')})`);
+  }
+  const gMax = top(myBuild?.skill_masteries);
+  const mMax = top(matchupBuild?.skill_masteries);
+  if (mMax?.play >= MATCHUP_MIN_GAMES && gMax && mMax.ids.join() !== gMax.ids.join()) {
+    out.push(`Mod ${oppName} maxer flest ${mMax.ids.join(' > ')} (generelt ${gMax.ids.join(' > ')})`);
+  } else if (gMax) out.push(`Max ${gMax.ids.join(' > ')}`);
+  return out;
+}
+
+// Matchup-plan i faser ud fra OP.GG-data: laning, første power spikes, midgame og lategame.
+function planPhases({ myBuild, oppBuild, matchupBuild, oppName, laneAdvantage, soloKill, playStyle, scaling, myCore, oppCore, position }) {
+  const gold = (id) => dd.items[id]?.gold || 0;
+  const g = (x) => x.toLocaleString('da-DK');
+  const jungle = position === 'JUNGLE';
+  const lane = [];
+  if (laneAdvantage === 'dig') lane.push(jungle ? `Du er stærkest tidligt (OP.GG) - du kan presse ${oppName} i starten.` : `Du har lane-fordel (OP.GG): du kan presse ${oppName} og tage trades i lanen.`);
+  else if (laneAdvantage === 'jævn') lane.push(jungle ? 'Starten er jævn (OP.GG) - første items og level 6 afgør meget.' : 'Lanen er jævn (OP.GG) - første items og level 6 afgør meget.');
+  else if (laneAdvantage) lane.push(jungle ? `${oppName} er stærkest tidligt (OP.GG) - undgå ham i starten, og spil efter dine spikes.` : `${oppName} har lane-fordel (OP.GG): spil sikkert, farm og vent på dine power spikes.`);
+  if (soloKill === 'dig') lane.push(`Du får flest solo kills i matchuppet.`);
+  else if (soloKill && soloKill !== 'jævn') lane.push(`${oppName} får flest solo kills - pas på 1 mod 1, når han er foran.`);
+  if (playStyle) lane.push(`Anbefalet spillestil: ${playStyle.toLowerCase()}.`);
+  const mStart = matchupBuild?.starter_items?.[0];
+  const start = mStart?.play >= MATCHUP_MIN_GAMES ? mStart : rankOptions(myBuild?.starter_items, { buildChoice: 'popular' })[0];
+  if (start) {
+    const counts = new Map();
+    for (const id of start.ids.map(String)) counts.set(id, (counts.get(id) || 0) + 1);
+    lane.push(`Start${start === mStart ? ` mod ${oppName}` : ''}: ${[...counts].map(([id, n]) => (n > 1 ? `${n}x ` : '') + itemName(id)).join(' + ')}`);
+  }
+  lane.push(...matchupChoices(myBuild, matchupBuild, oppName));
+
+  const spike = [];
+  if (myCore[0]) spike.push(`Dit første power spike: ${itemName(myCore[0])} (${g(gold(myCore[0]))} g)`);
+  if (oppCore[0]) spike.push(`${genitive(oppName)} første item er typisk ${itemName(oppCore[0])} (${g(gold(oppCore[0]))} g)`);
+  if (myCore[0] && oppCore[0]) {
+    const d = gold(myCore[0]) - gold(oppCore[0]);
+    if (d >= 300) spike.push(`Hans første item er ${g(d)} g billigere - han når ofte først til sit spike.`);
+    else if (d <= -300) spike.push(`Dit første item er ${g(-d)} g billigere - du når ofte først til dit spike.`);
+  }
+  spike.push(`Level 6 ændrer trades: se under "Lige nu", hvem der har ult først.`);
+
+  const mid = [];
+  const boost = [...matchupItemBoost(myBuild, matchupBuild)].sort((a, b) => b[1].ratio - a[1].ratio).slice(0, 2);
+  for (const [id, b] of boost) mid.push(`Mod ${oppName} bygges ${itemName(id)} oftere (${pct(b.vs)} mod ${pct(b.general)} generelt)`);
+  if (oppCore.length > 1) mid.push(`${genitive(oppName)} typiske build: ${oppCore.map(itemName).join(' > ')}`);
+  if (myCore.length > 1) mid.push(`Dit core build: ${myCore.map(itemName).join(' > ')}`);
+
+  const late = [];
+  if (scaling) late.push(scaling);
+  const curve = lengthCurve(myBuild);
+  if (curve) {
+    late.push(`Din win rate efter kamplængde: ${curve.text}`);
+    if (curve.drop <= -0.03) late.push('Din win rate falder i lange kampe - brug dine fordele til objectives og tårne tidligt.');
+    else if (curve.drop >= 0.03) late.push('Din win rate stiger i lange kampe - kommer du bagud, så farm og spil efter lategame.');
+  }
+  return [
+    { key: 'lane', title: jungle ? 'Start (level 1-5)' : 'Laning (level 1-5)', lines: lane },
+    { key: 'spike', title: 'Level 6 og første item', lines: spike },
+    { key: 'mid', title: 'Midgame (ca. 14-25 min)', lines: mid },
+    { key: 'late', title: 'Lategame (25+ min)', lines: late },
+  ].filter((p) => p.lines.length);
+}
+
+// Hvilken fase kampen er i: laning til første færdige item/level 6, midgame til 25 min, så lategame.
+function phaseNow(L, plan) {
+  if (L.gameTime >= 25 * 60) return 'late';
+  if (L.gameTime >= 14 * 60) return 'mid';
+  const items = L.me.itemIds.filter((id) => isCompleted(dd.items[id]) && !isBoots(dd.items[id])).length;
+  return L.me.level >= 6 || items || plan?.duels?.length ? 'spike' : 'lane';
+}
+
+// Styrkeforhold mellem dig og din lane-modstander: level, ult, færdige items og item-guld (står alt på TAB).
+const completedCount = (p) => p.itemIds.filter((id) => isCompleted(dd.items[id]) && !isBoots(dd.items[id])).length;
+function balanceOf(me, opp, name) {
+  const g = (x) => Math.round(x).toLocaleString('da-DK');
+  let score = 0;
+  const why = [];
+  const lv = me.level - opp.level;
+  if (lv) { score += lv; why.push(`${Math.abs(lv)} level ${lv > 0 ? 'foran' : 'bagud'}`); }
+  const ultMe = me.level >= 6;
+  const ultHim = opp.level >= 6;
+  if (ultMe !== ultHim) { score += ultMe ? 1.5 : -1.5; why.push(ultMe ? 'du har ult' : `${name} har ult`); }
+  const items = completedCount(me) - completedCount(opp);
+  if (items) { score += items * 1.5; why.push(`${Math.abs(items)} ${Math.abs(items) > 1 ? 'færdige items' : 'færdigt item'} ${items > 0 ? 'foran' : 'bagud'}`); }
+  const gold = me.itemGold - opp.itemGold;
+  if (Math.abs(gold) >= 500) { score += gold / 1000; why.push(`${g(Math.abs(gold))} g item-guld ${gold > 0 ? 'foran' : 'bagud'}`); }
+  const side = score >= 1.5 ? 'me' : score <= -1.5 ? 'opp' : 'even';
+  return { side, label: side === 'me' ? 'Fordel dig' : side === 'opp' ? `Fordel ${name}` : 'Jævnt', why, score: Math.round(score * 10) / 10 };
+}
+
+// Kort styrke-kontekst til en duel: "level 6 mod 7, 800 g bagud i items".
+function duelContext(me, opp) {
+  const d = me.itemGold - opp.itemGold;
+  const items = Math.abs(d) < 300 ? 'lige i items' : `${Math.round(Math.abs(d)).toLocaleString('da-DK')} g ${d > 0 ? 'foran' : 'bagud'} i items`;
+  return `level ${me.level} mod ${opp.level}, ${items}`;
+}
+
 async function buildPlan(myKey, oppKey, position, myBuild) {
   const oppName = dd.champions[oppKey]?.name || '?';
   const myName = dd.champions[myKey]?.name || '';
@@ -669,6 +783,12 @@ async function buildPlan(myKey, oppKey, position, myBuild) {
   // Guidens domme (lane-fordel, solo kills, spillestil) kun med nok kampe bag - tippet vises altid.
   const fewGames = typeof guide?.games === 'number' && guide.games < MATCHUP_MIN_GAMES;
   if (fewGames) log(`  Matchup-guide mod ${oppName}: kun ${guide.games} kampe - lane-fordel og spillestil vises ikke.`);
+  const laneAdvantage = fewGames ? null : who(guide?.laneAdvantage);
+  const soloKill = fewGames ? null : who(guide?.soloKill);
+  const playStyle = !fewGames && guide?.playStyle ? PLAY_STYLE[guide.playStyle] || guide.playStyle : null;
+  const scaling = scalingNote(myBuild, oppBuild, oppName);
+  const myCore = coreOf(myBuild);
+  const oppCore = coreOf(oppBuild, { buildChoice: 'popular' }); // hans mest spillede core
   return {
     key: `${myKey}_${oppKey}_${position}`,
     guideGames: guide?.games ?? null,
@@ -677,13 +797,14 @@ async function buildPlan(myKey, oppKey, position, myBuild) {
     opponent: oppName,
     position,
     stats: matchupStats(myBuild, oppKey),
-    laneAdvantage: fewGames ? null : who(guide?.laneAdvantage),
-    soloKill: fewGames ? null : who(guide?.soloKill),
-    playStyle: !fewGames && guide?.playStyle ? PLAY_STYLE[guide.playStyle] || guide.playStyle : null,
+    laneAdvantage,
+    soloKill,
+    playStyle,
     tip: guide?.tip || null,
-    scaling: scalingNote(myBuild, oppBuild, oppName),
-    myCore: coreOf(myBuild),
-    oppCore: coreOf(oppBuild, { buildChoice: 'popular' }), // hans mest spillede core
+    scaling,
+    myCore,
+    oppCore,
+    phases: planPhases({ myBuild, oppBuild, matchupBuild, oppName, laneAdvantage, soloKill, playStyle, scaling, myCore, oppCore, position }),
     // Items du faktisk bygger: core + sene items som mindst 2% køber (ikke fx Randuin's på en mage).
     matchupBuild,
     myPool: [
@@ -692,6 +813,9 @@ async function buildPlan(myKey, oppKey, position, myBuild) {
     ],
     seen: null, // modstanderens items/level ved sidste tjek
     log: [],    // ændringer under kampen
+    duels: [],  // kills mellem dig og lane-modstanderen: { t, won, solo, context }
+    events: new Set(), // behandlede kill-feed EventID'er
+    balance: null, // { side, pending, spokenAt } - til stemmen når styrkeforholdet skifter
   };
 }
 
@@ -713,16 +837,45 @@ function ensurePlan(myKey, oppKey, position, myBuild) {
 
 // Modstanderens nye færdige items -> ændringslog i hovedvinduet (passiv TAB-info).
 // Bevidst ingen stemme/overlay-besked: Riot/Overwolf forbyder notifikationer om modstanderens power spikes.
-function trackOpponent(L) {
+function trackOpponent(L, events = []) {
   const plan = app.plan;
   const opp = L.matchup?.player;
   if (!plan || !opp || String(opp.champ?.key) !== plan.oppKey) return;
   const completed = opp.itemIds.filter((id) => isCompleted(dd.items[id]));
-  const add = (kind, text) => {
+  const add = (kind, text, voice = true) => {
     plan.log.unshift({ t: L.gameTime, text });
     plan.log.length = Math.min(plan.log.length, 12);
-    if (app.cfg.enemyAlerts && app.cfg.voice) speak(kind, text);
+    if (voice && app.cfg.enemyAlerts && app.cfg.voice) speak(kind, text);
   };
+  // Dueller: kills mellem dig og lane-modstanderen i kill-feedet. Kun nye kills (startes programmet
+  // midt i kampen, kendes styrkeforholdet ikke for de gamle).
+  const isMe = (n) => n && (n === L.me.key || n === L.me.name);
+  const isOpp = (n) => n && (n === opp.key || n === opp.name);
+  for (const e of events) {
+    if (e.EventName !== 'ChampionKill' || plan.events.has(e.EventID)) continue;
+    plan.events.add(e.EventID);
+    if (L.gameTime - (e.EventTime || 0) > 15) continue;
+    const won = isMe(e.KillerName) && isOpp(e.VictimName);
+    if (!won && !(isOpp(e.KillerName) && isMe(e.VictimName))) continue;
+    const solo = !(e.Assisters || []).length;
+    const context = duelContext(L.me, opp);
+    plan.duels.push({ t: e.EventTime, won, solo, context });
+    add('duel', `${won ? `Du dræbte ${plan.opponent}` : `Du døde til ${plan.opponent}`}${solo ? '' : ' (med hjælp)'} - ${context}`, false);
+  }
+  // Styrkeforhold: stemmen siger det, når det har skiftet i 2 tjek i træk (ikke ved små udsving),
+  // højst hvert 45. sekund og aldrig om "jævnt".
+  const bal = balanceOf(L.me, opp, plan.opponent);
+  if (!plan.balance) plan.balance = { side: bal.side, pending: null, spokenAt: -Infinity };
+  else if (bal.side === plan.balance.side) plan.balance.pending = null;
+  else if (plan.balance.pending !== bal.side) plan.balance.pending = bal.side;
+  else {
+    plan.balance.side = bal.side;
+    plan.balance.pending = null;
+    if (bal.side !== 'even' && L.gameTime - plan.balance.spokenAt >= 45) {
+      plan.balance.spokenAt = L.gameTime;
+      add('balance', `${bal.side === 'me' ? `Fordel dig mod ${plan.opponent}` : bal.label}: ${bal.why.slice(0, 2).join(', ')}`);
+    }
+  }
   if (plan.seen) {
     const before = [...plan.seen.items];
     for (const id of completed) {
@@ -1191,6 +1344,7 @@ function clearPick() {
 
 function finishGame() {
   const g = app.game;
+  const plan = app.plan;
   app.game = null;
   clearPick();
   if (!g?.last || g.last.gameTime < 300) return; // remakes og afbrudte kampe tæller ikke
@@ -1217,16 +1371,23 @@ function finishGame() {
     goldDiff: L.allies.reduce((s, p) => s + p.itemGold, 0) - L.enemies.reduce((s, p) => s + p.itemGold, 0),
     matchup: L.matchup ? { champion: L.matchup.player.champ?.name, winRate: L.matchup.stats?.winRate ?? null } : null,
   };
+  // Dueller mod lane-modstanderen (kun hvis gameplanen var mod ham) + styrkeforholdet ved slut.
+  const opp = L.matchup?.player;
+  if (plan && opp && String(opp.champ?.key) === plan.oppKey) {
+    summary.duels = plan.duels.map((d) => ({ t: d.t, won: d.won, solo: d.solo, context: d.context }));
+    summary.balanceEnd = balanceOf(L.me, opp, plan.opponent).label;
+  }
   history.games.unshift(summary);
   history.games.length = Math.min(history.games.length, 100);
   try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 1)); } catch (e) { log(`Kunne ikke gemme historik: ${e.message}`); }
   log(`Kampoversigt: ${summary.champion} ${summary.kills}/${summary.deaths}/${summary.assists}, ${String(summary.csPerMin).replace('.', ',')} CS/min` +
-    (summary.followed != null ? `, ${pct(summary.followed)} af dine køb var blandt forslagene` : ''));
+    (summary.followed != null ? `, ${pct(summary.followed)} af dine køb var blandt forslagene` : '') +
+    (summary.duels?.length ? `, dueller mod ${summary.matchup.champion}: ${summary.duels.filter((d) => d.won).length}-${summary.duels.filter((d) => !d.won).length}` : ''));
 }
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.14.0';
+const VERSION = '1.15.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -2062,7 +2223,7 @@ async function updateLive(data) {
     const opp = app.live.matchup?.player;
     if (opp?.champ) ensurePlan(champ.key, opp.champ.key, LIVE_POSITION[meRaw.position] || app.build?.position, app.liveBuild.build);
     ensureJungleRoutes(champ.key, LIVE_POSITION[meRaw.position] || app.build?.position);
-    trackOpponent(app.live);
+    trackOpponent(app.live, data.events?.Events);
     announce(app.live);
   }
   if (first && app.live) log(`Live: ${champ.name} - forslag og scoreboard vises i vinduet.`);
@@ -2238,6 +2399,8 @@ function planView() {
   const p = app.plan;
   if (!p) return null;
   const item = (id) => ({ id, name: itemName(id), icon: dd.items[id]?.icon });
+  const opp = app.live?.matchup?.player;
+  const live = opp && String(opp.champ?.key) === p.oppKey ? opp : null; // lane-modstanderen i kampen
   return {
     opponent: champView(p.oppKey),
     me: champView(p.myKey),
@@ -2251,9 +2414,25 @@ function planView() {
     scaling: p.scaling,
     myCore: p.myCore.map(item),
     oppCore: p.oppCore.map(item),
-    now: app.live ? planNow(p, app.live) : null,
+    phases: p.phases || [],
+    phaseNow: live ? phaseNow(app.live, p) : null,
+    balance: live ? balanceOf(app.live.me, live, p.opponent) : null,
+    duels: p.duels.map((d) => ({ t: d.t, won: d.won, solo: d.solo, context: d.context })),
+    record: matchupRecord(p),
+    now: live ? planNow(p, app.live) : null,
     log: p.log.map((l) => ({ t: l.t, text: l.text })),
   };
+}
+
+// Dine egne kampe (gemt af programmet) med samme champion mod samme modstander.
+function matchupRecord(p) {
+  const oppName = dd.champions[p.oppKey]?.name;
+  const games = srGames().filter((g) => String(g.championId) === p.myKey && g.matchup?.champion === oppName);
+  if (!games.length) return null;
+  const wins = games.filter((g) => g.result === 'Sejr').length;
+  const losses = games.filter((g) => g.result === 'Nederlag').length;
+  const duels = games.flatMap((g) => g.duels || []);
+  return { games: games.length, wins, losses, duelsWon: duels.filter((d) => d.won).length, duelsLost: duels.filter((d) => !d.won).length };
 }
 
 function draftView() {
