@@ -625,6 +625,11 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(zh.inProgress, items[String(zhonyaPart)].gold.total >= 700, "Zhonya's er 'i gang' med en dyr del");
     if (zh.inProgress) assert.strictEqual(L.advice[0].id, '3157', "item du er i gang med står først");
     console.log('Live-forslag:', JSON.stringify(L.advice.map((a) => ({ item: a.name, cost: a.cost, råd: a.canAfford, del: a.part?.name, hvorfor: a.reasons }))));
+    // Riot-regler: forslag der kun skyldes modstandernes tilstand er "quiet" (ingen stemme/bip/blink) og har
+    // ingen overlay-begrundelse; ingen overlay-begrundelse nævner modstandernes KDA eller trussel.
+    const antiheal = L.advice.filter((a) => a.reasons.length && a.reasons.every((r) => r.startsWith('Anti-heal')));
+    assert(antiheal.length >= 1 && antiheal.every((a) => a.quiet && a.overlayReason === null), `anti-heal-forslag er quiet: ${JSON.stringify(antiheal)}`);
+    assert(!L.advice.some((a) => a.overlayReason && /Zed:|trussel|Anti-heal|bygger (armor|magic)/.test(a.overlayReason)), `overlay uden modstander-tilstand: ${JSON.stringify(L.advice.map((a) => a.overlayReason))}`);
     // Byggerækkefølge: ingen færdige items endnu (kun støvler) -> "Typisk 1. item"
     assert(L.advice.some((a) => a.reasons.some((r) => r.startsWith('Typisk 1. item'))), 'næste item i byggerækkefølgen');
     // Control Ward-påmindelse: 20 min, 1.400 g, plads og ingen ward

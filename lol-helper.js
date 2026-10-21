@@ -318,6 +318,11 @@ async function loadStaticDataWithRetry() {
     try {
       return await loadStaticData();
     } catch (e) {
+      // Kun netværksfejl prøves igen. En fejl i selve dataene/koden lukker programmet, så en ny version der
+      // ikke virker bliver rullet tilbage af den gamle (og ikke hænger i "Venter på internet").
+      const network = ['AbortError', 'TimeoutError'].includes(e.name) || Boolean(e.cause?.code)
+        || /fetch failed|ENOTFOUND|ECONN|ETIMEDOUT|EAI_AGAIN|socket|-> \d{3}/i.test(e.message);
+      if (!network) throw e;
       const waitS = Math.min(5 * attempt, 60);
       if (attempt === 1) log(`  ${e.message}`);
       setStatus(`Venter på internet (Data Dragon svarer ikke) - prøver igen om ${waitS} sek.`);
@@ -1212,7 +1217,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.12.0';
+const VERSION = '1.13.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -1363,7 +1368,8 @@ async function installUpdate() {
     await sleep(500);
     try {
       const s = await fetch(`http://127.0.0.1:${port}/state`, { signal: AbortSignal.timeout(2000) }).then((r) => r.json());
-      healthy = Boolean(s && 'ddVersion' in s && s.pid !== process.pid);
+      // Sund = den nye version svarer OG har hentet Data Dragon (vinduet starter før data er hentet).
+      healthy = Boolean(s && s.ddVersion && s.pid !== process.pid);
     } catch {}
   }
   if (healthy) {
@@ -1787,6 +1793,10 @@ function liveAdvice(build, me, enemy, gold, mapNumber, ctx = {}) {
     if (popularity >= 0 && popularity < 0.02 && !inProgress && !vs) continue;
     let score = Math.max(popularity, 0) * 100;
     const reasons = [];
+    // Begrundelser der bygger på modstandernes tilstand (items, KDA, healere): vises kun passivt i hovedvinduet,
+    // aldrig i overlayet og udløser ingen stemme/bip (Riot: ingen notifikationer om modstanderes power spikes).
+    const enemyTexts = new Set();
+    const enemyReason = (text) => { enemyTexts.add(text); reasons.push(text); };
     // Stærke grunde (rigtige healere, forsvar, en modstander med høj KDA, matchup) giver en af de tilpassede pladser.
     // Andelen af AD/AP i deres trussel giver kun point.
     let strong = false;
@@ -1794,16 +1804,16 @@ function liveAdvice(build, me, enemy, gold, mapNumber, ctx = {}) {
       score += 40 + 60 * (paid / it.gold);
       reasons.push(`Du er i gang: har ${used.map(itemName).join(', ')} (${pct(paid / it.gold)} af prisen)`);
     }
-    if (it.antiheal && enemy.healers.length) { score += 30 + 15 * enemy.healers.length; strong = true; reasons.push(`Anti-heal mod ${names(enemy.healers)}`); }
-    if (it.tags.includes('ArmorPenetration') && iAmAD && enemy.armorHeavy) { score += 35; strong = true; reasons.push(`${names(enemy.armorStackers)} bygger armor`); }
-    if (it.tags.includes('MagicPenetration') && !iAmAD && enemy.mrHeavy) { score += 35; strong = true; reasons.push(`${names(enemy.mrStackers)} bygger magic resist`); }
+    if (it.antiheal && enemy.healers.length) { score += 30 + 15 * enemy.healers.length; strong = true; enemyReason(`Anti-heal mod ${names(enemy.healers)}`); }
+    if (it.tags.includes('ArmorPenetration') && iAmAD && enemy.armorHeavy) { score += 35; strong = true; enemyReason(`${names(enemy.armorStackers)} bygger armor`); }
+    if (it.tags.includes('MagicPenetration') && !iAmAD && enemy.mrHeavy) { score += 35; strong = true; enemyReason(`${names(enemy.mrStackers)} bygger magic resist`); }
     const fedAD = enemy.fed.find((p) => p.dmg.ad >= 0.6);
     const fedAP = enemy.fed.find((p) => p.dmg.ap >= 0.6);
     // Fakta fra TAB (KDA + skadetype ud fra items), ingen konklusion.
-    if (it.tags.includes('Armor') && fedAD) { score += 30; strong = true; reasons.push(`${fedAD.champ?.name || fedAD.name}: ${kda(fedAD)}, ${pct(fedAD.dmg.ad)} AD-skade`); }
-    if (it.tags.includes('SpellBlock') && fedAP) { score += 30; strong = true; reasons.push(`${fedAP.champ?.name || fedAP.name}: ${kda(fedAP)}, ${pct(fedAP.dmg.ap)} AP-skade`); }
-    if (it.tags.includes('Armor') && enemy.adShare >= 0.65) { score += 15; reasons.push(`${pct(enemy.adShare)} af deres trussel er AD`); }
-    if (it.tags.includes('SpellBlock') && enemy.apShare >= 0.55) { score += 15; reasons.push(`${pct(enemy.apShare)} af deres trussel er AP`); }
+    if (it.tags.includes('Armor') && fedAD) { score += 30; strong = true; enemyReason(`${fedAD.champ?.name || fedAD.name}: ${kda(fedAD)}, ${pct(fedAD.dmg.ad)} AD-skade`); }
+    if (it.tags.includes('SpellBlock') && fedAP) { score += 30; strong = true; enemyReason(`${fedAP.champ?.name || fedAP.name}: ${kda(fedAP)}, ${pct(fedAP.dmg.ap)} AP-skade`); }
+    if (it.tags.includes('Armor') && enemy.adShare >= 0.65) { score += 15; enemyReason(`${pct(enemy.adShare)} af deres trussel er AD`); }
+    if (it.tags.includes('SpellBlock') && enemy.apShare >= 0.55) { score += 15; enemyReason(`${pct(enemy.apShare)} af deres trussel er AP`); }
     if (vs) { score += Math.min(30, 15 * vs.ratio); strong = true; reasons.push(`Bygges oftere mod ${ctx.oppName} (${pct(vs.vs)} mod ${pct(vs.general)} generelt)`); }
     const adapted = strong;
     if (first) {
@@ -1837,7 +1847,12 @@ function liveAdvice(build, me, enemy, gold, mapNumber, ctx = {}) {
     }
     // En del fylder en plads: kun forslag om del hvis der er plads.
     const part = cost > budget && freeSlots > 0 && !full ? affordablePart(id, owned, gold) : null;
-    scored.push({ id, score, reasons, cost, canAfford: cost <= budget, part, adapted, inProgress, used, sell, swap, nextShare: share });
+    // Til overlay/stemme: første begrundelse om dit eget build (ikke om modstanderne). Findes ingen, er forslaget
+    // der kun pga. modstandernes tilstand -> "quiet": ingen stemme, bip, blink eller overlay-begrundelse.
+    const ownReasons = reasons.filter((r) => !enemyTexts.has(r) && !r.startsWith('Fuldt build') && !r.startsWith('Kræver en ledig plads'));
+    const overlayReason = ownReasons.find((r) => !r.startsWith('Du er i gang')) || null;
+    const quiet = ownReasons.length === 0;
+    scored.push({ id, score, reasons, cost, canAfford: cost <= budget, part, adapted, inProgress, used, sell, swap, nextShare: share, overlayReason, quiet });
   }
   scored.sort((a, b) => b.score - a.score);
   // Rækkefølge: det item du er i gang med (dine dele er ikke spildt), så op til 2 tilpassede forslag,
@@ -1953,8 +1968,9 @@ function announce(L) {
   const v = app.voice;
   // Når stemmen er slået fra, tæller alt som sagt (så den ikke siger gamle nyheder når den slås til).
   const say = (kind, text) => !app.cfg.voice || speak(kind, text);
-  // Kun forslag du kan købe uden først at sælge eller bytte noget.
-  const afford = L.advice.filter((a) => a.canAfford && !a.sell && !a.swap).map((a) => a.id);
+  // Kun forslag du kan købe uden først at sælge eller bytte noget - og ikke forslag der kun skyldes modstandernes
+  // tilstand (quiet), så stemmen aldrig indirekte melder at en modstander er blevet stærkere.
+  const afford = L.advice.filter((a) => a.canAfford && !a.sell && !a.swap && !a.quiet).map((a) => a.id);
   // Dine færdige core-items (core fra gameplanen, ellers fra buildet).
   const coreList = app.plan?.myCore?.length ? app.plan.myCore : coreOf(app.liveBuild?.build);
   const core = coreList.filter((id) => L.me.itemIds.includes(id) && isCompleted(dd.items[id]));
@@ -2172,6 +2188,8 @@ function liveView() {
       reasons: a.reasons,
       adapted: a.adapted,
       inProgress: a.inProgress,
+      overlayReason: a.overlayReason,
+      quiet: a.quiet,
       part: a.part && { ...item(a.part.id), cost: a.part.cost },
       sell: a.sell && { ...item(a.sell), value: dd.items[a.sell].sell },
       swap: a.swap && { ...item(a.swap), value: dd.items[a.swap].sell },
@@ -2998,16 +3016,6 @@ async function main() {
   setupRemote(app.cfg);
   const port = await startWindowServer(app.cfg.port);
   claimInstanceLock(app.cfg.port, port);
-  if (IS_SEA) {
-    // Ryd op efter en opdatering først nu, hvor vi lytter: indtil da kan den gamle version rulle tilbage til .old.
-    // På Windows er .old låst, til den gamle proces er lukket - prøv derfor igen lidt senere.
-    fs.rm(UPDATE_PIDFILE, { force: true }, () => {});
-    // Aldrig mens en opdatering kører: så er .old den backup, der skal rulles tilbage til.
-    const rmOld = () => { if (!updateRunning) fs.rm(`${process.execPath}.old`, { force: true }, () => {}); };
-    rmOld();
-    setTimeout(rmOld, 5000).unref();
-    setTimeout(rmOld, 60000).unref();
-  }
   const url = `http://127.0.0.1:${port}`;
   log(`Vindue: ${url}`);
   if (app.remote.enabled) {
@@ -3017,6 +3025,17 @@ async function main() {
   setAllowedHosts(port);
   if (app.cfg.openWindow) openBrowser(url);
   const ddVersion = await loadStaticDataWithRetry();
+  if (IS_SEA) {
+    // Ryd op efter en opdatering først nu, hvor vi lytter OG har data (= den gamle version har set os som sunde):
+    // indtil da kan den gamle version rulle tilbage til .old.
+    // På Windows er .old låst, til den gamle proces er lukket - prøv derfor igen lidt senere.
+    fs.rm(UPDATE_PIDFILE, { force: true }, () => {});
+    // Aldrig mens en opdatering kører: så er .old den backup, der skal rulles tilbage til.
+    const rmOld = () => { if (!updateRunning) fs.rm(`${process.execPath}.old`, { force: true }, () => {}); };
+    rmOld();
+    setTimeout(rmOld, 5000).unref();
+    setTimeout(rmOld, 60000).unref();
+  }
   log(`Data Dragon ${ddVersion} hentet. Builds fra OP.GG (${app.cfg.region}, ${app.cfg.buildChoice}).`);
   setInterval(refreshStaticData, 15 * 60 * 1000); // ny patch / tilbage fra offline
   if (app.cfg.liveAdvice) liveLoop();

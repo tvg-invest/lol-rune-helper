@@ -10,6 +10,8 @@
   "voice": true,
   "openWindow": true,
   "remoteAccess": false,
+  "remoteLan": false,
+  "remoteHosts": [],
   "autoUpdate": true,
   "port": 3399,
   "pollMs": 1500

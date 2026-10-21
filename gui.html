@@ -130,6 +130,10 @@
   .ov-row img { width: 34px; height: 34px; border-radius: 6px; flex: none; }
   .ov-row .t { min-width: 0; flex: 1; }
   .ov-row .n { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Navn forkortes med "...", men "I GANG"-mærket beholder sin plads. */
+  .ov-row .n-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .ov-row .n-row .n { min-width: 0; }
+  .ov-row .n-row .progtag { flex: none; margin-left: 0; }
   .ov-row .r { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ov-row .c { font-size: 12px; font-weight: 700; white-space: nowrap; }
   .ov-row .c.ok { color: var(--green); }
@@ -247,8 +251,11 @@ function statusLine(s) {
 function logCard(s) {
   const uc = s.updateCheck || {};
   const checked = uc.at ? new Date(uc.at).toTimeString().slice(0, 5) : null;
+  // En mislykket installation (fx forkert kontrolsum) er noget andet end et fejlet tjek.
+  const installFailed = s.update && s.update.error;
   const status = !checked ? 'ikke tjekket for opdatering endnu'
-    : uc.ok === false ? `opdateringstjek fejlede kl. ${checked}`
+    : installFailed ? `opdatering til ${s.update.version} mislykkedes`
+    : uc.ok === false ? `opdateringstjek fejlede kl. ${checked}${uc.error ? ` (${uc.error})` : ''}`
     : s.update ? `ny version ${s.update.version} fundet kl. ${checked}`
     : `nyeste version (tjekket kl. ${checked})`;
   return el('div', { class: 'card' }, el('details', {}, el('summary', {}, 'Log'), el('pre', { class: 'log' }, s.log.join('\n'))),
@@ -260,11 +267,14 @@ function logCard(s) {
 
 function updateBanner(s) {
   if (!s.update) return null;
+  const failed = !s.update.inProgress && s.update.error;
   return el('div', { class: 'update' },
-    el('div', {}, el('b', {}, `Ny version ${s.update.version} er klar`), s.update.notes ? el('div', { class: 'muted' }, s.update.notes.split('\n')[0]) : null),
+    el('div', {}, el('b', {}, `Ny version ${s.update.version} er klar`),
+      failed ? el('div', { style: 'color:var(--red)' }, `Opdatering mislykkedes: ${s.update.error}`)
+        : s.update.notes ? el('div', { class: 'muted' }, s.update.notes.split('\n')[0]) : null),
     s.update.inProgress ? el('span', { class: 'muted' }, 'Opdaterer...')
       : s.update.canApply && ['127.0.0.1', 'localhost'].includes(location.hostname)
-        ? el('button', { onclick: (e) => { e.target.textContent = 'Opdaterer...'; e.target.disabled = true; post('/api/update', {}); } }, 'Opdater nu')
+        ? el('button', { onclick: (e) => { e.target.textContent = 'Opdaterer...'; e.target.disabled = true; post('/api/update', {}); } }, failed ? 'Prøv igen' : 'Opdater nu')
         : el('span', { class: 'muted' }, 'Hent den nye version'));
 }
 
@@ -333,7 +343,7 @@ function gameplanCard(p, live) {
       img(p.me.icon, p.me.name, 'plan-ic'), el('span', { class: 'muted' }, 'mod'), img(p.opponent.icon, p.opponent.name, 'plan-ic'),
       el('h2', { style: 'margin:0' }, `Gameplan mod ${p.opponent.name}`),
       p.winRate != null ? el('span', { class: 'wr ' + (few ? 'few' : wrClass(p.winRate)), style: 'margin-left:auto;font-size:18px' }, pct(p.winRate)) : null),
-    p.games ? el('div', { class: 'muted', style: 'font-size:12px;margin:-4px 0 8px' }, `Din win rate i ${num(p.games)} kampe` + (few ? ' (få kampe - usikkert tal)' : '')) : null,
+    p.games ? el('div', { class: 'muted', style: 'font-size:12px;margin:-4px 0 8px' }, `Win rate for ${p.me.name} mod ${p.opponent.name} i ${num(p.games)} kampe (OP.GG)` + (few ? ' - få kampe, usikkert tal' : '')) : null,
     live ? now : null, live ? changes : null,
     el('div', { class: 'shards', style: 'margin:' + (live ? '10px' : '0') + ' 0 10px' },
       // OP.GG's "lane advantage" for junglere handler om starten af kampen, ikke en lane.
@@ -489,7 +499,8 @@ function adviceCard(L) {
         el('ul', {}, a.reasons.map((r) => el('li', {}, r))),
         a.swap ? el('div', { class: 'part' }, 'Byt ud:', img(a.swap.icon, a.swap.name), `${a.swap.name} (+${gold(a.swap.value)})`) : null,
         a.sell ? el('div', { class: 'part' }, 'Sælg:', img(a.sell.icon, a.sell.name), `${a.sell.name} (+${gold(a.sell.value)})`) : null,
-        a.part ? el('div', { class: 'part' }, 'Råd nu til delen', img(a.part.icon, a.part.name), `${a.part.name} (${gold(a.part.cost)})`) : null);
+        // Ved kampstart er startitems det relevante køb - ingen konkurrerende "råd nu til delen".
+        a.part && !inv.starter ? el('div', { class: 'part' }, 'Råd nu til delen', img(a.part.icon, a.part.name), `${a.part.name} (${gold(a.part.cost)})`) : null);
     }))
       : el('div', { class: 'muted' }, empty));
 }
@@ -716,11 +727,11 @@ function overlayContent(s) {
         'Fuldt build' + (L.inventory.elixir ? ` · ${L.inventory.elixir.name}${L.inventory.elixir.canAfford ? ' (råd nu)' : ''}` : '')) : null,
       L.advice.map((a) => el('div', { class: 'ov-row' + (a.inProgress ? ' progress' : '') + (a.canAfford ? ' afford' : '') + ((flashUntil.get(a.id) || 0) > Date.now() ? ' flash' : ''), 'data-id': a.id },
         img(a.icon, a.name),
-        el('div', { class: 't' }, el('div', { class: 'n' }, a.name, a.inProgress ? el('span', { class: 'progtag' }, 'I GANG') : null),
-          // "I GANG"-mærket viser allerede fremdriften; vis hellere hvorfor.
-          el('div', { class: 'r' }, a.reasons.find((r) => !r.startsWith('Du er i gang')) || a.reasons[0])),
+        el('div', { class: 't' }, el('div', { class: 'n-row' }, el('span', { class: 'n' }, a.name), a.inProgress ? el('span', { class: 'progtag' }, 'I GANG') : null),
+          // Kun begrundelser om dit eget build - aldrig modstandernes KDA/items (ingen power spike-notifikationer).
+          a.overlayReason ? el('div', { class: 'r' }, a.overlayReason) : null),
         // Som i hovedvinduet: salgs-/bytteværdien tæller med i det du har.
-        el('div', { class: 'c' + (a.canAfford ? ' ok' : '') }, a.canAfford ? 'RÅD NU' : `mangler ${num(Math.round(a.cost - L.gold - ((a.sell && a.sell.value) || (a.swap && a.swap.value) || 0)))}`))),
+        el('div', { class: 'c' + (a.canAfford ? ' ok' : '') }, a.canAfford ? 'RÅD NU' : `mangler ${gold(a.cost - L.gold - ((a.sell && a.sell.value) || (a.swap && a.swap.value) || 0))}`))),
       // Bevidst intet om modstandernes items eller "fed" i overlayet (ingen power spike-notifikationer).
       L.matchup && L.matchup.winRate != null ? el('div', { class: 'ov-foot' }, `Mod ${L.matchup.name}: ${pct(L.matchup.winRate)} WR` + (fewGames(L.matchup.games) ? ' (få kampe)' : '')) : null,
     ];
@@ -752,7 +763,8 @@ let affordable = new Set();
 const flashUntil = new Map(); // id -> tidspunkt hvor blinket (3 x 1,2 s) er færdigt
 let wasLive = false;
 function trackAffordable(s) {
-  const now = new Set((s.live?.advice || []).filter((a) => a.canAfford).map((a) => a.id));
+  // Forslag der kun skyldes modstandernes tilstand (quiet) bipper og blinker ikke.
+  const now = new Set((s.live?.advice || []).filter((a) => a.canAfford && !a.quiet).map((a) => a.id));
   const justAffordable = [...now].filter((id) => !affordable.has(id));
   for (const id of justAffordable) flashUntil.set(id, Date.now() + 3700);
   // Ikke ved første live-besked (så bipper den ikke bare fordi vinduet åbnes).

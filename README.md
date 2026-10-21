@@ -85,15 +85,15 @@ Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General 
 
 ## Stemme og fuldskærm
 
-Ægte fuldskærm (exclusive fullscreen) kan ikke overlejres af andre vinduer; det kræver injektion i spilprocessen, som programmet bevidst ikke gør (Vanguard). Derfor en stemme, der virker uanset vindue - kun din egen tilstand: startitems, "Råd til <item>" (vigtigste nye forslag du kan købe uden at sælge/bytte), "Level op: Q", "Level 6 - R" (Evelynn: "Level 6 - camouflage og R") og færdige core-items. Kun nye hændelser, max én pr. slags hvert 8. sek.; en besked der ikke blev sagt, prøves igen. Beskederne siges én ad gangen (kø), og en besked der har ventet over 6 sek., droppes. Windows: `System.Speech` via PowerShell med en dansk stemme (da-DK) hvis der er en; macOS: `say` med en dansk stemme hvis der er en. Den valgte stemme og evt. fejl står i loggen. Til/fra i vinduet (gemmes i `config.json` som `voice`).
+Ægte fuldskærm (exclusive fullscreen) kan ikke overlejres af andre vinduer; det kræver injektion i spilprocessen, som programmet bevidst ikke gør (Vanguard). Derfor en stemme, der virker uanset vindue - kun din egen tilstand: startitems, "Råd til <item>" (vigtigste nye forslag du kan købe uden at sælge/bytte), "Level op: Q", "Level 6 - R" (Evelynn: "Level 6 - camouflage og R") og færdige core-items. Kun nye hændelser, max én pr. slags hvert 8. sek.; en besked der blev afvist af 8-sek.-grænsen, prøves igen ved næste tjek. Beskederne siges én ad gangen (kø), og en besked der har ventet over 6 sek. i køen, droppes og gentages ikke. "Råd til" siges ikke for forslag, der kun skyldes modstandernes tilstand (fx en modstander med høj KDA) - de står kun passivt i hovedvinduet. Windows: `System.Speech` via PowerShell med en dansk stemme (da-DK) hvis der er en; macOS: `say` med en dansk stemme hvis der er en. Den valgte stemme og evt. fejl står i loggen. Til/fra i vinduet (gemmes i `config.json` som `voice`).
 
 ## Overlay
 
-Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozilla.org/en-US/docs/Web/API/Document_Picture-in-Picture_API)-vindue (Chrome/Edge 116+), som altid ligger øverst: guld, startitems, de 3 forslag (RÅD NU / mangler X, hvor salgs-/bytteværdien er trukket fra) og din matchup-win rate. Intet om modstandernes items eller "fed". Bip + blink når et forslag skifter til "råd nu" (kun dit eget guld). Mistes forbindelsen til programmet, viser overlayet "Forbindelse tabt" i stedet for gamle tal. Intet injiceres i spillet - det er et almindeligt browservindue, så League skal køre i Borderless.
+Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozilla.org/en-US/docs/Web/API/Document_Picture-in-Picture_API)-vindue (Chrome/Edge 116+), som altid ligger øverst: guld, startitems, de 3 forslag (RÅD NU / mangler X, hvor salgs-/bytteværdien er trukket fra) og din matchup-win rate. Intet om modstandernes items, KDA eller "fed": overlayet viser kun begrundelser om dit eget build (fx "Typisk 2. item ..."). Bip + blink når et forslag skifter til "råd nu" (kun dit eget guld, og ikke for forslag der kun skyldes modstandernes tilstand). Mistes forbindelsen til programmet, viser overlayet "Forbindelse tabt" i stedet for gamle tal. Intet injiceres i spillet - det er et almindeligt browservindue, så League skal køre i Borderless.
 
 ## Telefon
 
-`"remoteAccess": true` lytter på alle netværk (ellers kun 127.0.0.1). Andre enheder skal have en hemmelig nøgle (QR-kode i vinduet, gemt i `remote-token.txt`), som bliver til en cookie. POST kræver JSON, så fremmede hjemmesider ikke kan ændre noget.
+`"remoteAccess": true` åbner vinduet for andre enheder (ellers kun 127.0.0.1). Som standard kun via Tailscale (100.64.0.0/10, krypteret af Tailscale). `"remoteLan": true` tillader også wifi/LAN - det er almindelig HTTP, så nøglen kan aflyttes på delte netværk. `"remoteHosts": ["min-pc"]` tillader ekstra navne, fx et Tailscale MagicDNS-navn. Tilladte adresser (Host-tjek mod DNS-rebinding) opdateres hvert minut, så Tailscale der starter efter programmet også virker. Andre enheder skal have en hemmelig nøgle (QR-kode i vinduet, gemt i `remote-token.txt` - slet filen for en ny nøgle), som bliver til en cookie. POST kræver JSON, så fremmede hjemmesider ikke kan ændre noget.
 
 ## Indstillinger (`config.json` ved siden af programmet)
 
@@ -103,8 +103,13 @@ Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozi
 | `buildChoice` | `smart` eller `popular` |
 | `setRunes` / `setSpells` / `setItemSet` / `adaptToEnemies` | `true`/`false` |
 | `flashKey` | `keep`, `D` eller `F` |
+| `liveAdvice` | Købsforslag, scoreboard og gameplan under kampen |
 | `voice` | Stemme til/fra (kun din egen tilstand) |
 | `openWindow` | Åbn vinduet i browseren ved start |
+| `autoUpdate` | Tjek for nye versioner (opdatering sker først når du klikker) |
+| `remoteAccess` | Vinduet kan åbnes fra telefonen (kun via Tailscale, medmindre `remoteLan`) |
+| `remoteLan` | Tillad også telefon-adgang via wifi/LAN (ukrypteret HTTP) |
+| `remoteHosts` | Ekstra navne vinduet må åbnes på, fx `["min-pc"]` (Tailscale MagicDNS) |
 | `port` | Port til vinduet (næste ledige bruges hvis optaget) |
 | `pollMs` | Hvor ofte klienten tjekkes |
 
@@ -119,4 +124,4 @@ Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozi
 
 ## Er det tilladt?
 
-Programmet bruger kun klientens lokale API i champion select - det samme som U.GG, Blitz og Porofessor. Det læser intet fra selve kampen.
+Programmet bruger kun Riots officielle, lokale API'er: League-klientens API i champion select (runer, summoners, item sets - det samme som U.GG, Blitz og Porofessor) og under kampen spillets Live Client Data API, som kun giver det du også kan se på TAB (items, levels, KDA, eget guld). Ingen injektion i spillet, ingen hukommelses- eller skærmlæsning. Forslag er fakta og valg, ingen notifikationer om modstanderes power spikes. Riot kræver at produkter registreres i Developer Portal.
