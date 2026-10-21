@@ -13,7 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
-const { randomUUID, randomBytes } = require('crypto');
+const { randomUUID, randomBytes, createHash, timingSafeEqual } = require('crypto');
 
 let sea = null;
 try { sea = require('node:sea'); } catch {}
@@ -34,7 +34,9 @@ const DEFAULT_CONFIG = {
   liveAdvice: true,       // købsforslag + scoreboard under kampen
   voice: true,            // sig "Råd til ...", "Level op: Q", "Level 6" og færdige core-items højt - kun din egen tilstand (virker også i ægte fuldskærm)
   openWindow: true,       // åbn vinduet i browseren ved start
-  remoteAccess: false,    // true = vinduet kan åbnes fra telefonen (Tailscale/wifi) med en hemmelig nøgle
+  remoteAccess: false,    // true = vinduet kan åbnes fra telefonen via Tailscale med en hemmelig nøgle
+  remoteLan: false,       // true = også via wifi/LAN (ukrypteret HTTP - nøglen kan aflyttes på delte netværk)
+  remoteHosts: [],        // ekstra navne vinduet må åbnes på, fx et Tailscale MagicDNS-navn ("min-pc")
   autoUpdate: true,       // tjek for nye versioner (opdatering sker først når du klikker)
   port: 3399,
   pollMs: 1500,
@@ -60,9 +62,17 @@ function log(msg) {
   broadcast();
 }
 
+// Læs config.json som objekt. Notesblok/PowerShell kan gemme med BOM (U+FEFF), som JSON.parse ikke tåler.
+// Kaster ved ugyldig JSON; ENOENT kastes videre, så kalderen kan skelne "ingen fil" fra "ødelagt fil".
+function readConfigFile() {
+  const obj = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8').replace(/^\uFEFF/, ''));
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('config.json skal være et JSON-objekt { ... }');
+  return obj;
+}
+
 function loadConfig() {
   try {
-    return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) };
+    return { ...DEFAULT_CONFIG, ...readConfigFile() };
   } catch (e) {
     if (e.code !== 'ENOENT') log(`Kunne ikke læse config.json (${e.message}) - bruger standardindstillinger.`);
     return { ...DEFAULT_CONFIG };
@@ -70,11 +80,25 @@ function loadConfig() {
 }
 
 // Gem én indstilling i config.json (resten af filen bevares).
+// Kan filen ikke læses (fx en tastefejl), skrives intet - ellers ville resten af indstillingerne forsvinde.
 function saveConfigValue(key, value) {
   let current = {};
-  try { current = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch {}
+  try {
+    current = readConfigFile();
+  } catch (e) {
+    if (e.code !== 'ENOENT') {
+      log(`Indstillingen blev ikke gemt: config.json kunne ikke læses (${e.message}). Ret filen, så gemmes den næste gang.`);
+      return false;
+    }
+  }
   current[key] = value;
-  try { fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(current, null, 2)}\n`); } catch (e) { log(`Kunne ikke gemme indstillingen: ${e.message}`); }
+  try {
+    fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(current, null, 2)}\n`);
+    return true;
+  } catch (e) {
+    log(`Kunne ikke gemme indstillingen: ${e.message}`);
+    return false;
+  }
 }
 
 function readAsset(name) {
@@ -111,13 +135,22 @@ async function findClient() {
   let cmdline;
   if (process.platform === 'win32') {
     // Lockfilen findes kun mens klienten kører og er gratis at læse - prøv den før PowerShell.
-    const fromLockfile = readLockfile(lockfileCandidates(''));
-    if (fromLockfile) return fromLockfile;
-    // PowerShell tager ~0,5 sek. CPU at starte: højst hvert 15. sekund når klienten ikke er fundet.
-    if (Date.now() - (findClient.lastPs || 0) < 15000) return null;
+    // Den sidst fundne installationsmappe (fra PowerShell) prøves først, så en installation uden for C/D/E:\Riot Games også er gratis.
+    const fromLockfile = readLockfile(lockfileCandidates(findClient.lastCmdline || ''));
+    if (fromLockfile) { findClient.psWait = 0; return fromLockfile; }
+    // PowerShell tager ~0,5 sek. CPU at starte. Kører League ikke, venter vi længere og længere
+    // mellem forsøgene (15 -> 30 -> 60 -> 120 sek.), så programmet ikke bruger CPU hele dagen.
+    const psWait = findClient.psWait || 15000;
+    if (Date.now() - (findClient.lastPs || 0) < psWait) return null;
     findClient.lastPs = Date.now();
     cmdline = await run('powershell.exe', ['-NoProfile', '-Command',
       "Get-CimInstance Win32_Process -Filter \"name='LeagueClientUx.exe'\" | Select-Object -ExpandProperty CommandLine"]);
+    if (cmdline.trim()) {
+      findClient.psWait = 0;
+      findClient.lastCmdline = cmdline;
+    } else {
+      findClient.psWait = Math.min(psWait * 2, 120000);
+    }
   } else {
     cmdline = (await run('ps', ['-A', '-ww', '-o', 'args'])).split('\n').filter((l) => l.includes('LeagueClientUx')).join('\n');
   }
@@ -130,12 +163,19 @@ async function findClient() {
   return readLockfile(lockfileCandidates(cmdline));
 }
 
+// Kører processen med dette pid? (EPERM = den findes, men tilhører en anden bruger.)
+function pidAlive(pid) {
+  if (!(Number(pid) > 0)) return false;
+  try { process.kill(Number(pid), 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
 // Lockfile-format: LeagueClient:<pid>:<port>:<password>:<protocol>
+// En lockfil efter et nedbrud kan blive liggende: spring den over, hvis klientens pid ikke kører.
 function readLockfile(files) {
   for (const file of files) {
     try {
-      const [, , p, password, protocol] = fs.readFileSync(file, 'utf8').trim().split(':');
-      if (Number(p) > 0 && password) return { protocol, port: Number(p), password };
+      const [, pid, p, password, protocol] = fs.readFileSync(file, 'utf8').trim().split(':');
+      if (Number(p) > 0 && password && (!(Number(pid) > 0) || pidAlive(pid))) return { protocol, port: Number(p), password };
     } catch {}
   }
   return null;
@@ -1201,7 +1241,14 @@ async function checkUpdate() {
     const asset = (rel.assets || []).find((a) => a.name === UPDATE_ASSET);
     if (latest && newer(latest, VERSION) && asset) {
       if (app.update?.version !== latest) log(`Ny version ${latest} er klar - klik "Opdater" i vinduet.`);
-      app.update = { version: latest, url: asset.browser_download_url, notes: String(rel.body || '').slice(0, 600) };
+      // GitHub giver størrelse og sha256 ("digest": "sha256:...") for hvert asset - tjekkes før filen startes.
+      app.update = {
+        version: latest,
+        url: asset.browser_download_url,
+        size: Number(asset.size) || null,
+        sha256: /^sha256:([a-f0-9]{64})$/i.exec(asset.digest || '')?.[1]?.toLowerCase() || null,
+        notes: String(rel.body || '').slice(0, 600),
+      };
     }
   } catch (e) {
     // Ingen udgivelse eller intet net: prøv igen senere (vises i vinduet, så det ikke fejler i stilhed).
@@ -1211,30 +1258,83 @@ async function checkUpdate() {
   broadcast();
 }
 
+// Kører programmet fra en zip-fil (Stifinder/7-Zip/WinRAR pakker det ud i en midlertidig mappe)?
+// Så forsvinder config, opdatering og autostart, når den midlertidige mappe ryddes.
+const RUNS_FROM_ZIP = /[\\/](Temp\d+_[^\\/]+\.zip|7zO[0-9a-f]+|Rar\$[^\\/]*)([\\/]|$)/i.test(APP_DIR);
+const ZIP_HINT = 'Programmet kører inde fra zip-filen. Pak zip-filen ud først (højreklik -> Udpak alle) og start det derfra.';
+
+let updateRunning = false;
+const UPDATE_PIDFILE = path.join(APP_DIR, 'update.pid'); // den nye version skriver sit pid her (Windows: startes via cmd)
+
+// Gem fejlen, så den kan ses i vinduet (opdateringslinjen), ikke kun i loggen.
+function updateFailed(e) {
+  if (app.update) app.update.error = e.message;
+  updateCheck.ok = false;
+  updateCheck.error = `Opdatering mislykkedes: ${e.message}`;
+  log(`Fejl: opdatering mislykkedes: ${e.message}`);
+}
+
 async function applyUpdate() {
   if (!IS_SEA) throw new Error('Kører fra kildekode - hent ny kode i stedet');
+  if (RUNS_FROM_ZIP) throw new Error(ZIP_HINT);
   if (!app.update?.url) throw new Error('Ingen opdatering');
-  log(`Henter version ${app.update.version}...`);
-  const res = await fetch(app.update.url, { headers: { 'User-Agent': 'lol-rune-helper' }, signal: AbortSignal.timeout(300000) });
+  if (updateRunning) throw Object.assign(new Error('Opdateringen er allerede i gang'), { busy: true });
+  updateRunning = true;
+  if (app.update) app.update.error = null;
+  try {
+    await installUpdate();
+  } finally {
+    updateRunning = false;
+  }
+}
+
+async function installUpdate() {
+  const { version, url, size, sha256 } = app.update;
+  log(`Henter version ${version}...`);
+  const res = await fetch(url, { headers: { 'User-Agent': 'lol-rune-helper' }, signal: AbortSignal.timeout(300000) });
   if (!res.ok) throw new Error(`Download fejlede: ${res.status}`);
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.length < 10 * 1024 * 1024) throw new Error('Filen er for lille - afbryder');
-  const exe = process.execPath;
-  fs.writeFileSync(`${exe}.new`, buf, { mode: 0o755 });
-  // En kørende fil kan omdøbes (også på Windows) men ikke overskrives: gem den gamle som .old.
-  const rollback = () => {
-    try { fs.rmSync(exe, { force: true }); fs.renameSync(`${exe}.old`, exe); } catch {}
-  };
-  fs.rmSync(`${exe}.old`, { force: true });
-  fs.renameSync(exe, `${exe}.old`);
-  try {
-    fs.renameSync(`${exe}.new`, exe);
-  } catch (e) {
-    fs.renameSync(`${exe}.old`, exe); // fx antivirus der holder den nye fil - behold den gamle
-    throw e;
+  if (size && buf.length !== size) throw new Error(`Filen har forkert størrelse (${buf.length} i stedet for ${size} bytes) - afbryder`);
+  if (sha256) {
+    const got = createHash('sha256').update(buf).digest('hex');
+    if (got !== sha256) throw new Error('Filens kontrolsum (sha256) passer ikke med udgivelsen - afbryder');
   }
-  // Start den nye version mens den gamle stadig kører; den venter selv på at porten bliver ledig.
-  const child = spawn(exe, ['--updated'], { cwd: APP_DIR, detached: true, stdio: 'ignore', env: process.env });
+  if (process.platform === 'win32' && buf.subarray(0, 2).toString('latin1') !== 'MZ') throw new Error('Filen er ikke et Windows-program - afbryder');
+  const exe = process.execPath;
+  const exeNew = `${exe}.new`;
+  const exeOld = `${exe}.old`;
+  // En kørende fil kan omdøbes (også på Windows) men ikke overskrives: gem den gamle som .old.
+  try {
+    fs.writeFileSync(exeNew, buf, { mode: 0o755 });
+    fs.rmSync(exeOld, { force: true });
+    fs.renameSync(exe, exeOld);
+    try {
+      fs.renameSync(exeNew, exe);
+    } catch (e) {
+      fs.renameSync(exeOld, exe); // fx antivirus der holder den nye fil - behold den gamle
+      throw e;
+    }
+  } finally {
+    fs.rmSync(exeNew, { force: true }); // ingen 87 MB-rest, hvis et trin fejlede
+  }
+  const rollback = () => {
+    try { fs.rmSync(exe, { force: true }); fs.renameSync(exeOld, exe); } catch (e) { log(`Kunne ikke lægge den gamle version tilbage: ${e.message}`); }
+  };
+
+  // Start den nye version. Den venter selv på, at porten bliver ledig.
+  fs.rmSync(UPDATE_PIDFILE, { force: true });
+  let child;
+  if (process.platform === 'win32') {
+    // Via "start", så den nye version får sit eget (minimerede) konsolvindue med loggen.
+    // Et detached barn startet direkte har ingen konsol, og man kan hverken se eller lukke det.
+    child = spawn('cmd.exe', ['/c', 'start', '', '/min', exe, '--updated'], { cwd: APP_DIR, detached: true, stdio: 'ignore', windowsHide: true, env: process.env });
+  } else {
+    let logFd = 'ignore';
+    try { logFd = fs.openSync(path.join(APP_DIR, 'lol-helper.log'), 'a'); } catch {}
+    child = spawn(exe, ['--updated'], { cwd: APP_DIR, detached: true, stdio: ['ignore', logFd, logFd], env: process.env });
+    if (typeof logFd === 'number') fs.closeSync(logFd);
+  }
   const started = await new Promise((resolve) => {
     child.once('spawn', () => resolve(true));
     child.once('error', () => resolve(false));
@@ -1244,11 +1344,44 @@ async function applyUpdate() {
     throw new Error('Den nye version kunne ikke starte - beholder den gamle');
   }
   child.unref();
-  log('Opdateret - genstarter...');
+  let childExited = false;
+  if (process.platform !== 'win32') child.once('exit', () => { childExited = true; });
+
+  // Frigør porten og vent på, at den nye version svarer. Kommer den ikke op, rulles tilbage.
+  log(`Starter version ${version}...`);
+  const port = app.server.address().port;
   for (const client of sseClients) client.end();
-  app.server.close();
-  app.server.closeAllConnections();
-  setTimeout(() => process.exit(0), 300);
+  await new Promise((resolve) => { app.server.close(() => resolve()); app.server.closeAllConnections(); });
+  const deadline = Date.now() + (Number(process.env.LOL_HELPER_UPDATE_WAIT_MS) || 90000);
+  let healthy = false;
+  while (!healthy && !childExited && Date.now() < deadline) {
+    await sleep(500);
+    try {
+      const s = await fetch(`http://127.0.0.1:${port}/state`, { signal: AbortSignal.timeout(2000) }).then((r) => r.json());
+      healthy = Boolean(s && 'ddVersion' in s && s.pid !== process.pid);
+    } catch {}
+  }
+  if (healthy) {
+    console.log(`[${time()}] Version ${version} kører - lukker den gamle.`);
+    setTimeout(() => process.exit(0), 100);
+    return;
+  }
+
+  // Den nye version kom ikke op: stop den, læg den gamle fil tilbage og fortsæt med den gamle.
+  let newPid = process.platform === 'win32' ? null : child.pid;
+  try { newPid = Number(fs.readFileSync(UPDATE_PIDFILE, 'utf8')) || newPid; } catch {}
+  if (newPid && pidAlive(newPid)) {
+    try { process.kill(newPid); } catch {}
+    for (let i = 0; i < 20 && pidAlive(newPid); i++) await sleep(250); // Windows: filen er låst, til processen er væk
+  }
+  fs.rmSync(UPDATE_PIDFILE, { force: true });
+  rollback();
+  await new Promise((resolve) => {
+    app.server.once('error', (e) => { log(`Kunne ikke åbne vinduet igen: ${e.message}`); resolve(); });
+    app.server.listen(port, app.remote.enabled ? '0.0.0.0' : '127.0.0.1', resolve);
+  });
+  claimInstanceLock(app.cfg.port, port);
+  throw new Error(`version ${version} startede ikke korrekt${childExited ? ' (lukkede med det samme)' : ''} - beholder ${VERSION}`);
 }
 
 // ---------- Live i kampen ----------
@@ -1967,7 +2100,6 @@ const app = {
   reconnecting: false, // spillet er væk, men klienten er stadig i kamp (crash/genforbindelse)
   shapesLogged: false, // klientens dataformat er gemt (lcu-shapes.json)
   draftStatus: null,   // 'loading' | 'error' | 'unsupported' mens der ingen draft-data er
-  updating: false,     // en opdatering hentes/installeres lige nu
   game: null,          // køb og forslag i den igangværende kamp (til kampoversigten)
   update: null,        // { version, url, notes } hvis en nyere version findes
   server: null,
@@ -2138,7 +2270,7 @@ function viewModel() {
     version: VERSION,
     pid: process.pid,
     voice: Boolean(app.cfg.voice),
-    update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA, inProgress: Boolean(app.updating) },
+    update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA && !RUNS_FROM_ZIP, inProgress: updateRunning, error: app.update.error || null },
     draftStatus: app.draftStatus,
     minGames: MATCHUP_MIN_GAMES, // matchup-tal med færre kampe vises som usikre
     updateCheck: { at: updateCheck.at || null, ok: updateCheck.ok, error: updateCheck.error },
@@ -2294,26 +2426,61 @@ function setupRemote(cfg) {
   app.remote = { enabled: true, token, urls: [] };
 }
 
+// Tailscale-adresser ligger i 100.64.0.0/10. Trafikken dér er krypteret af Tailscale;
+// wifi/LAN er almindelig HTTP, hvor nøglen kan aflyttes - derfor kun med "remoteLan": true.
+const isTailscale = (ip) => {
+  const [x, y] = String(ip || '').replace(/^::ffff:/, '').split('.').map(Number);
+  return x === 100 && y >= 64 && y <= 127;
+};
+
 function remoteUrls(port) {
   const urls = [];
   for (const list of Object.values(os.networkInterfaces())) {
     for (const a of list || []) {
-      if (a.family !== 'IPv4' || a.internal) continue;
-      const [x, y] = a.address.split('.').map(Number);
-      const label = x === 100 && y >= 64 && y <= 127 ? 'Tailscale' : 'Wifi/netværk';
-      urls.push({ label, url: `http://${a.address}:${port}/?token=${app.remote.token}` });
+      if (a.family !== 'IPv4' && a.family !== 4) continue;
+      if (a.internal) continue;
+      const tailscale = isTailscale(a.address);
+      if (!tailscale && !app.cfg.remoteLan) continue;
+      urls.push({ label: tailscale ? 'Tailscale' : 'Wifi/netværk', url: `http://${a.address}:${port}/?token=${app.remote.token}` });
     }
   }
   return urls.sort((a, b) => (a.label === 'Tailscale' ? -1 : 1) - (b.label === 'Tailscale' ? -1 : 1));
 }
 
 // Tilladte Host-headers: beskytter mod DNS-rebinding (en fremmed side der "bliver" 127.0.0.1).
+// Med telefon-adgang genberegnes listen løbende: ny IP fra routeren eller Tailscale startet efter programmet.
 const allowedHosts = new Set();
+const remoteRefresh = { port: 0, timer: null, at: 0 };
 function setAllowedHosts(port) {
+  remoteRefresh.port = port;
+  remoteRefresh.at = Date.now();
   allowedHosts.clear();
   for (const h of ['127.0.0.1', 'localhost']) allowedHosts.add(`${h}:${port}`);
+  if (!app.remote.enabled) return;
+  const before = app.remote.urls.map((u) => u.url).join(' ');
+  app.remote.urls = remoteUrls(port);
+  const changed = app.remote.urls.map((u) => u.url).join(' ') !== before;
+  if (changed) for (const u of app.remote.urls) log(`Telefon (${u.label}): ${u.url}`);
+  if ((changed || !remoteRefresh.timer) && !app.remote.urls.length) {
+    log(app.cfg.remoteLan ? 'Telefon: intet netværk fundet endnu.' : 'Telefon: Tailscale er ikke fundet (endnu). Brug Tailscale, eller sæt "remoteLan": true i config.json for wifi.');
+  }
+  if (changed) broadcast();
   for (const u of app.remote.urls) allowedHosts.add(new URL(u.url).host);
+  // Egne navne: computerens navn og fx et Tailscale MagicDNS-navn fra "remoteHosts" i config.json.
+  const names = [os.hostname(), ...(Array.isArray(app.cfg.remoteHosts) ? app.cfg.remoteHosts : [])];
+  for (const n of names) if (n) allowedHosts.add(`${String(n).toLowerCase()}:${port}`);
+  if (!remoteRefresh.timer) {
+    remoteRefresh.timer = setInterval(() => setAllowedHosts(remoteRefresh.port), 60 * 1000);
+    remoteRefresh.timer.unref();
+  }
 }
+
+// Sammenlign nøgler i konstant tid (ingen tids-lækage af hvor mange tegn der passer).
+const safeEqual = (a, b) => {
+  const x = Buffer.from(String(a || ''));
+  const y = Buffer.from(String(b || ''));
+  return x.length === y.length && x.length > 0 && timingSafeEqual(x, y);
+};
 
 function startWindowServer(port) {
   const html = readAsset('gui.html');
@@ -2328,19 +2495,27 @@ function startWindowServer(port) {
 
 async function handleRequest(req, res, html) {
   const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
-  if (allowedHosts.size && !allowedHosts.has(req.headers.host)) {
+  const host = String(req.headers.host || '').toLowerCase();
+  // Ukendt Host med telefon-adgang: måske ny IP/Tailscale siden sidst - genberegn (højst hvert 5. sek.).
+  if (allowedHosts.size && !allowedHosts.has(host) && app.remote.enabled && Date.now() - remoteRefresh.at > 5000) setAllowedHosts(remoteRefresh.port);
+  if (allowedHosts.size && !allowedHosts.has(host)) {
     res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('Ukendt adresse');
   }
   if (!LOOPBACK.has(req.socket.remoteAddress)) {
+    if (!app.cfg.remoteLan && !isTailscale(req.socket.localAddress)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('Telefon-adgang virker kun via Tailscale. Sæt "remoteLan": true i config.json for at tillade wifi.');
+    }
     const { token } = app.remote;
     let query = null;
     try { query = new URL(req.url, 'http://x').searchParams.get('token'); } catch {}
-    if (token && query === token) {
-      res.writeHead(302, { 'Set-Cookie': `lrh=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`, Location: '/' });
+    if (token && safeEqual(query, token)) {
+      res.writeHead(302, { 'Set-Cookie': `lrh=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 24 * 3600}`, Location: '/' });
       return res.end();
     }
-    if (!token || !(req.headers.cookie || '').split(/;\s*/).includes(`lrh=${token}`)) {
+    const cookie = (req.headers.cookie || '').split(/;\s*/).find((c) => c.startsWith('lrh='))?.slice(4);
+    if (!token || !safeEqual(cookie, token)) {
       res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('Mangler nøgle - scan QR-koden i vinduet på computeren.');
     }
@@ -2398,16 +2573,15 @@ async function handleRequest(req, res, html) {
   }
   if (req.method === 'POST' && req.url === '/api/update') {
     if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
-    // Kun én opdatering ad gangen (to samtidige ville kæmpe om .old/.new-filerne).
-    if (app.updating) return json(409, { error: 'Opdateringen er allerede i gang' });
-    app.updating = true;
+    // Dobbeltklik (vinduet tegner knappen igen under download): kun én opdatering ad gangen.
+    if (updateRunning) return json(409, { error: 'Opdateringen er allerede i gang' });
+    const running = applyUpdate();
+    json(200, { ok: true });
+    broadcast(); // vinduet viser "Opdaterer..." og deaktiverer knappen
     try {
-      json(200, { ok: true });
-      broadcast();
-      await applyUpdate();
+      await running;
     } catch (e) {
-      app.updating = false;
-      log(`Fejl: opdatering mislykkedes: ${e.message}`);
+      updateFailed(e);
     }
     return;
   }
@@ -2422,6 +2596,7 @@ async function handleRequest(req, res, html) {
   if (req.method === 'POST' && req.url === '/api/autostart') {
     if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
     if (!autostartSupported()) return json(400, { error: 'Ikke understøttet her' });
+    if (RUNS_FROM_ZIP) return json(400, { error: ZIP_HINT });
     const { enabled } = await readBody(req);
     try {
       await setAutostart(Boolean(enabled));
@@ -2733,6 +2908,51 @@ async function tick() {
   return cfg.pollMs;
 }
 
+// ---------- Kun én kopi ----------
+// Låsefil pr. port med pid + den port der faktisk lyttes på. Lægges FØR Data Dragon hentes, så to hurtige
+// starter (dobbeltklik, autostart + klik) ikke begge starter, og en kopi der lytter på port+1 også findes.
+const instanceLockFile = (port) => path.join(os.tmpdir(), `lol-rune-helper-${port}.lock`);
+const instanceLock = { file: null };
+
+function claimInstanceLock(port, actualPort = null) {
+  if (!port) return;
+  instanceLock.file = instanceLockFile(port);
+  try { fs.writeFileSync(instanceLock.file, JSON.stringify({ pid: process.pid, port: actualPort })); } catch {}
+}
+
+// Returnerer { pid, port } for en anden kørende kopi, eller null (så ejer vi låsen).
+async function otherInstance(port) {
+  const file = instanceLockFile(port);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(file, JSON.stringify({ pid: process.pid, port: null }), { flag: 'wx' });
+      instanceLock.file = file;
+      return null;
+    } catch (e) {
+      if (e.code !== 'EEXIST') return null; // kan ikke låse (fx skrivebeskyttet temp) - fortsæt som før
+    }
+    let other = null;
+    try { other = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    if (other?.pid && other.pid !== process.pid && pidAlive(other.pid)) {
+      // Den anden kopi starter stadig (henter data): vent op til 30 sek. på at den lytter.
+      for (let i = 0; i < 60 && !other.port && pidAlive(other.pid); i++) {
+        await sleep(500);
+        try { other = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+      }
+      if (pidAlive(other.pid)) return other;
+    }
+    fs.rmSync(file, { force: true }); // efterladt af en kopi der ikke kører mere
+  }
+  return null;
+}
+
+process.on('exit', () => {
+  if (!instanceLock.file) return;
+  try {
+    if (JSON.parse(fs.readFileSync(instanceLock.file, 'utf8')).pid === process.pid) fs.rmSync(instanceLock.file, { force: true });
+  } catch {}
+});
+
 async function main() {
   const major = Number(process.versions.node.split('.')[0]);
   if (major < 18) {
@@ -2745,17 +2965,23 @@ async function main() {
   if (process.env.LOL_HELPER_REMOTE) app.cfg.remoteAccess = true;
   const updated = process.argv.includes('--updated');
   if (process.argv.includes('--autostart') || updated) app.cfg.openWindow = false; // efter opdatering genforbinder vinduet selv
-  if (IS_SEA) fs.rm(`${process.execPath}.old`, { force: true }, () => {}); // rester fra en opdatering på Windows
+  if (updated) {
+    claimInstanceLock(app.cfg.port); // den gamle version lukker om lidt - overtag låsen
+    try { fs.writeFileSync(UPDATE_PIDFILE, String(process.pid)); } catch {} // så den gamle kan stoppe os, hvis vi ikke kommer op
+  }
+  if (RUNS_FROM_ZIP) log(`OBS: ${ZIP_HINT}`);
 
   // Kører programmet allerede? Så åbn bare dets vindue i stedet for at starte en kopi.
+  const other = app.cfg.port && !updated ? await otherInstance(app.cfg.port) : null;
+  const runningPort = other?.port || app.cfg.port;
   if (app.cfg.port && !updated) {
     try {
-      const running = await fetch(`http://127.0.0.1:${app.cfg.port}/state`, { signal: AbortSignal.timeout(1500) }).then((r) => r.json());
+      const running = await fetch(`http://127.0.0.1:${runningPort}/state`, { signal: AbortSignal.timeout(1500) }).then((r) => r.json());
       if (running && 'ddVersion' in running) {
         console.log('LoL Rune Helper kører allerede - åbner vinduet.');
         // Bed den kørende kopi om at tjekke for opdatering (ældre versioner svarer 404 - det er ok).
-        fetch(`http://127.0.0.1:${app.cfg.port}/api/check-update`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) }).catch(() => {});
-        if (!process.argv.includes('--autostart')) openBrowser(`http://127.0.0.1:${app.cfg.port}`);
+        fetch(`http://127.0.0.1:${runningPort}/api/check-update`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) }).catch(() => {});
+        if (!process.argv.includes('--autostart')) openBrowser(`http://127.0.0.1:${runningPort}`);
         setTimeout(() => process.exit(0), 1500);
         return;
       }
@@ -2766,6 +2992,16 @@ async function main() {
   // Vinduet startes før Data Dragon, så det kan vise "Venter på internet" i stedet for at programmet lukker.
   setupRemote(app.cfg);
   const port = await startWindowServer(app.cfg.port);
+  claimInstanceLock(app.cfg.port, port);
+  if (IS_SEA) {
+    // Ryd op efter en opdatering først nu, hvor vi lytter: indtil da kan den gamle version rulle tilbage til .old.
+    // På Windows er .old låst, til den gamle proces er lukket - prøv derfor igen lidt senere.
+    fs.rm(UPDATE_PIDFILE, { force: true }, () => {});
+    const rmOld = () => fs.rm(`${process.execPath}.old`, { force: true }, () => {});
+    rmOld();
+    setTimeout(rmOld, 5000).unref();
+    setTimeout(rmOld, 60000).unref();
+  }
   const url = `http://127.0.0.1:${port}`;
   log(`Vindue: ${url}`);
   if (app.remote.enabled) {

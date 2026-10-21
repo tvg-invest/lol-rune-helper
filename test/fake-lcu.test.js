@@ -233,6 +233,8 @@ server.listen(0, '127.0.0.1', async () => {
     LOL_HELPER_NO_WINDOW: '1',
     LOL_HELPER_REMOTE: process.env.NO_REMOTE ? '' : '1',
   };
+  // config.json med BOM (som Notesblok/PowerShell kan gemme) skal kunne læses. remoteLan: telefon-testen bruger wifi-adressen.
+  fs.writeFileSync(env.LOL_HELPER_CONFIG, '\uFEFF{ "remoteLan": true }\n');
   const child = spawn(cmd, args, { env });
   const tokenFile = path.join(process.env.HELPER_BIN ? path.dirname(cmd) : path.join(__dirname, '..'), 'remote-token.txt');
   const hadToken = fs.existsSync(tokenFile);
@@ -814,6 +816,10 @@ server.listen(0, '127.0.0.1', async () => {
       console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
       await wait(Number(process.env.HOLD_END));
     }
+
+    // 8z) config.json: BOM-filen blev læst, og stemme-knappen bevarede resten af indstillingerne
+    assert(!out.includes('Kunne ikke læse config.json'), 'config.json med BOM læses');
+    assert.strictEqual(JSON.parse(fs.readFileSync(env.LOL_HELPER_CONFIG, 'utf8')).remoteLan, true, 'stemme-knappen bevarer de andre indstillinger');
 
     // 9) Telefon-adgang: kræver nøgle udefra, POST kun som JSON
     if (process.env.NO_REMOTE) throw new Error('SKIP_REMOTE');

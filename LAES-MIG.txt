@@ -29,7 +29,10 @@ forslagene) + en tabel over dine champions. Gemmes i history.json ved siden af p
 
 OPDATERINGER
 Når en ny version er udgivet, viser vinduet "Ny version ... - Opdater nu". Et klik henter
-den, udskifter programmet og genstarter. Slå tjekket fra med "autoUpdate": false.
+den, tjekker at filen er den rigtige, udskifter programmet og genstarter. Starter den nye
+version ikke, beholdes den gamle. Slå tjekket fra med "autoUpdate": false.
+Pak altid zip-filen ud, før du starter programmet - kører det inde fra zip-filen, kan det
+hverken opdatere sig selv eller starte automatisk.
 
 MATCHUP
 Programmet gætter din lane-modstander (eller klik på dem i vinduet) og viser din
@@ -128,10 +131,15 @@ programmet, står der "Forbindelse tabt" i stedet for gamle tal.
 
 PÅ TELEFONEN
 1. Sæt "remoteAccess": true i config.json og genstart programmet.
-2. Scan QR-koden i vinduet med telefonen (samme wifi eller Tailscale).
+2. Scan QR-koden i vinduet med telefonen (via Tailscale).
    Windows spørger måske om firewall-adgang første gang - tillad på private netværk.
 Adgangen er beskyttet af en hemmelig nøgle (i QR-koden, gemt i remote-token.txt).
-Slet remote-token.txt for at lave en ny nøgle.
+Slet remote-token.txt for at lave en ny nøgle (telefonen skal så scanne igen).
+Som standard virker det kun via Tailscale, som krypterer forbindelsen. Over wifi er
+forbindelsen ukrypteret, og andre på samme netværk kan opsnappe nøglen. Vil du alligevel
+bruge wifi (kun derhjemme), så sæt "remoteLan": true i config.json.
+Vil du bruge et navn i stedet for IP (fx Tailscale MagicDNS), så skriv det i
+"remoteHosts": ["min-pc"].
 
 INDSTILLINGER (config.json ved siden af programmet)
 - region: GLOBAL (flest kampe), EUW, EUNE, NA, KR ...
@@ -139,7 +147,8 @@ INDSTILLINGER (config.json ved siden af programmet)
 - setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice / voice: true eller false
 - flashKey: "keep", "D" eller "F"
 - openWindow: false hvis browservinduet ikke skal åbne ved start
-- remoteAccess: true = vinduet kan åbnes fra telefonen
+- remoteAccess: true = vinduet kan åbnes fra telefonen (via Tailscale)
+- remoteLan: true = telefon-adgang også over wifi (ukrypteret)
 
 Data: OP.GG (builds), Riot Data Dragon (navne/ikoner), League-klientens og spillets
 lokale API'er. Programmet ser intet, som du ikke selv kan se i spillet.
