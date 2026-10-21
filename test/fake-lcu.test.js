@@ -516,7 +516,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert(L.advice.length >= 2 && L.advice.length <= 3, `2-3 forslag: ${L.advice.length}`);
     for (const a of L.advice) assert(a.reasons.length && a.cost > 0, 'forslag har begrundelse og pris');
     assert(!L.advice.some((a) => ['1056', '3020', String(zhonyaPart)].includes(a.id)), 'foreslår ikke noget jeg ejer');
-    assert(L.advice.some((a) => a.reasons.some((r) => r.includes('Zed er fed'))), 'reagerer på fed Zed');
+    assert(L.advice.some((a) => a.reasons.some((r) => r.startsWith('Zed: 9/1/3,'))), 'reagerer på Zed (KDA + skadetype som fakta)');
     assert(L.advice.some((a) => a.reasons.some((r) => r.startsWith('Anti-heal'))), 'anti-heal mod Soraka/Darius');
     assert(L.advice.some((a) => !a.adapted), 'mindst ét fast build-item med');
     const zh = L.advice.find((a) => a.id === '3157');
@@ -575,7 +575,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(L2.inventory.slotsUsed, 6);
     assert.strictEqual(L2.inventory.elixir?.id, '2139', `elixir til AP: ${JSON.stringify(L2.inventory.elixir)}`);
     assert(L2.advice.length <= 2, 'højst 2 bytte-forslag');
-    assert(L2.advice.every((a) => a.swap && a.adapted && a.reasons[0].startsWith('Fuldt build: byt')), `kun begrundede bytninger: ${JSON.stringify(L2.advice.map((a) => a.reasons))}`);
+    assert(L2.advice.every((a) => a.swap && a.adapted && a.reasons[0].startsWith('Fuldt build: mulighed for at bytte')), `kun begrundede bytninger: ${JSON.stringify(L2.advice.map((a) => a.reasons))}`);
     assert(!L2.advice.some((a) => fullBuild.map(String).includes(a.id)), 'foreslår ikke noget du har');
     const ownedPassives = new Set(fullBuild.flatMap((id) => passivesOf(String(id))));
     assert(!L2.advice.some((a) => passivesOf(a.id).some((p) => ownedPassives.has(p))), 'ingen dobbelt unik passiv');
@@ -590,9 +590,45 @@ server.listen(0, '127.0.0.1', async () => {
     assert(L2.advice.length >= 1, 'stadig forslag');
     assert(L2.advice.every((a) => !a.part), 'ingen "råd nu til delen" uden plads');
     const needSlot = L2.advice.filter((a) => a.sell);
-    assert(needSlot.length >= 1 && needSlot.every((a) => ['1056', '1082'].includes(a.sell.id) && a.reasons.some((r) => r.startsWith('Kræver en ledig plads: sælg'))),
+    assert(needSlot.length >= 1 && needSlot.every((a) => ['1056', '1082', '2003'].includes(a.sell.id) && a.reasons.some((r) => r.startsWith('Kræver en ledig plads, fx ved salg af'))),
       `salg for at få plads: ${JSON.stringify(L2.advice.map((a) => [a.name, a.sell?.name, a.reasons]))}`);
     console.log('Fyldte pladser:', L2.advice.map((a) => `${a.name}${a.sell ? ` (sælg ${a.sell.name})` : ''}`).join(', '));
+
+    // 7g) Items-pakken (review 2026-10-21): Gunmetal = støvler, anti-heal med "Wounds", komponent skjuler ikke anti-heal,
+    // Control Ward kan sælges, jungle-pet + 5 items = fuldt, ARAM uden ward-påmindelse, Arena uden item-råd.
+    const isAntiheal = (id) => /\bWounds\b/.test(items[id]?.description || '');
+    setMyItems([1056, 3172]); // Gunmetal Greaves (tier 3 Berserker's, uden Boots-tag)
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert.strictEqual(L2.inventory.bootsTip, null, `ingen støvle-påmindelse med Gunmetal: ${JSON.stringify(L2.inventory.bootsTip)}`);
+    assert(!L2.advice.some((a) => (items[a.id].tags || []).includes('Boots')), `ingen nye støvler med Gunmetal: ${L2.advice.map((a) => a.name)}`);
+    setMyItems([1056, 3020, Number(idByName('Oblivion Orb'))]); // anti-heal-komponent
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert(L2.advice.some((a) => isAntiheal(a.id)), `anti-heal-item foreslås trods Oblivion Orb: ${L2.advice.map((a) => a.name)}`);
+    setMyItems([1056, 3020, 3075]); // Thornmail: "Wounds" (ikke "Grievous Wounds") er anti-heal
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert(!L2.advice.some((a) => isAntiheal(a.id)), `Thornmail tæller som anti-heal: ${L2.advice.map((a) => a.name)}`);
+    setMyItems([3118, 4645, 3157, 3089, 3135, 2055]); // 5 items + Control Ward
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert.strictEqual(L2.inventory.full, false, 'Control Ward kan sælges -> ikke fuldt');
+    assert(L2.advice.length >= 1 && L2.advice.filter((a) => a.sell).every((a) => a.sell.id === '2055'), `sælg Control Ward for plads: ${JSON.stringify(L2.advice.map((a) => [a.name, a.sell?.name]))}`);
+    setMyItems([3118, 4645, 3157, 3089, 3020, 1101]); // 5 items + jungle-pet
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert(L2.inventory.full && L2.inventory.elixir, `pet + 5 items = fuldt build med elixir: ${JSON.stringify(L2.inventory)}`);
+    setMyItems([1056, 3020]);
+    live.data.gameData.mapNumber = 12; // ARAM: Control Ward findes ikke i butikken
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert.strictEqual(L2.inventory.wardTip, null, 'ingen Control Ward-påmindelse i ARAM');
+    live.data.gameData.mapNumber = 30; // Arena: ingen råd ud fra et Summoner's Rift-build
+    live.data.gameData.gameMode = 'CHERRY';
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert(L2.advice.length === 0 && !L2.inventory.wardTip && !L2.inventory.bootsTip, `Arena uden item-råd: ${JSON.stringify(L2.inventory)}`);
     live.data = liveGame(zhonyaPart);
     await wait(2500);
 

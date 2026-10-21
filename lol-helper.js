@@ -209,7 +209,8 @@ async function loadStaticData() {
     dd.items[id] = {
       name: it.name,
       tags: it.tags || [],
-      antiheal: /Grievous Wounds/.test(it.description || ''),
+      // Riot kalder nu effekten "Wounds" (Thornmail, Chempunk, Bramble Vest siger ikke "Grievous Wounds").
+      antiheal: /\bWounds\b/.test(it.description || ''),
       icon: `${base}/img/item/${id}.png`,
       gold: it.gold?.total || 0,
       sell: it.gold?.sell || 0,
@@ -223,6 +224,14 @@ async function loadStaticData() {
       maps: it.maps || {},
     };
   }
+  // Støvler = Boots-tag eller bygget af støvler (Gunmetal Greaves har ikke Boots-tagget).
+  const bootsOf = (id, seen = new Set()) => {
+    const it = dd.items[id];
+    if (!it || seen.has(id)) return false;
+    seen.add(id);
+    return it.tags.includes('Boots') || it.from.some((c) => bootsOf(c, seen));
+  };
+  for (const id of Object.keys(dd.items)) dd.items[id].boots = bootsOf(id);
   for (const style of styles) {
     dd.runes[style.id] = { name: style.name, icon: `https://ddragon.leagueoflegends.com/cdn/img/${style.icon}` };
     for (const slot of style.slots) {
@@ -430,7 +439,10 @@ function ensureJungleRoutes(championKey, position) {
 
 const PLAY_STYLE = { defensive: 'Defensiv', aggressive: 'Aggressiv', even: 'Jævn' };
 const genitive = (name) => (/[sxz]$/i.test(name) ? `${name}'` : `${name}s`);
-const coreOf = (build) => (build?.core_items?.[0]?.ids || []).map(String);
+// Kun færdige items (ikke støvler) tæller som core-pladser: Dark Seal (1082) bliver til Mejai's og er ikke en plads.
+const coreIdsOf = (ids) => [...new Set((ids || []).map(String).filter((id) => isCompleted(dd.items[id]) && !isBoots(dd.items[id])))];
+// Samme core-valg som item settet (recommend bruger rankOptions med din buildChoice).
+const coreOf = (build, cfg = app.cfg) => coreIdsOf(rankOptions(build?.core_items, cfg)[0]?.ids);
 
 // Hvem skalerer bedst: hvor meget win rate ændrer sig fra korte (<25 min) til lange (40+ min) kampe.
 function scalingNote(myBuild, oppBuild, oppName) {
@@ -476,7 +488,7 @@ async function buildPlan(myKey, oppKey, position, myBuild) {
     tip: guide?.tip || null,
     scaling: scalingNote(myBuild, oppBuild, oppName),
     myCore: coreOf(myBuild),
-    oppCore: coreOf(oppBuild),
+    oppCore: coreOf(oppBuild, { buildChoice: 'popular' }), // hans mest spillede core
     // Items du faktisk bygger: core + sene items som mindst 2% køber (ikke fx Randuin's på en mage).
     matchupBuild,
     myPool: [
@@ -546,8 +558,9 @@ function planNow(plan, L) {
   if (plan.myCore.length) lines.push(`Dit core build: ${mine.length}/${plan.myCore.length}${mine.length ? ` (${mine.map(itemName).join(', ')})` : ''}`);
   if (plan.oppCore.length) lines.push(`${genitive(n)} typiske core: ${his.length}/${plan.oppCore.length}${his.length ? ` (${his.map(itemName).join(', ')})` : ''}`);
   // Items i dit eget build (ikke ejet) med et bestemt tag - som valg, ikke ordre.
+  const passives = ownedPassivesOf(me.itemIds); // fx ingen Profane Hydra når du har Ravenous Hydra (begge "Cleave")
   const options = (pred) => [...new Set(plan.myPool)]
-    .filter((id) => !me.itemIds.includes(id) && isCompleted(dd.items[id]) && pred(dd.items[id]))
+    .filter((id) => !me.itemIds.includes(id) && isCompleted(dd.items[id]) && !dd.items[id].passives.some((p) => passives.has(p)) && pred(dd.items[id]))
     .slice(0, 2).map(itemName);
   const withOptions = (text, opts, label) => text + (opts.length ? `. ${label}: ${opts.join(', ')}` : '');
   const iAmAD = me.dmg.ad >= 0.5;
@@ -624,7 +637,8 @@ function analyzeEnemies(enemyIds) {
 function counterItems(build, enemy, used) {
   const pool = [];
   for (const x of [...(build.last_items || []), ...(build.core_items || [])]) {
-    for (const id of x.ids) if (!pool.includes(id) && !used.has(id) && !dd.items[id]?.tags.includes('Boots')) pool.push(id);
+    // Kun færdige items (OP.GG's lister har også komponenter som B. F. Sword og Executioner's Calling).
+    for (const id of x.ids) if (!pool.includes(id) && !used.has(id) && isCompleted(dd.items[id]) && !isBoots(dd.items[id])) pool.push(id);
   }
   const picks = [];
   const notes = [];
@@ -663,7 +677,7 @@ function itemBlock(type, ids) {
 // Matchup-data bruges kun når der er nok kampe bag (ellers er tallene støj).
 const MATCHUP_MIN_GAMES = 150;
 
-function recommend(build, cfg, enemyIds, matchup) {
+function recommend(build, cfg, enemyIds, matchup, mapNumber = 11) {
   const enemy = cfg.adaptToEnemies && enemyIds.length ? analyzeEnemies(enemyIds) : null;
   const blocks = [];
   const notes = [];
@@ -687,6 +701,12 @@ function recommend(build, cfg, enemyIds, matchup) {
     blocks.push(itemBlock(`Core build (${pct(core.win / core.play)} WR)`, core.ids));
     addUsed(core.ids);
   }
+  // Core i kampe mod din lane-modstander (samme valg-regel), når der er nok kampe og den er en anden.
+  const mCore = rankOptions(matchup?.build?.core_items, cfg).find((c) => c.play >= MATCHUP_MIN_GAMES);
+  if (mCore && (!core || mCore.ids.join() !== core.ids.join())) {
+    blocks.push(itemBlock(`Core mod ${vsName} (${pct(mCore.win / mCore.play)} WR i ${mCore.play.toLocaleString('da-DK')} kampe)`, mCore.ids));
+    addUsed(mCore.ids);
+  }
 
   const { boots, note: bootsNote } = chooseBoots(build, enemy, cfg);
   if (bootsNote) notes.push(bootsNote);
@@ -706,9 +726,10 @@ function recommend(build, cfg, enemyIds, matchup) {
   for (const c of cores.slice(1, 4)) for (const id of c.ids) if (!used.has(id) && !alt.includes(id)) alt.push(id);
   if (alt.length) blocks.push(itemBlock('Alternative core', alt));
   addUsed(alt);
-  const late = (build.last_items || []).map((x) => x.ids[0]).filter((id) => !used.has(id)).slice(0, 8);
+  const late = (build.last_items || []).map((x) => x.ids[0]).filter((id) => !used.has(id) && isCompleted(dd.items[id])).slice(0, 8);
   if (late.length) blocks.push(itemBlock('Situationelle items', late));
-  blocks.push(itemBlock('Forbrug', [2003, 2055]));
+  // Control Ward kan ikke købes i ARAM (map 12).
+  blocks.push(itemBlock('Forbrug', [2003, 2055].filter((id) => dd.items[id]?.maps[mapNumber] !== false)));
 
   const pagesOf = (b) => {
     const pages = (b?.rune_pages || []).flatMap((p) => p.builds || []);
@@ -1062,8 +1083,12 @@ function championOf(p) {
   return key ? dd.champions[key] : null;
 }
 
+// Støvler: Boots-tag eller bygget af støvler (fx Gunmetal Greaves uden Boots-tag) - se loadStaticData.
+const isBoots = (it) => Boolean(it && (it.boots || it.tags.includes('Boots')));
 const isCompleted = (it) => it && !it.tags.includes('Consumable') && !it.tags.includes('Trinket') &&
-  (it.tags.includes('Boots') ? it.depth >= 2 : it.into.length === 0 && it.gold >= 1500);
+  (isBoots(it) ? it.depth >= 2 : it.into.length === 0 && it.gold >= 1500);
+// Navngivne passiver på dine færdige items: et item med samme passiv (fx to Hydra-items med "Cleave") virker ikke sammen.
+const ownedPassivesOf = (ownedIds) => new Set(ownedIds.filter((id) => isCompleted(dd.items[id])).flatMap((id) => dd.items[id].passives));
 
 // Skadetype ud fra de items de faktisk har købt (fanger fx AP Shaco); ellers championens profil.
 function damageProfile(champ, itemIds) {
@@ -1106,7 +1131,8 @@ function livePlayer(p) {
     dmg: damageProfile(champ, itemIds),
     armor: itemIds.reduce((sum, id) => sum + (dd.items[id]?.stats.FlatArmorMod || 0), 0),
     mr: itemIds.reduce((sum, id) => sum + (dd.items[id]?.stats.FlatSpellBlockMod || 0), 0),
-    healing: HEALERS.has(champ?.id) || itemIds.some((id) => dd.items[id]?.tags.some((t) => t === 'LifeSteal' || t === 'SpellVamp')),
+    // Kun færdige items: Doran's Blade/Bow, Vampiric Scepter og elixirer gør ikke en champion til healer.
+    healing: HEALERS.has(champ?.id) || itemIds.some((id) => isCompleted(dd.items[id]) && dd.items[id].tags.some((t) => t === 'LifeSteal' || t === 'SpellVamp')),
   };
 }
 
@@ -1130,29 +1156,58 @@ function remainingCost(id, ownedIds) {
 // Dele for mindst så meget guld betyder at du er i gang med itemet (en enkelt Amplifying Tome gør ikke).
 const IN_PROGRESS_GOLD = 700;
 
-// Starter-items man sælger for at få plads: Doran's Shield/Blade/Ring, Dark Seal, Cull.
-const SELLABLE_STARTERS = new Set(['1054', '1055', '1056', '1082', '1083']);
+// Starter-items man sælger for at få plads: Doran's Shield/Blade/Ring/Bow/Helm, Dark Seal, Cull.
+const SELLABLE_STARTERS = new Set(['1054', '1055', '1056', '1082', '1083', '1086', '1120']);
 const ELIXIR = { ad: '2140', ap: '2139', tank: '2138' }; // Wrath, Sorcery, Iron (500 g, fylder ingen plads)
 
+// Hvor mange i buildet der køber hvert item (core-kombinationer lægges sammen, ellers højeste andel).
+function buildPopularity(build) {
+  const pop = new Map();
+  for (const c of build?.core_items || []) for (const id of c.ids) pop.set(String(id), (pop.get(String(id)) || 0) + (c.pick_rate || 0));
+  for (const x of build?.last_items || []) { const id = String(x.ids[0]); pop.set(id, Math.max(pop.get(id) || 0, x.pick_rate || 0)); }
+  for (const x of build?.boots || []) { const id = String(x.ids[0]); pop.set(id, Math.max(pop.get(id) || 0, x.pick_rate || 0)); }
+  return pop;
+}
+
+// Det der kan sælges for at få en ledig plads (billigste først): starter-items og forbrug i tasken
+// (potions, Control Ward). Dark Seal tæller ikke med, når dit build går videre til Mejai's.
+function sellableIds(ownedIds, pop) {
+  const buildingMejais = (pop.get('3041') || 0) >= 0.05;
+  return [...new Set(ownedIds)]
+    .filter((id) => {
+      const it = dd.items[id];
+      if (!it || (id === '1082' && buildingMejais)) return false;
+      return SELLABLE_STARTERS.has(id) || (it.tags.includes('Consumable') && !it.tags.includes('Trinket'));
+    })
+    .sort((a, b) => dd.items[a].sell - dd.items[b].sell);
+}
+
+// Fuldt build: 6 færdige items, eller 5 + en plads du ikke kan sælge dig ud af (fx jungle-pet).
+const isFullBuild = (completed, slotsUsed, sellable) => completed >= 6 || (completed >= 5 && slotsUsed >= 6 && !sellable.length);
+
 // Inventory-overblik: pladser, fuldt build og elixir der passer til dig (ved fuldt build).
-function inventoryInfo(me, gold, mapNumber, gameTime = 0, build = null) {
+function inventoryInfo(me, gold, mapNumber, gameTime = 0, build = null, enemyIds = []) {
   const completed = me.itemIds.filter((id) => isCompleted(dd.items[id]));
-  const full = completed.length >= 6;
-  // Påmindelse om støvler: ingen færdige støvler efter 10 min -> de mest spillede fra dit build.
-  const hasBoots = completed.some((id) => dd.items[id].tags.includes('Boots'));
-  const bootsId = build?.boots?.[0] ? String(build.boots[0].ids[0]) : null;
-  const bootsTip = !full && !hasBoots && gameTime >= 600 && bootsId && dd.items[bootsId]
+  const slotsUsed = me.slotsUsed ?? me.itemIds.length;
+  const full = isFullBuild(completed.length, slotsUsed, sellableIds(me.itemIds, buildPopularity(build)));
+  const onMap = (id) => dd.items[id] && dd.items[id].maps[mapNumber] !== false;
+  // Påmindelse om støvler: ingen færdige støvler efter 10 min -> de støvler item settet valgte (samme valg som i champion select).
+  const hasBoots = completed.some((id) => isBoots(dd.items[id]));
+  const enemy = app.cfg.adaptToEnemies && enemyIds.length ? analyzeEnemies(enemyIds) : null;
+  const chosen = build ? chooseBoots(build, enemy, app.cfg).boots[0] : null;
+  const bootsId = chosen != null ? String(chosen) : null;
+  const bootsTip = !full && !hasBoots && gameTime >= 600 && bootsId && onMap(bootsId)
     ? { id: bootsId, cost: remainingCost(bootsId, me.itemIds).cost, minutes: Math.floor(gameTime / 60) }
     : null;
-  // Påmindelse om Control Ward (75 g): efter 5 min, når du har plads og ingen har.
+  // Påmindelse om Control Ward (75 g): efter 5 min, når du har plads og ingen har (findes ikke i ARAM/Arena).
   const ward = dd.items['2055'];
-  const wardTip = Boolean(ward) && !full && gameTime >= 300 && (me.slotsUsed ?? me.itemIds.length) < 6
+  const wardTip = onMap('2055') && !full && gameTime >= 300 && slotsUsed < 6
     && !me.itemIds.includes('2055') && gold >= ward.gold;
   const kind = me.champ?.tags?.[0] === 'Tank' ? 'tank' : me.dmg.ad >= 0.5 ? 'ad' : 'ap';
   const elixirId = ELIXIR[kind];
-  const elixirOk = full && dd.items[elixirId] && dd.items[elixirId].maps[mapNumber] !== false;
+  const elixirOk = full && onMap(elixirId);
   return {
-    slotsUsed: Math.min(6, me.slotsUsed ?? me.itemIds.length),
+    slotsUsed: Math.min(6, slotsUsed),
     completed: completed.length,
     full,
     elixir: elixirOk ? { id: elixirId, cost: dd.items[elixirId].gold, canAfford: dd.items[elixirId].gold <= gold } : null,
@@ -1161,6 +1216,7 @@ function inventoryInfo(me, gold, mapNumber, gameTime = 0, build = null) {
   };
 }
 
+// Den mest værdifulde del du har råd til nu - prisen er hvad delen koster dig (ejede under-dele trukket fra).
 function affordablePart(id, ownedIds, gold) {
   const owned = [...ownedIds];
   const parts = [];
@@ -1175,8 +1231,11 @@ function affordablePart(id, ownedIds, gold) {
   };
   walk(id);
   return parts
-    .filter((p) => dd.items[p]?.gold <= gold)
-    .sort((a, b) => dd.items[b].gold - dd.items[a].gold)[0] || null;
+    .filter((p) => dd.items[p])
+    .map((p) => ({ id: p, cost: remainingCost(p, ownedIds).cost }))
+    .filter((p) => p.cost <= gold)
+    // Størst værdi først; ved samme værdi den du allerede har en under-del til (fx Aether Wisp med en Tome).
+    .sort((a, b) => (dd.items[b.id].gold - dd.items[a.id].gold) || (a.cost - b.cost))[0] || null;
 }
 
 function threatOf(p) {
@@ -1259,22 +1318,26 @@ function analyzeLive(data, build) {
     || null;
   // Gameplanen (og dens matchup-build) gælder kun hvis den er mod den samme modstander.
   const plan = app.plan && opponent && String(opponent.champ?.key) === app.plan.oppKey ? app.plan : null;
-  const advice = liveAdvice(build, me, enemy, gold, data.gameData?.mapNumber || 11, {
+  // Arena (map 30) har sin egen butik: ingen item-råd ud fra et Summoner's Rift-build.
+  const mapNumber = data.gameData?.mapNumber || 11;
+  const itemBuild = mapNumber === 30 || data.gameData?.gameMode === 'CHERRY' ? null : build;
+  const advice = liveAdvice(itemBuild, me, enemy, gold, mapNumber, {
     gameTime: data.gameData?.gameTime || 0,
     matchupBuild: plan?.matchupBuild || null,
     oppName: plan?.opponent || null,
   });
   const matchup = opponent && { player: opponent, stats: matchupStats(build, opponent.champ?.key) };
   const skill = skillHint(data.activePlayer, build);
-  const inventory = inventoryInfo(me, gold, data.gameData?.mapNumber || 11, data.gameData?.gameTime || 0, build);
-  inventory.starter = starterAdvice(build, plan, me, gold, data.gameData?.gameTime || 0);
+  const enemyIds = enemies.map((p) => p.champ?.key).filter(Boolean);
+  const inventory = inventoryInfo(me, gold, mapNumber, data.gameData?.gameTime || 0, itemBuild, enemyIds);
+  inventory.starter = starterAdvice(itemBuild, plan, me, gold, data.gameData?.gameTime || 0, mapNumber);
   return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice, matchup, skill, inventory };
 }
 
 // 2-3 forslag fra championens egen item-pulje, scoret efter popularitet + modstandernes faktiske builds.
 // Startitems ved kampstart (før dit første køb, de første 3 min): fra matchuppet hvis der er nok kampe,
 // ellers de mest købte for din champion.
-function starterAdvice(build, plan, me, gold, gameTime) {
+function starterAdvice(build, plan, me, gold, gameTime, mapNumber = 11) {
   const bought = me.itemIds.filter((id) => !dd.items[id]?.tags.includes('Trinket'));
   if (bought.length || gameTime > 180 || !build) return null;
   const mStart = plan?.matchupBuild?.starter_items?.[0];
@@ -1284,22 +1347,24 @@ function starterAdvice(build, plan, me, gold, gameTime) {
   const counts = new Map();
   for (const id of start.ids.map(String)) counts.set(id, (counts.get(id) || 0) + 1);
   const items = [...counts].map(([id, count]) => ({ id, count }));
+  // Kan et af items ikke købes på dette map, er startbuildet ikke til denne tilstand.
+  if (items.some((i) => !dd.items[i.id] || dd.items[i.id].maps[mapNumber] === false)) return null;
   const cost = items.reduce((s, i) => s + (dd.items[i.id]?.gold || 0) * i.count, 0);
   return { items, cost, canAfford: cost <= gold, vs: useMatchup ? plan.opponent : null, share: start.pick_rate || null };
 }
 
-// Næste item efter OP.GG's 3-item core-kombinationer: blandt kombinationer hvis første k items er dem
-// du har færdige, hvad er item nr. k+1? (Antager at kombinationerne står i byggerækkefølge - det passer
-// med dataene, fx starter alle Tryndamere-kombinationer med Ravenous Hydra.)
+// Næste item efter OP.GG's core-kombinationer (3-4 items): blandt kombinationer hvis første k færdige items
+// er dem du har, hvad er item nr. k+1? (Antager at kombinationerne står i byggerækkefølge - det passer
+// med dataene, fx starter alle Tryndamere-kombinationer med Ravenous Hydra.) Komponenter som Dark Seal
+// fjernes først, så [Dark Seal, Lich Bane, Mejai's, ...] tæller som [Lich Bane, Mejai's, ...].
 function nextInBuild(build, ownedNonBoots) {
   const k = ownedNonBoots.length;
-  if (k >= 3) return null;
   const owned = new Set(ownedNonBoots);
   const counts = new Map();
   let total = 0;
   for (const c of build.core_items || []) {
-    const ids = c.ids.map(String);
-    if (!ids.slice(0, k).every((id) => owned.has(id)) || owned.has(ids[k])) continue;
+    const ids = coreIdsOf(c.ids);
+    if (ids.length <= k || !ids.slice(0, k).every((id) => owned.has(id)) || owned.has(ids[k])) continue;
     counts.set(ids[k], (counts.get(ids[k]) || 0) + c.play);
     total += c.play;
   }
@@ -1323,34 +1388,44 @@ function matchupItemBoost(build, matchupBuild) {
 
 function liveAdvice(build, me, enemy, gold, mapNumber, ctx = {}) {
   if (!build) return [];
-  const pop = new Map();
-  for (const c of build.core_items || []) for (const id of c.ids) pop.set(String(id), (pop.get(String(id)) || 0) + (c.pick_rate || 0));
-  for (const x of build.last_items || []) { const id = String(x.ids[0]); pop.set(id, Math.max(pop.get(id) || 0, x.pick_rate || 0)); }
-  for (const x of build.boots || []) { const id = String(x.ids[0]); pop.set(id, Math.max(pop.get(id) || 0, x.pick_rate || 0)); }
+  const pop = buildPopularity(build);
 
   const owned = me.itemIds;
-  const hasBoots = owned.some((id) => dd.items[id]?.tags.includes('Boots') && dd.items[id].depth >= 2);
-  const hasAntiheal = owned.some((id) => dd.items[id]?.antiheal);
-  const iAmAD = me.dmg.ad >= 0.5;
-
-  // Inventory: 6 pladser. Fuldt build = 6 færdige items -> kun "byt ud"-forslag.
+  // Inventory: 6 pladser. Fuldt build = 6 færdige items (eller 5 + en plads der ikke kan sælges) -> kun "byt ud"-forslag.
   const completedOwned = owned.filter((id) => isCompleted(dd.items[id]));
-  const full = completedOwned.length >= 6;
-  const freeSlots = Math.max(0, 6 - (me.slotsUsed ?? owned.length));
+  const hasBoots = completedOwned.some((id) => isBoots(dd.items[id]));
+  // Kun færdige items: en Executioner's Calling/Oblivion Orb skal ikke skjule Mortal Reminder/Morellonomicon.
+  const hasAntiheal = completedOwned.some((id) => dd.items[id].antiheal);
+  const iAmAD = me.dmg.ad >= 0.5;
+  const slotsUsed = me.slotsUsed ?? owned.length;
+  const freeSlots = Math.max(0, 6 - slotsUsed);
   // Unikke passiver du allerede har (to Spellblade-/Lifeline-/Hydra-items virker ikke sammen).
-  const ownedPassives = new Set(completedOwned.flatMap((id) => dd.items[id].passives));
-  // Starter-items der kan sælges for at få plads (billigste/mindst værdifulde først).
-  const buildingMejais = (pop.get('3041') || 0) >= 0.05;
-  const sellable = [...new Set(owned)]
-    .filter((id) => SELLABLE_STARTERS.has(id) && !(id === '1082' && buildingMejais))
-    .sort((a, b) => dd.items[a].sell - dd.items[b].sell);
+  const ownedPassives = ownedPassivesOf(owned);
+  // Det der kan sælges for at få plads (billigste/mindst værdifulde først).
+  const sellable = sellableIds(owned, pop);
+  const full = isFullBuild(completedOwned.length, slotsUsed, sellable);
   // Ved fuldt build: det af dine items der er mindst brugt i buildet (støvler beholdes).
   const swapOut = full
-    ? completedOwned.filter((id) => !dd.items[id].tags.includes('Boots')).sort((a, b) => (pop.get(a) || 0) - (pop.get(b) || 0))[0]
+    ? completedOwned.filter((id) => !isBoots(dd.items[id])).sort((a, b) => (pop.get(a) || 0) - (pop.get(b) || 0))[0]
     : null;
   const ordinal = (n) => `${n}.`;
-  const nonBootsDone = completedOwned.filter((id) => !dd.items[id].tags.includes('Boots'));
+  const nonBootsDone = completedOwned.filter((id) => !isBoots(dd.items[id]));
   const next = nextInBuild(build, nonBootsDone);
+  // Tidlig komponent som mange core-kombinationer starter med (fx Dark Seal på Evelynn): et valg før første færdige item.
+  const early = new Map();
+  if (!nonBootsDone.length) {
+    const plays = new Map();
+    let all = 0;
+    for (const c of build.core_items || []) {
+      all += c.play || 0;
+      const first = String(c.ids[0]);
+      const it = dd.items[first];
+      if (it && !isCompleted(it) && !isBoots(it) && it.into.length) plays.set(first, (plays.get(first) || 0) + (c.play || 0));
+    }
+    for (const [id, n] of plays) {
+      if (n / all >= 0.2 && !dd.items[id].into.some((x) => owned.includes(x))) early.set(id, { share: n / all, total: all });
+    }
+  }
   const vsBoost = ctx.matchupBuild ? matchupItemBoost(build, ctx.matchupBuild) : new Map();
   const names = (list) => list.slice(0, 3).map((p) => p.champ?.name || p.name).join(', ');
   const kda = (p) => `${p.kills}/${p.deaths}/${p.assists}`;
@@ -1369,34 +1444,44 @@ function liveAdvice(build, me, enemy, gold, mapNumber, ctx = {}) {
   const scored = [];
   for (const [id, popularity] of pop) {
     const it = dd.items[id];
-    if (!isCompleted(it) || !it.purchasable || it.maps[mapNumber] === false || owned.includes(id)) continue;
-    if (hasBoots && it.tags.includes('Boots')) continue;
+    const first = early.get(id);
+    if (!(isCompleted(it) || first) || !it.purchasable || it.maps[mapNumber] === false || owned.includes(id)) continue;
+    if (hasBoots && isBoots(it)) continue;
     if (hasAntiheal && it.antiheal) continue;
     if (it.passives.some((p) => ownedPassives.has(p))) continue; // samme unikke passiv som noget du har
     const { cost, used } = remainingCost(id, owned);
     const paid = it.gold - cost;
     const inProgress = paid >= IN_PROGRESS_GOLD;
-    // Sjældne køb i puljen (fx Randuin's på en mage) passer sjældent til championen - medmindre du er i gang med det.
-    if (popularity >= 0 && popularity < 0.02 && !inProgress) continue;
+    // Matchup: bygges markant oftere mod din lane-modstander.
+    const vs = vsBoost.get(id);
+    // Sjældne køb i puljen (fx Randuin's på en mage) passer sjældent til championen
+    // - medmindre du er i gang med det, eller det bygges markant oftere mod din lane-modstander.
+    if (popularity >= 0 && popularity < 0.02 && !inProgress && !vs) continue;
     let score = Math.max(popularity, 0) * 100;
     const reasons = [];
+    // Stærke grunde (rigtige healere, forsvar, en modstander med høj KDA, matchup) giver en af de tilpassede pladser.
+    // Andelen af AD/AP i deres trussel giver kun point.
+    let strong = false;
     if (inProgress) {
       score += 40 + 60 * (paid / it.gold);
       reasons.push(`Du er i gang: har ${used.map(itemName).join(', ')} (${pct(paid / it.gold)} af prisen)`);
     }
-    if (it.antiheal && enemy.healers.length) { score += 30 + 15 * enemy.healers.length; reasons.push(`Anti-heal mod ${names(enemy.healers)}`); }
-    if (it.tags.includes('ArmorPenetration') && iAmAD && enemy.armorHeavy) { score += 35; reasons.push(`${names(enemy.armorStackers)} bygger armor`); }
-    if (it.tags.includes('MagicPenetration') && !iAmAD && enemy.mrHeavy) { score += 35; reasons.push(`${names(enemy.mrStackers)} bygger magic resist`); }
+    if (it.antiheal && enemy.healers.length) { score += 30 + 15 * enemy.healers.length; strong = true; reasons.push(`Anti-heal mod ${names(enemy.healers)}`); }
+    if (it.tags.includes('ArmorPenetration') && iAmAD && enemy.armorHeavy) { score += 35; strong = true; reasons.push(`${names(enemy.armorStackers)} bygger armor`); }
+    if (it.tags.includes('MagicPenetration') && !iAmAD && enemy.mrHeavy) { score += 35; strong = true; reasons.push(`${names(enemy.mrStackers)} bygger magic resist`); }
     const fedAD = enemy.fed.find((p) => p.dmg.ad >= 0.6);
     const fedAP = enemy.fed.find((p) => p.dmg.ap >= 0.6);
-    if (it.tags.includes('Armor') && fedAD) { score += 30; reasons.push(`${fedAD.champ?.name || fedAD.name} er fed (${kda(fedAD)}) og laver AD-skade`); }
-    if (it.tags.includes('SpellBlock') && fedAP) { score += 30; reasons.push(`${fedAP.champ?.name || fedAP.name} er fed (${kda(fedAP)}) og laver AP-skade`); }
+    // Fakta fra TAB (KDA + skadetype ud fra items), ingen konklusion.
+    if (it.tags.includes('Armor') && fedAD) { score += 30; strong = true; reasons.push(`${fedAD.champ?.name || fedAD.name}: ${kda(fedAD)}, ${pct(fedAD.dmg.ad)} AD-skade`); }
+    if (it.tags.includes('SpellBlock') && fedAP) { score += 30; strong = true; reasons.push(`${fedAP.champ?.name || fedAP.name}: ${kda(fedAP)}, ${pct(fedAP.dmg.ap)} AP-skade`); }
     if (it.tags.includes('Armor') && enemy.adShare >= 0.65) { score += 15; reasons.push(`${pct(enemy.adShare)} af deres trussel er AD`); }
     if (it.tags.includes('SpellBlock') && enemy.apShare >= 0.55) { score += 15; reasons.push(`${pct(enemy.apShare)} af deres trussel er AP`); }
-    const adapted = reasons.length > (inProgress ? 1 : 0);
-    // Matchup: bygges markant oftere mod din lane-modstander.
-    const vs = vsBoost.get(id);
-    if (vs) { score += Math.min(30, 15 * vs.ratio); reasons.push(`Bygges oftere mod ${ctx.oppName} (${pct(vs.vs)} mod ${pct(vs.general)} generelt)`); }
+    if (vs) { score += Math.min(30, 15 * vs.ratio); strong = true; reasons.push(`Bygges oftere mod ${ctx.oppName} (${pct(vs.vs)} mod ${pct(vs.general)} generelt)`); }
+    const adapted = strong;
+    if (first) {
+      score += 45 * first.share;
+      reasons.push(`${pct(first.share)} af core-kombinationerne (${first.total.toLocaleString('da-DK')} kampe) starter med ${it.name}`);
+    }
     // Byggerækkefølge: typisk næste item efter dem du har.
     const share = next ? next.share(id) : 0;
     if (share > 0) {
@@ -1414,13 +1499,13 @@ function liveAdvice(build, me, enemy, gold, mapNumber, ctx = {}) {
       if (!adapted || !swapOut) continue;
       swap = swapOut;
       budget += dd.items[swapOut].sell;
-      reasons.unshift(`Fuldt build: byt ${itemName(swapOut)} ud (sælges for ${dd.items[swapOut].sell} g)`);
+      reasons.unshift(`Fuldt build: mulighed for at bytte ${itemName(swapOut)} ud (sælges for ${dd.items[swapOut].sell} g)`);
     } else if (!used.length && freeSlots === 0) {
       // Nyt item uden ejede dele kræver en ledig plads.
       if (!sellable.length) continue;
       sell = sellable[0];
       budget += dd.items[sell].sell;
-      reasons.push(`Kræver en ledig plads: sælg ${itemName(sell)} (+${dd.items[sell].sell} g)`);
+      reasons.push(`Kræver en ledig plads, fx ved salg af ${itemName(sell)} (+${dd.items[sell].sell} g)`);
     }
     // En del fylder en plads: kun forslag om del hvis der er plads.
     const part = cost > budget && freeSlots > 0 && !full ? affordablePart(id, owned, gold) : null;
@@ -1661,7 +1746,7 @@ function liveView() {
       reasons: a.reasons,
       adapted: a.adapted,
       inProgress: a.inProgress,
-      part: a.part && { ...item(a.part), cost: dd.items[a.part].gold },
+      part: a.part && { ...item(a.part.id), cost: a.part.cost },
       sell: a.sell && { ...item(a.sell), value: dd.items[a.sell].sell },
       swap: a.swap && { ...item(a.swap), value: dd.items[a.swap].sell },
     })),
@@ -2120,7 +2205,7 @@ async function handlePick(pick, pickKey, itemKey) {
   }
   if (!app.build) return;
   const prevMatchup = app.rec?.matchup?.id ?? null;
-  app.rec = recommend(app.build.build, cfg, pick.enemyIds, await findMatchup(pick));
+  app.rec = recommend(app.build.build, cfg, pick.enemyIds, await findMatchup(pick), pick.gameMode === 'ARAM' ? 12 : 11);
   const matchupChanged = (app.rec.matchup?.id ?? null) !== prevMatchup;
   // Rune-valgene kan være omrokeret (matchup-side først) - peg på den side der faktisk er sat.
   if (app.appliedPerks) app.runeIndex = app.rec.runeOptions.findIndex((r) => perkKey(r) === app.appliedPerks);

@@ -67,7 +67,7 @@ Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General 
 
 ## Inventory, fuldt build og ny patch
 
-- **Pladser:** live-API'ens `slot` (0-5 = inventory). Nyt item uden ejede dele og ingen ledig plads -> "sælg Doran's/Dark Seal/Cull" (Dark Seal beholdes hvis Mejai's er i buildet); ingen "råd nu til delen" uden plads.
+- **Pladser:** live-API'ens `slot` (0-5 = inventory). Nyt item uden ejede dele og ingen ledig plads -> "fx ved salg af" Doran's/Dark Seal/Cull, potion eller Control Ward (Dark Seal beholdes hvis Mejai's er i buildet); 5 færdige items + noget der ikke kan sælges (jungle-pet) = fuldt build; ingen "råd nu til delen" uden plads.
 - **Fuldt build** (6 færdige items): ingen almindelige køb; højst 2 begrundede bytninger (det mindst brugte af dine items, støvler beholdes) + elixir efter skadetype (Wrath/Sorcery/Iron).
 - **Unikke passiver:** items der deler et `<passive>`-navn i Data Dragon (Spellblade, Lifeline, Cleave, Manaflow, Annul ...) foreslås ikke oven i hinanden.
 - **Ny patch:** under 20.000 kampe på den nye patch -> OP.GG `?version=<forrige>` bruges (også for matchup-data), vises i vinduet.

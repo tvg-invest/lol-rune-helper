@@ -66,8 +66,9 @@ KLOGERE KØBSFORSLAG UNDER KAMPEN
   man allerede vinder, så de tal ser bedre ud end de er.
 
 INVENTORY OG FULDT BUILD
-Købsforslagene tæller dine 6 pladser. Er de fyldt, foreslår den at sælge et starter-item
-(Doran's, Dark Seal, Cull) for at få plads. Har du 6 færdige items (fuldt build), foreslår
+Købsforslagene tæller dine 6 pladser. Er de fyldt, nævner den salg af et starter-item
+(Doran's, Dark Seal, Cull), en potion eller en Control Ward som mulighed for at få plads.
+Har du 6 færdige items (eller 5 + en jungle-pet), regnes det som fuldt build og den foreslår
 den ikke flere køb - kun en elixir og evt. at bytte et item ud, når der er en konkret grund
 (fx anti-heal mod healere). Items med samme unikke passiv (fx to Spellblade- eller
 Lifeline-items) foreslås ikke sammen.
