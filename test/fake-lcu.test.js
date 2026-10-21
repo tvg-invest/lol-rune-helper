@@ -502,6 +502,11 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(zh.inProgress, items[String(zhonyaPart)].gold.total >= 700, "Zhonya's er 'i gang' med en dyr del");
     if (zh.inProgress) assert.strictEqual(L.advice[0].id, '3157', "item du er i gang med står først");
     console.log('Live-forslag:', JSON.stringify(L.advice.map((a) => ({ item: a.name, cost: a.cost, råd: a.canAfford, del: a.part?.name, hvorfor: a.reasons }))));
+    // Byggerækkefølge: ingen færdige items endnu (kun støvler) -> "Typisk 1. item"
+    assert(L.advice.some((a) => a.reasons.some((r) => r.startsWith('Typisk 1. item'))), 'næste item i byggerækkefølgen');
+    // Control Ward-påmindelse: 20 min, 1.400 g, plads og ingen ward
+    assert.strictEqual(L.inventory.wardTip?.id, '2055', 'påmindelse om Control Ward');
+    assert(L.inventory.wardTip.icon && L.inventory.wardTip.name === 'Control Ward');
 
     // 7b) Halvt købt item: Lost Chapter (1.200 g) -> det item den bruges i står først, kun ét forslag bruger delen
     const idByName = (name) => Object.keys(items).find((id) => items[id].name === name && items[id].maps['11']);
@@ -527,6 +532,15 @@ server.listen(0, '127.0.0.1', async () => {
     await wait(2500);
     L2 = (await gui('GET', '/state')).body.live;
     assert(!L2.advice.some((a) => a.inProgress), 'en billig del gør ikke et item "i gang"');
+
+    // 7d0) Ingen færdige støvler efter 20 min -> støvler fremhæves; med Malignance færdig -> "Typisk 2. item efter Malignance"
+    setMyItems([1056, 3118]);
+    await wait(2500);
+    L2 = (await gui('GET', '/state')).body.live;
+    assert.strictEqual(L2.inventory.bootsTip?.minutes, 20, `støvle-påmindelse: ${JSON.stringify(L2.inventory)}`);
+    assert(L2.inventory.bootsTip.name && L2.inventory.bootsTip.cost > 0, 'støvler fra dit build med pris');
+    assert(L2.advice.some((a) => a.reasons.some((r) => r.startsWith('Typisk 2. item efter Malignance'))), `næste item efter Malignance: ${JSON.stringify(L2.advice.map((a) => [a.name, a.reasons]))}`);
+    console.log('Efter Malignance, uden støvler:', L2.advice.map((a) => `${a.name}: ${a.reasons[0]}`).join(' | '));
 
     // 7e) Fuldt build (6 færdige items): ingen almindelige køb, kun begrundede bytninger + elixir
     const passivesOf = (id) => [...(items[id]?.description || '').matchAll(/<passive>([^<]+)<\/passive>/g)].map((m) => m[1].trim());

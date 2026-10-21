@@ -449,9 +449,12 @@ function scalingNote(myBuild, oppBuild, oppName) {
 async function buildPlan(myKey, oppKey, position, myBuild) {
   const oppName = dd.champions[oppKey]?.name || '?';
   const myName = dd.champions[myKey]?.name || '';
-  const [guide, oppBuild] = await Promise.all([
+  const validPos = POSITIONS.includes(position);
+  const [guide, oppBuild, matchupBuild] = await Promise.all([
     fetchMatchupGuide(myKey, oppKey, position).catch((e) => { log(`  ${e.message}`); return null; }),
-    POSITIONS.includes(position) ? fetchBuild(app.cfg.region, 'ranked', oppKey, position).catch(() => null) : null,
+    validPos ? fetchBuild(app.cfg.region, 'ranked', oppKey, position).catch(() => null) : null,
+    // Dit build i kampe mod netop denne champion (bruges til item-forslag under kampen).
+    validPos ? fetchBuild(app.cfg.region, 'ranked', myKey, position, oppKey).catch(() => null) : null,
   ]);
   const who = (x) => {
     if (!x) return null;
@@ -475,6 +478,7 @@ async function buildPlan(myKey, oppKey, position, myBuild) {
     myCore: coreOf(myBuild),
     oppCore: coreOf(oppBuild),
     // Items du faktisk bygger: core + sene items som mindst 2% køber (ikke fx Randuin's på en mage).
+    matchupBuild,
     myPool: [
       ...(myBuild?.core_items || []).flatMap((x) => x.ids.map(String)),
       ...(myBuild?.last_items || []).filter((x) => (x.pick_rate || 0) >= 0.02).map((x) => String(x.ids[0])),
@@ -962,7 +966,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.10.1';
+const VERSION = '1.11.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -1131,9 +1135,19 @@ const SELLABLE_STARTERS = new Set(['1054', '1055', '1056', '1082', '1083']);
 const ELIXIR = { ad: '2140', ap: '2139', tank: '2138' }; // Wrath, Sorcery, Iron (500 g, fylder ingen plads)
 
 // Inventory-overblik: pladser, fuldt build og elixir der passer til dig (ved fuldt build).
-function inventoryInfo(me, gold, mapNumber) {
+function inventoryInfo(me, gold, mapNumber, gameTime = 0, build = null) {
   const completed = me.itemIds.filter((id) => isCompleted(dd.items[id]));
   const full = completed.length >= 6;
+  // Påmindelse om støvler: ingen færdige støvler efter 10 min -> de mest spillede fra dit build.
+  const hasBoots = completed.some((id) => dd.items[id].tags.includes('Boots'));
+  const bootsId = build?.boots?.[0] ? String(build.boots[0].ids[0]) : null;
+  const bootsTip = !full && !hasBoots && gameTime >= 600 && bootsId && dd.items[bootsId]
+    ? { id: bootsId, cost: remainingCost(bootsId, me.itemIds).cost, minutes: Math.floor(gameTime / 60) }
+    : null;
+  // Påmindelse om Control Ward (75 g): efter 5 min, når du har plads og ingen har.
+  const ward = dd.items['2055'];
+  const wardTip = Boolean(ward) && !full && gameTime >= 300 && (me.slotsUsed ?? me.itemIds.length) < 6
+    && !me.itemIds.includes('2055') && gold >= ward.gold;
   const kind = me.champ?.tags?.[0] === 'Tank' ? 'tank' : me.dmg.ad >= 0.5 ? 'ad' : 'ap';
   const elixirId = ELIXIR[kind];
   const elixirOk = full && dd.items[elixirId] && dd.items[elixirId].maps[mapNumber] !== false;
@@ -1142,6 +1156,8 @@ function inventoryInfo(me, gold, mapNumber) {
     completed: completed.length,
     full,
     elixir: elixirOk ? { id: elixirId, cost: dd.items[elixirId].gold, canAfford: dd.items[elixirId].gold <= gold } : null,
+    wardTip: wardTip ? { id: '2055', cost: ward.gold } : null,
+    bootsTip: bootsTip && { ...bootsTip, canAfford: bootsTip.cost <= gold },
   };
 }
 
@@ -1236,20 +1252,59 @@ function analyzeLive(data, build) {
   const mrHeavy = mrStackers.length >= 2 || mrStackers.some((p) => p.mr >= 80);
   const enemy = { fed, adShare, apShare, armorStackers, mrStackers, armorHeavy, mrHeavy, healers };
 
-  const advice = liveAdvice(build, me, enemy, gold, data.gameData?.mapNumber || 11);
   // Lane-modstander: samme rolle i live-API'et; mangler rollerne, så den der blev fundet i champion select.
   const knownOpp = app.plan?.oppKey || (app.rec?.matchup?.id != null ? String(app.rec.matchup.id) : null);
   const opponent = (me.position && enemies.find((p) => p.position === me.position))
     || (knownOpp && enemies.find((p) => String(p.champ?.key) === knownOpp))
     || null;
+  // Gameplanen (og dens matchup-build) gælder kun hvis den er mod den samme modstander.
+  const plan = app.plan && opponent && String(opponent.champ?.key) === app.plan.oppKey ? app.plan : null;
+  const advice = liveAdvice(build, me, enemy, gold, data.gameData?.mapNumber || 11, {
+    gameTime: data.gameData?.gameTime || 0,
+    matchupBuild: plan?.matchupBuild || null,
+    oppName: plan?.opponent || null,
+  });
   const matchup = opponent && { player: opponent, stats: matchupStats(build, opponent.champ?.key) };
   const skill = skillHint(data.activePlayer, build);
-  const inventory = inventoryInfo(me, gold, data.gameData?.mapNumber || 11);
+  const inventory = inventoryInfo(me, gold, data.gameData?.mapNumber || 11, data.gameData?.gameTime || 0, build);
   return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice, matchup, skill, inventory };
 }
 
 // 2-3 forslag fra championens egen item-pulje, scoret efter popularitet + modstandernes faktiske builds.
-function liveAdvice(build, me, enemy, gold, mapNumber) {
+// Næste item efter OP.GG's 3-item core-kombinationer: blandt kombinationer hvis første k items er dem
+// du har færdige, hvad er item nr. k+1? (Antager at kombinationerne står i byggerækkefølge - det passer
+// med dataene, fx starter alle Tryndamere-kombinationer med Ravenous Hydra.)
+function nextInBuild(build, ownedNonBoots) {
+  const k = ownedNonBoots.length;
+  if (k >= 3) return null;
+  const owned = new Set(ownedNonBoots);
+  const counts = new Map();
+  let total = 0;
+  for (const c of build.core_items || []) {
+    const ids = c.ids.map(String);
+    if (!ids.slice(0, k).every((id) => owned.has(id)) || owned.has(ids[k])) continue;
+    counts.set(ids[k], (counts.get(ids[k]) || 0) + c.play);
+    total += c.play;
+  }
+  return total ? { slot: k + 1, total, share: (id) => (counts.get(id) || 0) / total } : null;
+}
+
+// Items der bygges markant oftere mod din lane-modstander end generelt (fx Mortal Reminder mod Darius).
+function matchupItemBoost(build, matchupBuild) {
+  const rate = (b) => new Map((b?.last_items || []).map((x) => [String(x.ids[0]), x]));
+  const general = rate(build);
+  const vs = rate(matchupBuild);
+  const boost = new Map();
+  for (const [id, x] of vs) {
+    const g = general.get(id);
+    if (x.play < 100 || !g || !g.pick_rate) continue;
+    const ratio = x.pick_rate / g.pick_rate;
+    if (ratio >= 1.3) boost.set(id, { ratio, vs: x.pick_rate, general: g.pick_rate });
+  }
+  return boost;
+}
+
+function liveAdvice(build, me, enemy, gold, mapNumber, ctx = {}) {
   if (!build) return [];
   const pop = new Map();
   for (const c of build.core_items || []) for (const id of c.ids) pop.set(String(id), (pop.get(String(id)) || 0) + (c.pick_rate || 0));
@@ -1276,6 +1331,10 @@ function liveAdvice(build, me, enemy, gold, mapNumber) {
   const swapOut = full
     ? completedOwned.filter((id) => !dd.items[id].tags.includes('Boots')).sort((a, b) => (pop.get(a) || 0) - (pop.get(b) || 0))[0]
     : null;
+  const ordinal = (n) => `${n}.`;
+  const nonBootsDone = completedOwned.filter((id) => !dd.items[id].tags.includes('Boots'));
+  const next = nextInBuild(build, nonBootsDone);
+  const vsBoost = ctx.matchupBuild ? matchupItemBoost(build, ctx.matchupBuild) : new Map();
   const names = (list) => list.slice(0, 3).map((p) => p.champ?.name || p.name).join(', ');
   const kda = (p) => `${p.kills}/${p.deaths}/${p.assists}`;
 
@@ -1318,6 +1377,17 @@ function liveAdvice(build, me, enemy, gold, mapNumber) {
     if (it.tags.includes('Armor') && enemy.adShare >= 0.65) { score += 15; reasons.push(`${pct(enemy.adShare)} af deres trussel er AD`); }
     if (it.tags.includes('SpellBlock') && enemy.apShare >= 0.55) { score += 15; reasons.push(`${pct(enemy.apShare)} af deres trussel er AP`); }
     const adapted = reasons.length > (inProgress ? 1 : 0);
+    // Matchup: bygges markant oftere mod din lane-modstander.
+    const vs = vsBoost.get(id);
+    if (vs) { score += Math.min(30, 15 * vs.ratio); reasons.push(`Bygges oftere mod ${ctx.oppName} (${pct(vs.vs)} mod ${pct(vs.general)} generelt)`); }
+    // Byggerækkefølge: typisk næste item efter dem du har.
+    const share = next ? next.share(id) : 0;
+    if (share > 0) {
+      score += 45 * share;
+      const after = nonBootsDone.length ? ` efter ${nonBootsDone.map(itemName).join(' + ')}` : '';
+      // Efter "Du er i gang", hvis det står der - ellers først.
+      reasons.splice(inProgress ? 1 : 0, 0, `Typisk ${ordinal(next.slot)} item${after} (${pct(share)} af ${next.total.toLocaleString('da-DK')} kampe)`);
+    }
     if (!reasons.length) reasons.push(`Fast del af buildet (${pct(Math.min(Math.max(popularity, 0), 1))} køber det)`);
     let budget = gold;
     let sell = null;
@@ -1337,7 +1407,7 @@ function liveAdvice(build, me, enemy, gold, mapNumber) {
     }
     // En del fylder en plads: kun forslag om del hvis der er plads.
     const part = cost > budget && freeSlots > 0 && !full ? affordablePart(id, owned, gold) : null;
-    scored.push({ id, score, reasons, cost, canAfford: cost <= budget, part, adapted, inProgress, used, sell, swap });
+    scored.push({ id, score, reasons, cost, canAfford: cost <= budget, part, adapted, inProgress, used, sell, swap, nextShare: share });
   }
   scored.sort((a, b) => b.score - a.score);
   // Rækkefølge: det item du er i gang med (dine dele er ikke spildt), så op til 2 tilpassede forslag,
@@ -1360,6 +1430,9 @@ function liveAdvice(build, me, enemy, gold, mapNumber) {
     else rejected.add(s);
   }
   const rest = scored.filter((s) => !rejected.has(s));
+  // Grundplanen: det mest typiske næste item i dit build har altid en plads (medmindre du er i gang med et andet).
+  const nextUp = [...rest].filter((s) => s.nextShare > 0).sort((a, b) => b.nextShare - a.nextShare)[0];
+  if (nextUp && !out.some((o) => o.inProgress && o.nextShare > 0)) add(nextUp);
   rest.filter((s) => s.adapted && !s.inProgress).slice(0, 2).forEach(add);
   rest.forEach(add);
   // "I gang" først, ellers efter score.
@@ -1541,6 +1614,8 @@ function liveView() {
     inventory: L.inventory && {
       ...L.inventory,
       elixir: L.inventory.elixir && { ...L.inventory.elixir, name: itemName(L.inventory.elixir.id), icon: dd.items[L.inventory.elixir.id]?.icon },
+      wardTip: L.inventory.wardTip && { ...L.inventory.wardTip, name: itemName('2055'), icon: dd.items['2055']?.icon },
+      bootsTip: L.inventory.bootsTip && { ...L.inventory.bootsTip, name: itemName(L.inventory.bootsTip.id), icon: dd.items[L.inventory.bootsTip.id]?.icon },
     },
     matchup: L.matchup && {
       name: L.matchup.player.champ?.name || L.matchup.player.name,

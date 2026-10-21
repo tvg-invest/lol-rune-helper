@@ -49,6 +49,16 @@ STEMME OM DIT CORE BUILD
 Når du færdiggør et item fra dit core build, siger stemmen fx
 "Ravenous Hydra færdig - 1 af 3 i dit core build".
 
+KLOGERE KØBSFORSLAG UNDER KAMPEN
+- Byggerækkefølge: ud fra de items du har færdige viser den, hvad spillere typisk
+  bygger som næste item ("Typisk 2. item efter Malignance (65% af 41.861 kampe)").
+  Det har altid en plads blandt de 3 forslag.
+- Matchup: items der bygges markant oftere mod din lane-modstander fremhæves
+  ("Bygges oftere mod Zed (56% mod 32% generelt)").
+- Påmindelser: ingen færdige støvler efter 10 min, og ingen Control Ward når du har plads.
+- Item-win rates bruges bevidst ikke som bonus: dyre items bliver mest færdige i kampe
+  man allerede vinder, så de tal ser bedre ud end de er.
+
 INVENTORY OG FULDT BUILD
 Købsforslagene tæller dine 6 pladser. Er de fyldt, foreslår den at sælge et starter-item
 (Doran's, Dark Seal, Cull) for at få plads. Har du 6 færdige items (fuldt build), foreslår

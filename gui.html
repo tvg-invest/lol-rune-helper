@@ -162,6 +162,7 @@
   .skillup .key { width: 26px; height: 26px; }
   .skillup.compact { margin-top: 0; padding: 2px 6px; font-size: 12px; gap: 5px; }
   .skillup.compact .key { width: 22px; height: 22px; font-size: 12px; }
+  .tip-ic { width: 22px; height: 22px; border-radius: 4px; flex: none; }
   ol.routes { margin: 6px 0 0; padding-left: 20px; }
   ol.routes li { margin-bottom: 8px; }
   ol.routes .camps { font-weight: 600; font-size: 13px; }
@@ -420,6 +421,12 @@ function adviceCard(L) {
         el('div', {}, el('div', { class: 'name' }, inv.elixir.name),
           el('span', { class: 'badge ' + (inv.elixir.canAfford ? 'ok' : 'no') }, inv.elixir.canAfford ? `Råd nu · ${gold(inv.elixir.cost)}` : `${gold(inv.elixir.cost)} · mangler ${gold(inv.elixir.cost - L.gold)}`),
           el('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, 'Fylder ingen plads - giver stats i 3 min.')))) : null,
+    inv.bootsTip ? el('div', { class: 'muted', style: 'font-size:12px;margin:0 0 8px;display:flex;align-items:center;gap:6px' },
+      img(inv.bootsTip.icon, inv.bootsTip.name, 'tip-ic'),
+      `Ingen færdige støvler efter ${inv.bootsTip.minutes} min - ${inv.bootsTip.name} (${inv.bootsTip.canAfford ? 'råd nu' : `mangler ${gold(inv.bootsTip.cost - L.gold)}`}).`) : null,
+    inv.wardTip ? el('div', { class: 'muted', style: 'font-size:12px;margin:0 0 10px;display:flex;align-items:center;gap:6px' },
+      img(inv.wardTip.icon, inv.wardTip.name, 'tip-ic'),
+      `Du har ingen Control Ward (${inv.wardTip.cost} g) og har plads til en.`) : null,
     L.advice.length ? el('div', { class: 'advice' }, L.advice.map((a) => {
       const extra = (a.sell && a.sell.value) || (a.swap && a.swap.value) || 0;
       return el('div', { class: 'pick' + (a.inProgress ? ' progress' : a.adapted ? ' adapted' : '') },

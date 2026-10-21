@@ -51,6 +51,13 @@ Læser spillets [Live Client Data API](https://developer.riotgames.com/docs/lol)
 
 Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General Policies](https://developer.riotgames.com/policies/general)) forbyder information spilleren ikke allerede kender og apps der bestemmer spillerens beslutninger, men tillader at fremhæve vigtige beslutninger og give flere valg. Derfor: kun TAB-information, 2-3 begrundede forslag, ingen timere. Bemærk at Riot kræver at produkter registreres i Developer Portal.
 
+## Købsforslag: byggerækkefølge, matchup, påmindelser
+
+- **Næste item:** OP.GG's `core_items` er 3-item-kombinationer (antaget i byggerækkefølge - passer med data). Blandt kombinationer hvis første k items er dine færdige (ikke støvler), andelen der bygger item k+1 -> bonus + begrundelse. Det mest typiske næste item har altid en plads (efter et item du er i gang med).
+- **Matchup:** `last_items` mod lane-modstanderen (`?target_champion=`, min. 100 kampe) vs. generelt; ratio >= 1,3 -> bonus "Bygges oftere mod X".
+- **Påmindelser** (linjer over forslagene): ingen færdige støvler efter 10 min (mest spillede fra buildet, restpris), ingen Control Ward efter 5 min når der er plads og 75 g.
+- Item-win rates bruges ikke som bonus (overlevelses-bias: dyre items færdiggøres mest i vundne kampe).
+
 ## Jungle-ruter og core-stemme
 
 - **Jungle-ruter:** `op.gg/lol/champions/<ddragon-id i små bogstaver>/jungle-paths/jungle` har ruterne som indlejret (escaped) data: `{"team_key":"BLUE|RED","routes":[{"route":[6 camps],"play":N,"rank":N}, ...]}`. Ruterne læses ét objekt ad gangen fra listens start. Top 3 pr. side med andel; caches 6 timer; fejl = intet kort. Vises for JUNGLE i champion select og de første 5 min.
