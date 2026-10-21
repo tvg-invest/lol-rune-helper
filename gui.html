@@ -107,7 +107,7 @@
   .prow > img { width: 34px; height: 34px; border-radius: 6px; }
   .prow .pn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .prow .lvl { color: var(--muted); font-size: 11px; }
-  .fedtag { font-size: 10px; font-weight: 700; color: #111; background: var(--gold); border-radius: 3px; padding: 0 4px; margin-left: 4px; }
+  .wr.few { color: var(--muted); }
   .prow .its { display: flex; gap: 3px; flex-wrap: wrap; }
   .prow .its img { width: 24px; height: 24px; border-radius: 4px; border: 1px solid var(--line); }
   @media (max-width: 640px) {
@@ -185,8 +185,10 @@
 <main id="app"><div class="empty"><div class="big">Starter...</div></div></main>
 <script>
 const $app = document.getElementById('app');
+// render() bygger siden i $target og retter derefter kun forskellene ind i $app (se morph).
+let $target = $app;
 // Tilføj elementer til siden; lister flades ud og tomme værdier (null/false) springes over.
-const put = (...xs) => $app.append(...xs.flat(Infinity).filter((x) => x != null && x !== false));
+const put = (...xs) => $target.append(...xs.flat(Infinity).filter((x) => x != null && x !== false));
 const pct = (x) => (x * 100).toFixed(1).replace('.', ',') + '%';
 const num = (x) => x == null ? '' : x.toLocaleString('da-DK');
 
@@ -194,7 +196,8 @@ function el(tag, attrs, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v == null || v === false) continue;
-    if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    // Handlere gemmes på noden, så morph kan flytte de nye (med ny tilstand) over på den gamle node.
+    if (k.startsWith('on')) addHandler(node, k.slice(2), v);
     else if (k === 'class') node.className = v;
     else node.setAttribute(k, v);
   }
@@ -203,6 +206,34 @@ function el(tag, attrs, ...children) {
 }
 const img = (src, alt, cls) => src ? el('img', { src, alt, title: alt, class: cls }) : null;
 
+function addHandler(node, type, fn) {
+  if (!node._on) node._on = {};
+  if (!node._on[type]) node.addEventListener(type, (e) => node._on[type] && node._on[type](e));
+  node._on[type] = fn;
+}
+
+// Ret den viste side til, så den ligner den nye (i stedet for at bygge alt forfra hvert 2. sekund):
+// billeder, tooltips, fokus, scroll i loggen, åbne <details> og igangværende blink bevares.
+function morph(parent, fresh) {
+  const next = [...fresh.childNodes];
+  next.forEach((n, i) => {
+    const o = parent.childNodes[i];
+    if (!o) return parent.append(n);
+    if (o === n) return;
+    if (n.keep || o.keep || o.nodeType !== n.nodeType || o.nodeName !== n.nodeName) return parent.replaceChild(n, o);
+    if (o.nodeType !== 1) { if (o.nodeValue !== n.nodeValue) o.nodeValue = n.nodeValue; return; }
+    for (const a of [...o.attributes]) {
+      if (o.nodeName === 'DETAILS' && a.name === 'open') continue; // brugerens valg
+      if (!n.hasAttribute(a.name)) o.removeAttribute(a.name);
+    }
+    for (const a of [...n.attributes]) if (o.getAttribute(a.name) !== a.value) o.setAttribute(a.name, a.value);
+    if (o.nodeName === 'BUTTON' && o.disabled !== n.disabled) o.disabled = n.disabled;
+    for (const [type, fn] of Object.entries(n._on || {})) addHandler(o, type, fn);
+    if (o._on) for (const type of Object.keys(o._on)) if (!n._on || !n._on[type]) o._on[type] = null;
+    morph(o, n);
+  });
+  while (parent.childNodes.length > next.length) parent.lastChild.remove();
+}
 async function post(url, body) {
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (!res.ok) alert((await res.json().catch(() => ({}))).error || 'Noget gik galt');
@@ -231,12 +262,15 @@ function updateBanner(s) {
   if (!s.update) return null;
   return el('div', { class: 'update' },
     el('div', {}, el('b', {}, `Ny version ${s.update.version} er klar`), s.update.notes ? el('div', { class: 'muted' }, s.update.notes.split('\n')[0]) : null),
-    s.update.canApply && ['127.0.0.1', 'localhost'].includes(location.hostname)
-      ? el('button', { onclick: (e) => { e.target.textContent = 'Opdaterer...'; e.target.disabled = true; post('/api/update', {}); } }, 'Opdater nu')
-      : el('span', { class: 'muted' }, 'Hent den nye version'));
+    s.update.inProgress ? el('span', { class: 'muted' }, 'Opdaterer...')
+      : s.update.canApply && ['127.0.0.1', 'localhost'].includes(location.hostname)
+        ? el('button', { onclick: (e) => { e.target.textContent = 'Opdaterer...'; e.target.disabled = true; post('/api/update', {}); } }, 'Opdater nu')
+        : el('span', { class: 'muted' }, 'Hent den nye version'));
 }
 
 const wrClass = (wr) => (wr >= 0.515 ? 'good' : wr <= 0.485 ? 'bad' : '');
+// Matchup-tal fra få kampe er usikre: grå og markeret i stedet for grøn/rød.
+const fewGames = (games) => games != null && lastState && lastState.minGames && games < lastState.minGames;
 const crow = (c, sub, right, cls) => el('div', { class: 'crow' }, img(c.icon, c.name),
   el('div', { class: 't' }, el('div', { class: 'n' }, c.name), sub ? el('div', { class: 'r' }, sub) : null),
   right != null ? el('div', { class: 'wr ' + (cls || '') }, right) : null);
@@ -266,40 +300,51 @@ function renderDraft(s) {
     logCard(s));
 }
 
-// Mest brugte første clear pr. side (kun når du spiller jungle).
-function jungleCard(j) {
+// Mest brugte første clear pr. side (kun når du spiller jungle). I kamp kun din egen side (fra TAB).
+function jungleCard(j, mySide) {
   if (!j) return null;
+  const start = (key) => {
+    const r = j.rate && j.rate[key];
+    return r ? el('div', { class: 'muted', style: 'font-size:11px;margin:0 0 4px' }, `Starter: Blue ${r.blue}% · Red ${r.red}% · Raptors ${r.raptors}%`) : null;
+  };
   const side = (key, label, cls) => j[key] ? el('div', {},
     el('div', { class: 'plan-sub ' + cls, style: 'margin-top:0' }, label),
+    start(key),
     el('ol', { class: 'routes' }, j[key].map((r) => el('li', {},
       el('div', { class: 'camps' }, r.camps.join(' → ')),
       el('div', { class: 'muted', style: 'font-size:11px' }, `${pct(r.share)} · ${num(r.games)} kampe`))))) : null;
+  const sides = { BLUE: () => side('BLUE', 'Blå side', 'blue'), RED: () => side('RED', 'Rød side', 'red') };
   return el('div', { class: 'card' },
     el('h2', {}, 'Jungle-ruter (første clear)'),
-    el('div', { class: 'grid' }, side('BLUE', 'Blå side', 'blue'), side('RED', 'Rød side', 'red')),
+    mySide && j[mySide] ? sides[mySide]() : el('div', { class: 'grid' }, sides.BLUE(), sides.RED()),
     el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' }, 'Mest spillede rækkefølger fra OP.GG - vælg den der passer til dit hold og modstanderens jungler.'));
 }
 
 // Gameplan mod lane-modstanderen: fast del (matchup) + "Lige nu" og ændringer under kampen.
-function gameplanCard(p) {
+// I kamp (live) står "Lige nu" og "Ændringer" først, og OP.GG's spillestil/tip/skalering vises ikke.
+function gameplanCard(p, live) {
   if (!p) return null;
   const chip = (label, value) => value ? el('span', { class: 'pill' }, `${label}: `, el('b', {}, value)) : null;
+  const few = fewGames(p.games);
+  const now = p.now ? [el('div', { class: 'plan-sub' }, 'Lige nu'), el('ul', { class: 'notes', style: 'margin-top:4px' }, p.now.map((l) => el('li', {}, l)))] : null;
+  const changes = p.log.length ? [el('div', { class: 'plan-sub' }, 'Ændringer'), el('ul', { class: 'notes plan-log', style: 'margin-top:4px' }, p.log.slice(0, 6).map((l) => el('li', {}, el('span', { class: 'muted' }, clock(l.t) + ' '), l.text)))] : null;
   return el('div', { class: 'card plan' },
     el('div', { class: 'plan-head' },
       img(p.me.icon, p.me.name, 'plan-ic'), el('span', { class: 'muted' }, 'mod'), img(p.opponent.icon, p.opponent.name, 'plan-ic'),
       el('h2', { style: 'margin:0' }, `Gameplan mod ${p.opponent.name}`),
-      p.winRate != null ? el('span', { class: 'wr ' + wrClass(p.winRate), style: 'margin-left:auto;font-size:18px' }, pct(p.winRate)) : null),
-    p.games ? el('div', { class: 'muted', style: 'font-size:12px;margin:-4px 0 8px' }, `Din win rate i ${num(p.games)} kampe`) : null,
-    el('div', { class: 'shards', style: 'margin:0 0 10px' },
-      chip('Lane', p.laneAdvantage === 'jævn' ? 'jævn' : p.laneAdvantage && `fordel ${p.laneAdvantage}`),
+      p.winRate != null ? el('span', { class: 'wr ' + (few ? 'few' : wrClass(p.winRate)), style: 'margin-left:auto;font-size:18px' }, pct(p.winRate)) : null),
+    p.games ? el('div', { class: 'muted', style: 'font-size:12px;margin:-4px 0 8px' }, `Din win rate i ${num(p.games)} kampe` + (few ? ' (få kampe - usikkert tal)' : '')) : null,
+    live ? now : null, live ? changes : null,
+    el('div', { class: 'shards', style: 'margin:' + (live ? '10px' : '0') + ' 0 10px' },
+      // OP.GG's "lane advantage" for junglere handler om starten af kampen, ikke en lane.
+      chip(p.position === 'JUNGLE' ? 'Tidligt i kampen' : 'Lane', p.laneAdvantage === 'jævn' ? 'jævn' : p.laneAdvantage && `fordel ${p.laneAdvantage}`),
       chip('Flest solo kills', p.soloKill === 'jævn' ? 'jævnt' : p.soloKill),
-      chip('Spillestil', p.playStyle)),
-    p.tip ? el('blockquote', { class: 'tip' }, p.tip, el('div', { class: 'muted', style: 'font-size:11px;margin-top:4px' }, 'Tip fra OP.GG')) : null,
-    p.scaling ? el('div', { style: 'margin:8px 0' }, p.scaling) : null,
+      live ? null : chip('Spillestil', p.playStyle)),
+    !live && p.tip ? el('blockquote', { class: 'tip' }, p.tip, el('div', { class: 'muted', style: 'font-size:11px;margin-top:4px' }, 'Tip fra OP.GG')) : null,
+    !live && p.scaling ? el('div', { style: 'margin:8px 0' }, p.scaling) : null,
     p.oppCore.length ? el('div', { class: 'plan-build' }, el('span', { class: 'muted' }, `${p.opponent.name} bygger typisk`), p.oppCore.map((it) => img(it.icon, it.name))) : null,
     p.myCore.length ? el('div', { class: 'plan-build' }, el('span', { class: 'muted' }, 'Dit core build'), p.myCore.map((it) => img(it.icon, it.name))) : null,
-    p.now ? [el('div', { class: 'plan-sub' }, 'Lige nu'), el('ul', { class: 'notes', style: 'margin-top:4px' }, p.now.map((l) => el('li', {}, l)))] : null,
-    p.log.length ? [el('div', { class: 'plan-sub' }, 'Ændringer'), el('ul', { class: 'notes plan-log', style: 'margin-top:4px' }, p.log.slice(0, 6).map((l) => el('li', {}, el('span', { class: 'muted' }, clock(l.t) + ' '), l.text)))] : null,
+    live ? null : now, live ? null : changes,
     el('div', { class: 'muted', style: 'font-size:11px;margin-top:8px' }, 'Fakta og valg - du bestemmer selv hvornår du går ind.'));
 }
 
@@ -452,7 +497,10 @@ function adviceCard(L) {
 function enemyLiveCard(L) {
   const e = L.enemy;
   const line = (label, list) => list.length ? el('li', {}, el('b', {}, label + ': '), list.join(', ')) : null;
-  const lines = [line('Fed', e.fed), line('Bygger armor', e.armorStackers), line('Bygger magic resist', e.mrStackers), line('Healing', e.healers)].filter(Boolean);
+  // Kun fakta fra TAB (items). Oracle Lens/Control Ward vises kun for champions med camouflage/usynlighed.
+  const v = L.vision;
+  const lines = [line('Bygger armor', e.armorStackers), line('Bygger magic resist', e.mrStackers), line('Healing', e.healers),
+    v ? line('Oracle Lens', v.lens) : null, v ? line('Control Ward', v.ward) : null].filter(Boolean);
   return el('div', { class: 'card' },
     el('h2', {}, 'Modstanderne'),
     el('div', { class: 'bar' },
@@ -470,7 +518,7 @@ function teamBlock(t, label, cls, diff) {
         `drager ${t.dragons}`, `baron ${t.barons}`, `herald ${t.heralds}`, `tårne ${t.turrets}`].map((x) => el('span', {}, x))),
     t.players.map((p) => el('div', { class: 'prow' + (p.me ? ' me' : '') + (p.isDead ? ' dead' : '') },
       img(p.champion.icon, p.champion.name),
-      el('div', { class: 'pn' }, p.champion.name, p.fed ? el('span', { class: 'fedtag' }, 'FED') : null, el('div', { class: 'lvl' }, `lvl ${p.level} · ${p.name}`)),
+      el('div', { class: 'pn' }, p.champion.name, el('div', { class: 'lvl' }, `lvl ${p.level} · ${p.name}`)),
       el('div', {}, `${p.kills}/${p.deaths}/${p.assists}`),
       el('div', { class: 'cs muted' }, p.cs),
       el('div', { class: 'its' }, p.items.map((it) => img(it.icon, it.name))))));
@@ -497,8 +545,8 @@ function renderLive(s) {
         el('div', { class: 'meta' }, `${clock(L.gameTime)} · ${L.gameMode || ''} · ${L.me.kills}/${L.me.deaths}/${L.me.assists}`), statusLine(s), matchupLine(L.matchup), skillLine(L)),
       el('div', { class: 'right' }, el('div', { class: 'gold' }, gold(L.gold)), el('div', { class: 'meta' }, 'dit guld'))),
     adviceCard(L),
-    L.gameTime < 300 ? jungleCard(s.jungle) : null, // de første 5 min
-    gameplanCard(s.plan),
+    L.gameTime < 300 ? jungleCard(s.jungle, L.side) : null, // de første 5 min
+    gameplanCard(s.plan, true),
     el('div', { class: 'grid' },
       el('div', { class: 'card' }, el('h2', {}, 'Scoreboard'),
         teamBlock(L.allies, 'Dit hold', 'ally', diff),
@@ -514,6 +562,9 @@ function loadQr() {
     qrLib = new Promise((resolve, reject) => {
       const sc = document.createElement('script');
       sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+      // Fast hash: en ændret fil fra CDN'et køres ikke (siden kan nå programmets lokale endpoints).
+      sc.integrity = 'sha384-3zSEDfvllQohrq0PHL1fOXJuC/jSOO34H46t6UQfobFOmxE5BpjjaIJY5F2/bMnU';
+      sc.crossOrigin = 'anonymous';
       sc.onload = resolve;
       sc.onerror = reject;
       document.head.append(sc);
@@ -529,6 +580,7 @@ function phoneCard(s) {
   // Samme QR-element genbruges ved hver opdatering, så den ikke tegnes forfra hvert 2. sekund.
   if (!qrCache[main.url]) {
     const node = el('div', { class: 'qr' });
+    node.keep = true; // morph må ikke rette i den tegnede kode
     qrCache[main.url] = node;
     loadQr().then(() => new QRCode(node, { text: main.url, width: 132, height: 132 })).catch(() => node.remove());
   }
@@ -542,12 +594,29 @@ function phoneCard(s) {
 function matchupLine(m) {
   if (!m) return null;
   return el('div', { class: 'matchup' }, 'Mod', img(m.icon, m.name), el('b', {}, m.name),
-    m.winRate != null ? `${pct(m.winRate)} WR · ${num(m.games)} kampe` : el('span', { class: 'muted' }, 'ingen matchup-data'));
+    m.winRate == null ? el('span', { class: 'muted' }, 'ingen matchup-data')
+      : fewGames(m.games) ? el('span', { class: 'muted' }, `${pct(m.winRate)} WR · ${num(m.games)} kampe (få kampe)`)
+      : `${pct(m.winRate)} WR · ${num(m.games)} kampe`);
 }
 
 function render(s) {
-  $app.replaceChildren();
-  if (!s) return;
+  $target = document.createElement('main');
+  try {
+    if (s) renderInto(s);
+  } finally {
+    const fresh = $target;
+    $target = $app;
+    morph($app, fresh);
+  }
+}
+
+const DRAFT_STATUS = {
+  loading: 'Henter ban- og counterpick-forslag...',
+  error: 'Kunne ikke hente ban- og counterpick-forslag (se loggen).',
+  unsupported: 'Ingen ban- og counterpick-forslag i denne kø (kun når du har en fast rolle).',
+};
+
+function renderInto(s) {
   if (['127.0.0.1', 'localhost'].includes(location.hostname)) put(toolbar(s));
   const banner = updateBanner(s);
   if (banner) put(banner);
@@ -555,6 +624,7 @@ function render(s) {
   if (!s.champion && s.draft) return renderDraft(s);
   if (!s.champion) {
     put(
+      s.draftStatus ? el('div', { class: 'card' }, el('h2', {}, 'Champion select'), statusLine(s), el('div', { class: 'muted', style: 'margin-top:8px' }, DRAFT_STATUS[s.draftStatus] || '')) :
       el('div', { class: 'card' + (s.history ? '' : ' empty') }, el('div', { class: 'big', style: s.history ? 'font-size:18px;color:var(--gold2)' : '' }, 'LoL Rune Helper'), statusLine(s),
         el('p', { class: 'muted' }, 'I champion select får du ban- og counterpick-forslag; når du låser, sætter jeg runer, summoners og items. Under kampen kommer købsforslag og scoreboard her.')),
       historyCards(s),
@@ -589,10 +659,21 @@ const saveSettings = () => { try { localStorage.setItem('lrh', JSON.stringify(se
 if (settings.sound === undefined) settings.sound = true;
 
 let audio = null;
+// Browseren tillader først lyd efter et klik/tastetryk: opret eller væk lyden ved det første.
+function unlockAudio() {
+  try {
+    audio = audio || new AudioContext();
+    if (audio.state === 'suspended') audio.resume().catch(() => {});
+  } catch {}
+}
+document.addEventListener('pointerdown', unlockAudio);
+document.addEventListener('keydown', unlockAudio);
 function beep() {
   if (!settings.sound) return;
   try {
     audio = audio || new AudioContext();
+    // Lyd oprettet uden et klik starter "suspended" - prøv at vække den (virker efter første klik på siden).
+    if (audio.state === 'suspended') audio.resume().catch(() => {});
     const o = audio.createOscillator();
     const g = audio.createGain();
     o.frequency.value = 880;
@@ -606,7 +687,7 @@ function beep() {
 
 async function openOverlay() {
   if (!('documentPictureInPicture' in window)) {
-    alert('Overlay kræver Google Chrome eller Microsoft Edge (version 116 eller nyere). Åbn vinduet i en af dem.');
+    alert(`Overlay kræver Google Chrome eller Microsoft Edge (version 116 eller nyere). Åbn ${location.origin} i en af dem.`);
     return;
   }
   if (pip) { pip.focus(); return; }
@@ -617,7 +698,7 @@ async function openOverlay() {
   pip.document.title = 'LoL Rune Helper';
   pip.document.body.className = 'ov';
   pip.addEventListener('pagehide', () => { pip = null; if (lastState) render(lastState); });
-  if (audio === null) { try { audio = new AudioContext(); } catch {} } // lyd kræver et klik - det er det her
+  unlockAudio(); // lyd kræver et klik - det er det her
   renderOverlay(lastState);
   if (lastState) render(lastState);
 }
@@ -633,15 +714,15 @@ function overlayContent(s) {
         el('div', { class: 'c' + (L.inventory.starter.canAfford ? ' ok' : '') }, L.inventory.starter.canAfford ? 'RÅD NU' : gold(L.inventory.starter.cost))) : null,
       L.inventory && L.inventory.full ? el('div', { class: 'ov-foot', style: 'margin:0 0 6px' },
         'Fuldt build' + (L.inventory.elixir ? ` · ${L.inventory.elixir.name}${L.inventory.elixir.canAfford ? ' (råd nu)' : ''}` : '')) : null,
-      L.advice.map((a) => el('div', { class: 'ov-row' + (a.inProgress ? ' progress' : '') + (a.canAfford ? ' afford' : '') + (justAffordable.has(a.id) ? ' flash' : ''), 'data-id': a.id },
+      L.advice.map((a) => el('div', { class: 'ov-row' + (a.inProgress ? ' progress' : '') + (a.canAfford ? ' afford' : '') + ((flashUntil.get(a.id) || 0) > Date.now() ? ' flash' : ''), 'data-id': a.id },
         img(a.icon, a.name),
         el('div', { class: 't' }, el('div', { class: 'n' }, a.name, a.inProgress ? el('span', { class: 'progtag' }, 'I GANG') : null),
           // "I GANG"-mærket viser allerede fremdriften; vis hellere hvorfor.
           el('div', { class: 'r' }, a.reasons.find((r) => !r.startsWith('Du er i gang')) || a.reasons[0])),
-        el('div', { class: 'c' + (a.canAfford ? ' ok' : '') }, a.canAfford ? 'RÅD NU' : `mangler ${num(Math.round(a.cost - L.gold))}`))),
-      L.enemy.fed.length ? el('div', { class: 'ov-foot' }, 'Fed: ' + L.enemy.fed.join(', ')) : null,
-      L.matchup && L.matchup.winRate != null ? el('div', { class: 'ov-foot' }, `Mod ${L.matchup.name}: ${pct(L.matchup.winRate)} WR`) : null,
-      s.plan && s.plan.log.length ? el('div', { class: 'ov-foot' }, `${clock(s.plan.log[0].t)} ${s.plan.log[0].text}`) : null,
+        // Som i hovedvinduet: salgs-/bytteværdien tæller med i det du har.
+        el('div', { class: 'c' + (a.canAfford ? ' ok' : '') }, a.canAfford ? 'RÅD NU' : `mangler ${num(Math.round(a.cost - L.gold - ((a.sell && a.sell.value) || (a.swap && a.swap.value) || 0)))}`))),
+      // Bevidst intet om modstandernes items eller "fed" i overlayet (ingen power spike-notifikationer).
+      L.matchup && L.matchup.winRate != null ? el('div', { class: 'ov-foot' }, `Mod ${L.matchup.name}: ${pct(L.matchup.winRate)} WR` + (fewGames(L.matchup.games) ? ' (få kampe)' : '')) : null,
     ];
   }
   if (s && s.champion) {
@@ -657,22 +738,25 @@ function overlayContent(s) {
   return [el('div', { class: 'muted' }, s ? s.status : 'Starter...')];
 }
 
-function renderOverlay(s) {
+function renderOverlay(s, offline) {
   if (!pip) return;
-  const main = pip.document.createElement('main');
-  main.append(...overlayContent(s).flat().filter(Boolean).map((n) => pip.document.importNode(n, true)));
-  pip.document.body.replaceChildren(main);
+  const fresh = document.createElement('main');
+  fresh.append(...(offline ? [el('div', { class: 'muted' }, offline)] : overlayContent(s)).flat().filter(Boolean));
+  const main = pip.document.body.firstElementChild;
+  if (main && main.nodeName === 'MAIN') morph(main, fresh);
+  else pip.document.body.replaceChildren(pip.document.importNode(fresh, true));
 }
 
 // Bip + blink når et forslag går fra "mangler guld" til "råd nu".
 let affordable = new Set();
-let justAffordable = new Set();
+const flashUntil = new Map(); // id -> tidspunkt hvor blinket (3 x 1,2 s) er færdigt
 let wasLive = false;
 function trackAffordable(s) {
   const now = new Set((s.live?.advice || []).filter((a) => a.canAfford).map((a) => a.id));
-  justAffordable = new Set([...now].filter((id) => !affordable.has(id)));
+  const justAffordable = [...now].filter((id) => !affordable.has(id));
+  for (const id of justAffordable) flashUntil.set(id, Date.now() + 3700);
   // Ikke ved første live-besked (så bipper den ikke bare fordi vinduet åbnes).
-  if (s.live && wasLive && justAffordable.size) beep();
+  if (s.live && wasLive && justAffordable.length) beep();
   wasLive = Boolean(s.live);
   affordable = now;
 }
@@ -684,29 +768,36 @@ function toolbar(s) {
       onclick: () => post('/api/autostart', { enabled: !s.autostart }),
     }, s.autostart ? 'Autostart: til' : 'Autostart: fra') : null,
     el('button', {
-      title: 'Programmet siger "Råd til ...", "Level op: Q" og "X er fed" højt - virker også i ægte fuldskærm',
+      title: 'Programmet siger "Råd til ...", "Level op: Q", "Level 6" og færdige core-items højt (kun din egen tilstand) - virker også i ægte fuldskærm',
       onclick: () => post('/api/voice', { enabled: !s.voice }),
     }, s.voice ? 'Stemme: til' : 'Stemme: fra'),
-    el('button', { title: 'Bip i browseren når du har råd til et forslag', onclick: () => { settings.sound = !settings.sound; saveSettings(); render(lastState); } }, settings.sound ? 'Bip: til' : 'Bip: fra'),
+    el('button', { title: 'Bip i browseren når du har råd til et forslag', onclick: () => { settings.sound = !settings.sound; saveSettings(); if (settings.sound) unlockAudio(); render(lastState); } }, settings.sound ? 'Bip: til' : 'Bip: fra'),
     el('button', { onclick: openOverlay, title: 'Lille vindue der altid ligger øverst - kræver Borderless i League' }, pip ? 'Overlay åben' : 'Overlay'));
 }
 
 let lastJson = '';
+let failures = 0; // mislykkede forbindelser i træk
 function connect() {
   const es = new EventSource('/events');
   es.onmessage = (e) => {
+    failures = 0;
     if (e.data === lastJson) return;
     lastJson = e.data;
-    const open = document.querySelector('details')?.open;
     lastState = JSON.parse(e.data);
     trackAffordable(lastState);
     render(lastState);
     renderOverlay(lastState);
-    if (open) document.querySelector('details').open = true;
   };
   es.onerror = () => {
     es.close();
-    $app.replaceChildren(el('div', { class: 'card empty' }, el('div', { class: 'big' }, 'Programmet er lukket'), el('div', { class: 'muted' }, 'Start LoL Rune Helper igen - siden genforbinder selv.')));
+    failures++;
+    // Et enkelt hak (fx en opdatering der genstarter) er ikke det samme som at programmet er lukket.
+    const closed = failures >= 3;
+    const title = closed ? 'Programmet er lukket' : 'Forbindelse tabt - genforbinder...';
+    $app.replaceChildren(el('div', { class: 'card empty' }, el('div', { class: 'big' }, title),
+      el('div', { class: 'muted' }, closed ? 'Start LoL Rune Helper igen - siden genforbinder selv.' : 'Tallene er ikke opdateret lige nu.')));
+    // Overlayet må ikke stå med gammelt guld og "RÅD NU".
+    renderOverlay(null, title);
     lastJson = '';
     setTimeout(connect, 3000);
   };

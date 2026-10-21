@@ -102,7 +102,7 @@ const opggWeb = http.createServer((req, res) => {
   jungleRequests.push(req.url);
   const blue = [route(['BLUE', 'GROMP', 'WOLVES', 'RAPTORS', 'RED', 'KRUG'], 600, 1), route(['RED', 'KRUG', 'RAPTORS', 'WOLVES', 'BLUE', 'GROMP'], 300, 2), route(['RAPTORS', 'RED', 'KRUG', 'WOLVES', 'BLUE', 'GROMP'], 100, 3)];
   const red = [route(['RED', 'KRUG', 'RAPTORS', 'WOLVES', 'BLUE', 'GROMP'], 500, 1)];
-  const body = `<script>self.__next_f.push([1,"4e:[{\\"teamName\\":\\"BLUE\\",\\"data\\":{\\"team_key\\":\\"BLUE\\",\\"routes\\":[${blue.join(',')}],\\"play\\":1000}},{\\"data\\":{\\"team_key\\":\\"RED\\",\\"routes\\":[${red.join(',')}],\\"play\\":500}}]"])</script>`;
+  const body = `<script>self.__next_f.push([1,"4e:[{\\"teamName\\":\\"BLUE\\",\\"data\\":{\\"team_key\\":\\"BLUE\\",\\"routes\\":[${blue.join(',')}],\\"play\\":1000},\\"rate\\":{\\"team_key\\":\\"BLUE\\",\\"blue\\":52,\\"red\\":17,\\"raptors\\":29}},{\\"data\\":{\\"team_key\\":\\"RED\\",\\"routes\\":[${red.join(',')}],\\"play\\":500}}]"])</script>`;
   res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(body);
 });
@@ -217,6 +217,13 @@ server.listen(0, '127.0.0.1', async () => {
     await waitFor(() => out.includes('venter på champion select'), 20000, 'forbindelse');
     const page = await gui('GET', '/');
     assert(page.body.includes('LoL Rune Helper'), 'vinduet serveres');
+    // Stemme/overlay/policy: overlayet viser intet om modstandernes items eller "fed", QR-scriptet har SRI-hash
+    assert(!page.body.includes("'Fed: '") && !page.body.includes('plan.log[0]'), 'overlay uden modstander-notifikationer');
+    assert(!page.body.includes('fedtag'), 'ingen FED-mærke på scoreboardet');
+    assert(/sc\.integrity = 'sha384-/.test(page.body), 'QR-script med SRI');
+    assert(page.body.includes('function morph('), 'vinduet opdateres uden at blive bygget forfra');
+    const st0 = (await gui('GET', '/state')).body;
+    assert.strictEqual(st0.minGames, 150, 'grænse for få matchup-kampe sendes til vinduet');
 
     // 0) Draft: din tur til at banne -> ban-forslag ud fra din pulje; Zed vælges -> counterpicks
     state.phase = 'ChampSelect';
@@ -396,6 +403,8 @@ server.listen(0, '127.0.0.1', async () => {
     assert(Math.abs(jg.BLUE[0].share - 0.6) < 0.001, `andel: ${jg.BLUE[0].share}`);
     assert.strictEqual(jg.BLUE.length, 3);
     assert.strictEqual(jg.RED[0].games, 500);
+    assert.deepStrictEqual(jg.rate?.BLUE, { blue: 52, red: 17, raptors: 29 }, `start-camps: ${JSON.stringify(jg.rate)}`);
+    assert(!jg.rate.RED, 'ingen start-camps for rød side i den falske side');
 
     // 6) Næste kamp: auto-siden genbruges, ingen ekstra item sets, rolle-override nulstilles
     state.phase = 'Lobby';
@@ -425,7 +434,8 @@ server.listen(0, '127.0.0.1', async () => {
     assert(starter && starter.items.length >= 1, `startitems ved kampstart: ${JSON.stringify(S0.inventory)}`);
     assert(starter.cost > 0 && starter.cost <= 500 && starter.canAfford, `pris og råd: ${JSON.stringify(starter)}`);
     assert(starter.items.every((i) => i.name && i.icon && i.count >= 1));
-    assert(/^Start: /m.test(said()), `stemme ved kampstart: ${said()}`);
+    // Startitems siges når gameplanen mod lane-modstanderen er klar (højst 5 sek. efter kampstart).
+    await waitFor(() => /^Start: /m.test(said()), 10000, 'stemme ved kampstart');
     console.log('Startitems:', starter.items.map((i) => `${i.count}x ${i.name}`).join(', '), `(${starter.cost} g)`, starter.vs ? `mod ${starter.vs}` : '(generelle)');
     if (process.env.HOLD_START) {
       console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
@@ -460,7 +470,7 @@ server.listen(0, '127.0.0.1', async () => {
     await wait(2500);
     assert(said().includes('Level op: W'), `stemme ved level op: ${said()}`);
 
-    // Stemme: råd til et forslag + en ny fed modstander
+    // Stemme: råd til et forslag. En ny fed modstander siges IKKE (Riot: ingen power spike-notifikationer)
     live.data.activePlayer.currentGold = 5000;
     await wait(2500);
     assert(/Råd til /.test(said()), `stemme ved råd nu: ${said()}`);
@@ -468,7 +478,7 @@ server.listen(0, '127.0.0.1', async () => {
     const darius = live.data.allPlayers.find((p) => p.championName === 'Darius');
     darius.scores.kills = 10;
     await wait(2500);
-    assert(said().includes('Darius er fed'), `stemme ved ny fed modstander: ${said()}`);
+    assert(!said().includes('er fed'), `ingen stemme om fede modstandere: ${said()}`);
     darius.scores.kills = 2;
     // Stemme fra/til gemmes i config
     assert.strictEqual((await gui('POST', '/api/voice', { enabled: false })).body.enabled, false);
@@ -488,7 +498,7 @@ server.listen(0, '127.0.0.1', async () => {
     await wait(2500);
     lp = (await gui('GET', '/state')).body.plan;
     assert(lp.log[0]?.text === "Zed har købt Serylda's Grudge", `ændringslog: ${JSON.stringify(lp.log)}`);
-    assert(said().includes("Zed har købt Serylda's Grudge"), 'stemme om modstanderens køb');
+    assert(!said().includes('har købt'), `ingen stemme om modstanderens køb (kun ændringsloggen): ${said()}`);
     zed.items.pop();
     console.log('Gameplan lige nu:', lp.now.join(' | '));
 
@@ -508,6 +518,23 @@ server.listen(0, '127.0.0.1', async () => {
     await wait(2500);
     assert(said().includes(`${coreItem.name} færdig - 1 af ${lp.myCore.length} i dit core build`), `stemme ved core-item: ${said()}`);
     meLive.items = keepItems;
+
+    // Stemme-ui) Dit eget level 6 siges én gang; side og Oracle Lens-info (kun for camouflage-champions)
+    const Lside = (await gui('GET', '/state')).body.live;
+    assert.strictEqual(Lside.side, 'BLUE', 'ORDER = blå side');
+    assert.strictEqual(Lside.vision, null, 'ingen Oracle Lens-linje for Ahri');
+    meLive.level = 5;
+    live.data.activePlayer.level = 5;
+    await wait(2500);
+    meLive.level = 6;
+    live.data.activePlayer.level = 6;
+    await wait(2500);
+    assert(said().includes('Level 6 - R'), `stemme ved dit level 6: ${said()}`);
+    meLive.level = 11;
+    live.data.activePlayer.level = 11;
+    await wait(2500);
+    assert.strictEqual(said().split('\n').filter((l) => l.startsWith('Level 6')).length, 1, 'level 6 siges kun én gang');
+    assert(!/Stemmen fejlede/.test(out), 'ingen fejl fra stemmen');
     assert.strictEqual(L.matchup?.name, 'Zed', 'live lane-modstander ud fra position');
     assert(L.matchup.winRate > 0.3, 'live matchup win rate');
     assert(L.enemy.healers.includes('Soraka') && L.enemy.healers.includes('Darius'), 'healere');

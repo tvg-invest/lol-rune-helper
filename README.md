@@ -47,7 +47,7 @@ Læser spillets [Live Client Data API](https://developer.riotgames.com/docs/lol)
   - armor/magic pen når mindst 2 stacker forsvar (eller én stacker meget)
   - op til 2 tilpassede forslag, resten fra buildet; restpris med ejede dele trukket fra + hvilken del du har råd til nu
 - **Scoreboard:** items, KDA, CS, level, item-guld pr. hold og drager/baron/herald/tårne fra kill-feedet.
-- **Modstanderne:** AD/AP-trussel vægtet efter items og kills, hvem der er fed, stacker forsvar eller healer.
+- **Modstanderne:** AD/AP-trussel vægtet efter items og kills, hvem der stacker forsvar eller healer. Spiller du en champion med camouflage/usynlighed (fx Evelynn), står der også hvem der bærer Oracle Lens eller Control Ward (passiv TAB-info, ingen stemme).
 
 Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General Policies](https://developer.riotgames.com/policies/general)) forbyder information spilleren ikke allerede kender og apps der bestemmer spillerens beslutninger, men tillader at fremhæve vigtige beslutninger og give flere valg. Derfor: kun TAB-information, 2-3 begrundede forslag, ingen timere. Bemærk at Riot kræver at produkter registreres i Developer Portal.
 
@@ -61,7 +61,7 @@ Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General 
 
 ## Jungle-ruter og core-stemme
 
-- **Jungle-ruter:** `op.gg/lol/champions/<ddragon-id i små bogstaver>/jungle-paths/jungle` har ruterne som indlejret (escaped) data: `{"team_key":"BLUE|RED","routes":[{"route":[6 camps],"play":N,"rank":N}, ...]}`. Ruterne læses ét objekt ad gangen fra listens start. Top 3 pr. side med andel; caches 6 timer; fejl = intet kort. Vises for JUNGLE i champion select og de første 5 min.
+- **Jungle-ruter:** `op.gg/lol/champions/<ddragon-id i små bogstaver>/jungle-paths/jungle` har ruterne som indlejret (escaped) data: `{"team_key":"BLUE|RED","routes":[{"route":[6 camps],"play":N,"rank":N}, ...]}`. Ruterne læses ét objekt ad gangen fra listens start. Top 3 pr. side med andel, plus hvor de starter (`"rate":{"team_key":..,"blue":..,"red":..,"raptors":..}`, procent); caches 6 timer; fejl = intet kort. Vises for JUNGLE i champion select (begge sider) og de første 5 min (kun din side, fra live-API'ets `team`).
 - **Core-stemme:** når et item fra dit core build (gameplanens eller buildets) bliver færdigt: "<item> færdig - N af M i dit core build". Egen tilstand.
 - **Lane-modstander under kampen:** samme rolle i live-API'et; mangler rollerne, bruges modstanderen fra champion select.
 
@@ -71,22 +71,22 @@ Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General 
 - **Fuldt build** (6 færdige items): ingen almindelige køb; højst 2 begrundede bytninger (det mindst brugte af dine items, støvler beholdes) + elixir efter skadetype (Wrath/Sorcery/Iron).
 - **Unikke passiver:** items der deler et `<passive>`-navn i Data Dragon (Spellblade, Lifeline, Cleave, Manaflow, Annul ...) foreslås ikke oven i hinanden.
 - **Ny patch:** under 20.000 kampe på den nye patch -> OP.GG `?version=<forrige>` bruges (også for matchup-data), vises i vinduet.
-- Ingen notifikationer om modstanderens level 6 / "har ult" (Overwolfs Riot-regler forbyder modstander-power-spike-notifikationer).
+- Ingen notifikationer (stemme/overlay) om modstandernes level 6 / "har ult", færdige items eller "fed" (Overwolfs Riot-regler forbyder modstander-power-spike-notifikationer). Det står kun passivt i hovedvinduet, som på TAB.
 
 ## Gameplan mod lane-modstanderen
 
-- **Fast del** (champion select og kamp): win rate i matchuppet (OP.GG `counters`), lane-fordel / flest solo kills / spillestil + tip-tekst fra OP.GG's offentlige MCP-tjeneste (`https://mcp-api.op.gg/mcp`, værktøj `lol_get_lane_matchup_guide`; navne i UPPER_SNAKE_CASE, kun engelsk; udokumenteret - fejler den, laves planen uden), skalering ud fra begge champions' `game_lengths`, og begges typiske core build.
-- **Live** ("Lige nu"): level og hvem der har ult, item-guld, KDA, core-fremskridt for begge, hans armor/MR/anti-heal/skadetype med items fra DIT build (min. 2% pick rate) der svarer på det.
-- **Ændringer**: hans nye færdige items og level 6 logges med tid og siges højt (`voiceEnemy`).
+- **Fast del** (champion select og kamp): win rate i matchuppet (OP.GG `counters`; under 150 kampe vises den grå med "få kampe"), lane-fordel ("Tidligt i kampen" for junglere) / flest solo kills / spillestil + tip-tekst fra OP.GG's offentlige MCP-tjeneste (`https://mcp-api.op.gg/mcp`, værktøj `lol_get_lane_matchup_guide`; navne i UPPER_SNAKE_CASE, kun engelsk; udokumenteret - fejler den, laves planen uden), skalering ud fra begge champions' `game_lengths`, og begges typiske core build. Spillestil, tip og skalering vises kun i champion select - ikke under kampen.
+- **Live** ("Lige nu", står øverst i kortet under kampen): begges level, item-guld, KDA, core-fremskridt for begge, hans armor/MR/anti-heal/skadetype med items fra DIT build (min. 2% pick rate) der svarer på det.
+- **Ændringer**: hans nye færdige items logges med tid i hovedvinduet - ingen stemme og intet i overlayet.
 - Kun fakta + valg, ingen "engage nu" (Riot: "Apps that dictate player decisions"). Research: `docs/research-tryndamere-evelynn.md`.
 
 ## Stemme og fuldskærm
 
-Ægte fuldskærm (exclusive fullscreen) kan ikke overlejres af andre vinduer; det kræver injektion i spilprocessen, som programmet bevidst ikke gør (Vanguard). Derfor en stemme, der virker uanset vindue: "Råd til <item>" (vigtigste nye forslag), "Level op: Q" og "<champion> er fed" - kun nye hændelser, max én pr. slags hvert 8. sek. Windows: `System.Speech` via PowerShell; macOS: `say`. Til/fra i vinduet (gemmes i `config.json` som `voice`).
+Ægte fuldskærm (exclusive fullscreen) kan ikke overlejres af andre vinduer; det kræver injektion i spilprocessen, som programmet bevidst ikke gør (Vanguard). Derfor en stemme, der virker uanset vindue - kun din egen tilstand: startitems, "Råd til <item>" (vigtigste nye forslag du kan købe uden at sælge/bytte), "Level op: Q", "Level 6 - R" (Evelynn: "Level 6 - camouflage og R") og færdige core-items. Kun nye hændelser, max én pr. slags hvert 8. sek.; en besked der ikke blev sagt, prøves igen. Beskederne siges én ad gangen (kø), og en besked der har ventet over 6 sek., droppes. Windows: `System.Speech` via PowerShell med en dansk stemme (da-DK) hvis der er en; macOS: `say` med en dansk stemme hvis der er en. Den valgte stemme og evt. fejl står i loggen. Til/fra i vinduet (gemmes i `config.json` som `voice`).
 
 ## Overlay
 
-Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozilla.org/en-US/docs/Web/API/Document_Picture-in-Picture_API)-vindue (Chrome/Edge 116+), som altid ligger øverst: guld, de 3 forslag (RÅD NU / mangler X) og hvem der er fed. Bip + blink når et forslag skifter til "råd nu" (kun dit eget guld). Intet injiceres i spillet - det er et almindeligt browservindue, så League skal køre i Borderless.
+Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozilla.org/en-US/docs/Web/API/Document_Picture-in-Picture_API)-vindue (Chrome/Edge 116+), som altid ligger øverst: guld, startitems, de 3 forslag (RÅD NU / mangler X, hvor salgs-/bytteværdien er trukket fra) og din matchup-win rate. Intet om modstandernes items eller "fed". Bip + blink når et forslag skifter til "råd nu" (kun dit eget guld). Mistes forbindelsen til programmet, viser overlayet "Forbindelse tabt" i stedet for gamle tal. Intet injiceres i spillet - det er et almindeligt browservindue, så League skal køre i Borderless.
 
 ## Telefon
 
@@ -100,6 +100,7 @@ Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozi
 | `buildChoice` | `smart` eller `popular` |
 | `setRunes` / `setSpells` / `setItemSet` / `adaptToEnemies` | `true`/`false` |
 | `flashKey` | `keep`, `D` eller `F` |
+| `voice` | Stemme til/fra (kun din egen tilstand) |
 | `openWindow` | Åbn vinduet i browseren ved start |
 | `port` | Port til vinduet (næste ledige bruges hvis optaget) |
 | `pollMs` | Hvor ofte klienten tjekkes |
