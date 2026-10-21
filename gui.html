@@ -213,8 +213,17 @@ function statusLine(s) {
 }
 
 function logCard(s) {
+  const uc = s.updateCheck || {};
+  const checked = uc.at ? new Date(uc.at).toTimeString().slice(0, 5) : null;
+  const status = !checked ? 'ikke tjekket for opdatering endnu'
+    : uc.ok === false ? `opdateringstjek fejlede kl. ${checked}`
+    : s.update ? `ny version ${s.update.version} fundet kl. ${checked}`
+    : `nyeste version (tjekket kl. ${checked})`;
   return el('div', { class: 'card' }, el('details', {}, el('summary', {}, 'Log'), el('pre', { class: 'log' }, s.log.join('\n'))),
-    el('div', { class: 'version' }, `LoL Rune Helper ${s.version || ''}`));
+    el('div', { class: 'version' }, `LoL Rune Helper ${s.version || ''} · ${status} · `,
+      ['127.0.0.1', 'localhost'].includes(location.hostname)
+        ? el('a', { href: '#', onclick: (e) => { e.preventDefault(); e.target.textContent = 'tjekker...'; post('/api/check-update', {}); } }, 'Tjek for opdatering')
+        : null));
 }
 
 function updateBanner(s) {

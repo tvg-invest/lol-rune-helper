@@ -962,7 +962,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.10.0';
+const VERSION = '1.10.1';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -973,17 +973,32 @@ const newer = (a, b) => {
   return false;
 };
 
+// Status for opdateringstjek (vises i vinduet): hvornår og om det lykkedes.
+const updateCheck = { at: 0, ok: null, error: null };
+
+// Tjek igen hvis sidste tjek er mere end `maxAgeMs` gammelt (fx når vinduet åbnes).
+function checkUpdateIfStale(maxAgeMs) {
+  if (app.cfg.autoUpdate && Date.now() - updateCheck.at > maxAgeMs) checkUpdate();
+}
+
 async function checkUpdate() {
+  updateCheck.at = Date.now();
   try {
     const rel = await getJson(UPDATE_URL);
+    updateCheck.ok = true;
+    updateCheck.error = null;
     const latest = String(rel.tag_name || '').replace(/^v/, '');
     const asset = (rel.assets || []).find((a) => a.name === UPDATE_ASSET);
     if (latest && newer(latest, VERSION) && asset) {
       if (app.update?.version !== latest) log(`Ny version ${latest} er klar - klik "Opdater" i vinduet.`);
       app.update = { version: latest, url: asset.browser_download_url, notes: String(rel.body || '').slice(0, 600) };
-      broadcast();
     }
-  } catch {} // ingen udgivelse eller intet net: prøv igen senere
+  } catch (e) {
+    // Ingen udgivelse eller intet net: prøv igen senere (vises i vinduet, så det ikke fejler i stilhed).
+    updateCheck.ok = false;
+    updateCheck.error = e.message;
+  }
+  broadcast();
 }
 
 async function applyUpdate() {
@@ -1639,6 +1654,7 @@ function viewModel() {
     pid: process.pid,
     voice: Boolean(app.cfg.voice),
     update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA },
+    updateCheck: { at: updateCheck.at || null, ok: updateCheck.ok, error: updateCheck.error },
     draft: draftView(),
     plan: planView(),
     jungle: app.jungle && Object.fromEntries(Object.entries(app.jungle).map(([side, routes]) => [side, routes.map((r) => ({
@@ -1851,7 +1867,13 @@ async function handleRequest(req, res, html) {
     res.write(`data: ${JSON.stringify(viewModel())}\n\n`);
     sseClients.add(res);
     req.on('close', () => sseClients.delete(res));
+    // Vinduet åbnes: tjek for ny version, hvis det er mere end 10 min siden sidst.
+    checkUpdateIfStale(10 * 60 * 1000);
     return;
+  }
+  if (req.method === 'POST' && req.url === '/api/check-update') {
+    await checkUpdate();
+    return json(200, { ok: updateCheck.ok, update: app.update?.version || null });
   }
   if (req.method === 'POST' && req.url === '/api/rune') {
     const { index } = await readBody(req);
@@ -2123,6 +2145,8 @@ async function main() {
       const running = await fetch(`http://127.0.0.1:${app.cfg.port}/state`, { signal: AbortSignal.timeout(1500) }).then((r) => r.json());
       if (running && 'ddVersion' in running) {
         console.log('LoL Rune Helper kører allerede - åbner vinduet.');
+        // Bed den kørende kopi om at tjekke for opdatering (ældre versioner svarer 404 - det er ok).
+        fetch(`http://127.0.0.1:${app.cfg.port}/api/check-update`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) }).catch(() => {});
         if (!process.argv.includes('--autostart')) openBrowser(`http://127.0.0.1:${app.cfg.port}`);
         setTimeout(() => process.exit(0), 1500);
         return;
@@ -2148,7 +2172,7 @@ async function main() {
   setInterval(pruneCache, 3600 * 1000);
   if (app.cfg.autoUpdate) {
     checkUpdate();
-    setInterval(checkUpdate, 6 * 3600 * 1000);
+    setInterval(checkUpdate, 3600 * 1000); // hver time
   }
 
   for (;;) {

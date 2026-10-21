@@ -25,10 +25,11 @@ const freePort = () => new Promise((resolve) => { const s = http.createServer().
   const binary = fs.readFileSync(process.env.HELPER_BIN);
 
   let downloads = 0;
+  let tag = 'v0.0.1'; // ingen ny version når programmet starter
   const rel = http.createServer((req, res) => {
     if (req.url === '/latest') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ tag_name: 'v9.9.9', body: 'Testudgivelse', assets: [{ name: ASSET, browser_download_url: `http://127.0.0.1:${rel.address().port}/asset` }] }));
+      return res.end(JSON.stringify({ tag_name: tag, body: 'Testudgivelse', assets: [{ name: ASSET, browser_download_url: `http://127.0.0.1:${rel.address().port}/asset` }] }));
     }
     if (req.url === '/asset') { downloads++; res.writeHead(200); return res.end(binary); }
     res.writeHead(404); res.end();
@@ -48,8 +49,19 @@ const freePort = () => new Promise((resolve) => { const s = http.createServer().
   let newPid = null;
   try {
     let s;
-    for (let i = 0; i < 60 && !(s = await state())?.update; i++) await wait(500);
-    assert.strictEqual(s?.update?.version, '9.9.9', 'ny version fundet');
+    for (let i = 0; i < 60 && !(s = await state())?.updateCheck?.at; i++) await wait(500);
+    assert(s?.updateCheck?.at && !s.update, 'første tjek: ingen ny version');
+    assert.strictEqual(s.updateCheck.ok, true);
+    // Ny version udgives mens programmet kører; du starter programmet igen (anden kopi) ->
+    // den kørende kopi skal selv tjekke og finde den
+    tag = 'v9.9.9';
+    const second = spawn(exe, ['--autostart'], { env, cwd: path.dirname(exe) });
+    await new Promise((r) => second.on('exit', r));
+    for (let i = 0; i < 30 && !(s = await state())?.update; i++) await wait(500);
+    assert.strictEqual(s?.update?.version, '9.9.9', 'ny start får den kørende kopi til at finde den nye version');
+    // Knappen "Tjek for opdatering" virker også
+    const manual = await fetch(`http://127.0.0.1:${port}/api/check-update`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((r) => r.json());
+    assert.deepStrictEqual(manual, { ok: true, update: '9.9.9' });
     assert.strictEqual(s.update.canApply, true);
     assert(out.includes('Ny version 9.9.9'), out);
     const oldPid = s.pid;
