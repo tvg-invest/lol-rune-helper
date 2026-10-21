@@ -192,14 +192,44 @@ async function getJson(url) {
 
 const dd = { version: '', champions: {}, championKeyById: {}, items: {}, runes: {}, spells: {} };
 
+// Sidste hentede Data Dragon-data gemmes på disken, så programmet kan starte uden internet
+// (fx autostart ved Windows-login før netværket er klar).
+const DD_CACHE_FILE = () => path.join(CACHE_DIR, 'ddragon.json');
+
+async function fetchStaticData() {
+  try {
+    const versions = await getJson('https://ddragon.leagueoflegends.com/api/versions.json');
+    const base = `https://ddragon.leagueoflegends.com/cdn/${versions[0]}`;
+    const [champs, items, styles, spells] = await Promise.all(
+      ['champion', 'item', 'runesReforged', 'summoner'].map((f) => getJson(`${base}/data/en_US/${f}.json`)),
+    );
+    const raw = { versions, champs, items, styles, spells };
+    try {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+      fs.writeFileSync(DD_CACHE_FILE(), JSON.stringify(raw));
+    } catch {}
+    return raw;
+  } catch (e) {
+    let raw = null;
+    try { raw = JSON.parse(fs.readFileSync(DD_CACHE_FILE(), 'utf8')); } catch {}
+    if (!raw?.versions?.length || !raw.champs || !raw.items || !raw.styles || !raw.spells) throw e;
+    if (!dd.version) log(`Data Dragon svarer ikke (${e.message}) - bruger gemte data fra patch ${raw.versions[0]}.`);
+    return { ...raw, offline: true };
+  }
+}
+
 async function loadStaticData() {
-  const versions = await getJson('https://ddragon.leagueoflegends.com/api/versions.json');
+  const { versions, champs, items, styles, spells, offline } = await fetchStaticData();
   const [version] = versions;
+  // Alt herunder er synkront: de gamle data skiftes ud på én gang (fjernede items/champions forsvinder også).
+  dd.champions = {};
+  dd.championKeyById = {};
+  dd.items = {};
+  dd.runes = {};
+  dd.spells = {};
+  dd.offline = Boolean(offline);
   dd.versions = versions.slice(0, 10);
   const base = `https://ddragon.leagueoflegends.com/cdn/${version}`;
-  const [champs, items, styles, spells] = await Promise.all(
-    ['champion', 'item', 'runesReforged', 'summoner'].map((f) => getJson(`${base}/data/en_US/${f}.json`)),
-  );
   dd.version = version;
   for (const c of Object.values(champs.data)) {
     dd.champions[c.key] = { key: c.key, id: c.id, name: c.name, tags: c.tags, info: c.info, icon: `${base}/img/champion/${c.image.full}` };
@@ -234,6 +264,32 @@ async function loadStaticData() {
   return version;
 }
 
+// Start: prøv igen med stigende pause, indtil Data Dragon (eller den gemte kopi) kan læses.
+async function loadStaticDataWithRetry() {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await loadStaticData();
+    } catch (e) {
+      const waitS = Math.min(5 * attempt, 60);
+      if (attempt === 1) log(`  ${e.message}`);
+      setStatus(`Venter på internet (Data Dragon svarer ikke) - prøver igen om ${waitS} sek.`);
+      await sleep(waitS * 1000);
+    }
+  }
+}
+
+// Programmet kan køre i dagevis: tjek jævnligt om Data Dragon har en ny patch (og kom online efter en offline-start).
+async function refreshStaticData() {
+  try {
+    const [latest] = await getJson('https://ddragon.leagueoflegends.com/api/versions.json');
+    if (latest === dd.version && !dd.offline) return;
+    const before = dd.version;
+    await loadStaticData();
+    if (dd.version !== before) log(`Data Dragon opdateret: ${before} -> ${dd.version}.`);
+    broadcast();
+  } catch {}
+}
+
 const runeName = (id) => dd.runes[id]?.name || String(id);
 const itemName = (id) => dd.items[id]?.name || String(id);
 const spellName = (id) => dd.spells[id]?.name || String(id);
@@ -248,13 +304,15 @@ const CACHE_DIR = process.env.LOL_HELPER_CACHE || path.join(APP_DIR, 'cache');
 let activeRequests = 0;
 const requestQueue = [];
 async function limited(fn) {
+  // Pladsen overdrages direkte til den næste i køen, så et nyt kald ikke kan snige sig forbi (max 4).
   if (activeRequests >= 4) await new Promise((resolve) => requestQueue.push(resolve));
-  activeRequests++;
+  else activeRequests++;
   try {
     return await fn();
   } finally {
-    activeRequests--;
-    requestQueue.shift()?.();
+    const next = requestQueue.shift();
+    if (next) next();
+    else activeRequests--;
   }
 }
 
@@ -263,6 +321,7 @@ function pruneCache() {
   for (const [key, hit] of buildCache) if (Date.now() - hit.at > CACHE_TTL) buildCache.delete(key);
   try {
     for (const f of fs.readdirSync(CACHE_DIR)) {
+      if (f === 'ddragon.json') continue; // offline-kopien af Data Dragon skal overleve
       const file = path.join(CACHE_DIR, f);
       if (Date.now() - fs.statSync(file).mtimeMs > 24 * 3600 * 1000) fs.rmSync(file, { force: true });
     }
@@ -270,26 +329,47 @@ function pruneCache() {
 }
 
 // Fælles cache for OP.GG-data: hukommelse + fil i cache-mappen, 6 timer.
+// En fejl huskes i 15 sek. (så draften ikke hamrer løs på en OP.GG der fejler), og findes en ældre fil
+// (op til 24 t, se pruneCache), bruges den hellere end ingenting.
+const FAIL_TTL = 15 * 1000;
 function cachedJson(key, loader) {
   const hit = buildCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL) return hit.promise;
   const file = path.join(CACHE_DIR, `${key}.json`);
-  const promise = (async () => {
+  let fileAt = 0;
+  try { fileAt = fs.statSync(file).mtimeMs; } catch {}
+  const fresh = fileAt > 0 && Date.now() - fileAt < CACHE_TTL;
+  // Data fra disken er så gamle som filen - ellers kunne de leve 6 t mere i hukommelsen.
+  const entry = { promise: null, at: fresh ? fileAt : Date.now() };
+  const expireSoon = () => { entry.at = Date.now() - CACHE_TTL + FAIL_TTL; };
+  entry.promise = (async () => {
+    if (fresh) {
+      try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { entry.at = Date.now(); }
+    }
+    let data;
     try {
-      if (Date.now() - fs.statSync(file).mtimeMs < CACHE_TTL) return JSON.parse(fs.readFileSync(file, 'utf8'));
-    } catch {}
-    const data = await limited(loader);
+      data = await limited(loader);
+    } catch (e) {
+      if (fileAt) {
+        try {
+          const stale = JSON.parse(fs.readFileSync(file, 'utf8'));
+          expireSoon(); // prøv nettet igen om lidt
+          return stale;
+        } catch {}
+      }
+      throw e;
+    }
     try {
       fs.mkdirSync(CACHE_DIR, { recursive: true });
       fs.writeFileSync(file, JSON.stringify(data));
     } catch {}
     return data;
-  })().catch((e) => {
-    buildCache.delete(key);
-    throw e;
+  })().catch((err) => {
+    expireSoon();
+    throw err;
   });
-  buildCache.set(key, { promise, at: Date.now() });
-  return promise;
+  buildCache.set(key, entry);
+  return entry.promise;
 }
 
 // I starten af en ny patch har OP.GG næsten ingen kampe (fx 280 i stedet for 80.000).
@@ -297,11 +377,12 @@ function cachedJson(key, loader) {
 const THIN_PATCH_GAMES = 20000;
 
 // Forrige patch ud fra Data Dragons versionsliste: "16.21" -> "16.20".
+// Kun når OP.GG's version er den nyeste i Data Dragon - halter OP.GG bagefter, er dens patch ikke ny.
 function previousPatch(version) {
   const majorMinor = (v) => String(v || '').split('.').slice(0, 2).join('.');
   const current = majorMinor(version);
-  const prev = (dd.versions || []).map(majorMinor).find((v) => v && v !== current && /^\d+\.\d+$/.test(v));
-  return current && prev ? prev : null;
+  const list = [...new Set((dd.versions || []).map(majorMinor).filter((v) => /^\d+\.\d+$/.test(v)))];
+  return current && list[0] === current && list[1] ? list[1] : null;
 }
 
 function fetchBuild(region, mode, championId, position, target) {
@@ -310,14 +391,18 @@ function fetchBuild(region, mode, championId, position, target) {
     const url = `https://lol-api-champion.op.gg/api/${region}/champions/${mode}/${championId}/${position}` +
       (target ? `?target_champion=${target}` : '');
     const j = await getJson(url);
+    // Ukendt format (OP.GG har ændret sig): fejl i stedet for at cache et tomt build i 6 timer.
+    if (!j?.data?.summary || !Array.isArray(j.data.rune_pages || j.data.runes)) throw new Error(`OP.GG: uventet svar fra ${url}`);
     const data = { ...j.data, version: j.meta?.version };
-    const games = data.summary?.average_stats?.play || 0;
-    const prev = games < THIN_PATCH_GAMES ? previousPatch(j.meta?.version) : null;
+    const games = data.summary.average_stats?.play;
+    const prev = typeof games === 'number' && games < THIN_PATCH_GAMES ? previousPatch(j.meta?.version) : null;
     if (prev) {
       try {
         const p = await getJson(`${url}${url.includes('?') ? '&' : '?'}version=${prev}`);
-        const prevGames = p.data?.summary?.average_stats?.play || 0;
-        if (prevGames >= games * 3) return { ...p.data, version: p.meta?.version || prev, newestVersion: j.meta?.version, thinPatch: true };
+        const prevGames = p.data?.summary?.average_stats?.play;
+        if (p.data?.summary && typeof prevGames === 'number' && prevGames > 0 && prevGames >= games * 3) {
+          return { ...p.data, version: p.meta?.version || prev, newestVersion: j.meta?.version, thinPatch: true };
+        }
       } catch {} // forrige patch utilgængelig: brug de tynde data
     }
     return data;
@@ -349,7 +434,10 @@ function fetchMatchupGuide(myKey, oppKey, position) {
     const j = await res.json();
     if (j.error || j.result?.isError) throw new Error(`Matchup-guide: ${JSON.stringify(j.error || j.result.content?.[0]?.text).slice(0, 200)}`);
     const d = JSON.parse(j.result.content[0].text).data || {};
+    // Antal kampe bag guiden (kun hvis OP.GG sender det) - så få kampe ikke vises som en dom.
+    const spells = Array.isArray(d.summoner_spells) ? d.summoner_spells : null;
     return {
+      games: spells ? spells.reduce((s, x) => s + (Number(x?.play) || 0), 0) : null,
       tip: d.opponent_champion_tip || '',
       laneAdvantage: d.lane_advantage_champion || null,
       soloKill: d.lane_solo_kill_advantage_champion || null,
@@ -358,19 +446,50 @@ function fetchMatchupGuide(myKey, oppKey, position) {
   });
 }
 
-// Lane-modstanderen: den modstander der oftest spiller din rolle (OP.GG's rollefordeling).
-async function laneOpponent(cfg, position, enemyIds) {
-  if (!POSITIONS.includes(position) || !enemyIds.length) return null;
-  const rates = await Promise.all(enemyIds.map(async (id) => {
+// Rollefordeling for alle champions i ét kald (OP.GG's champion-liste): id -> { TOP: 0.86, ... }.
+// Mangler en champion i listen (eller fejler den), hentes championens eget build og rollerne læses derfra.
+async function roleRates(cfg, ids) {
+  let all = null;
+  try {
+    all = await cachedJson(`${cfg.region}_roles`, async () => {
+      const j = await getJson(`https://lol-api-champion.op.gg/api/${cfg.region}/champions/ranked`);
+      if (!Array.isArray(j?.data)) throw new Error('OP.GG: uventet champion-liste');
+      return Object.fromEntries(j.data.map((c) => [c.id, Object.fromEntries((c.positions || []).map((p) => [p.name, p.stats?.role_rate || 0]))]));
+    });
+  } catch {}
+  return Object.fromEntries(await Promise.all(ids.map(async (id) => {
+    if (all?.[id]) return [id, all[id]];
     try {
       const probe = await fetchBuild(cfg.region, 'ranked', id, 'MID');
-      return { id, rate: probe.summary?.positions?.find((p) => p.name === position)?.stats?.role_rate || 0 };
+      return [id, Object.fromEntries((probe.summary?.positions || []).map((p) => [p.name, p.stats?.role_rate || 0]))];
     } catch {
-      return { id, rate: 0 };
+      return [id, {}];
     }
-  }));
-  const best = rates.sort((a, b) => b.rate - a.rate)[0];
-  return best && best.rate >= 0.25 ? best.id : null;
+  })));
+}
+
+// Lane-modstanderen (et gæt): OP.GG's rollefordeling for hele modstanderholdet - hver modstander får
+// én rolle, så summen af rollernes andel er størst (en flex-pick tager ikke to roller). Kræver mindst 25%.
+async function laneOpponent(cfg, position, enemyIds) {
+  if (!POSITIONS.includes(position) || !enemyIds.length) return null;
+  const ids = enemyIds.slice(0, 5);
+  const rates = await roleRates(cfg, ids);
+  let best = { score: -1, roles: [] };
+  const assign = (i, roles, score) => {
+    if (i === ids.length) {
+      if (score > best.score) best = { score, roles: [...roles] };
+      return;
+    }
+    for (const pos of POSITIONS) {
+      if (roles.includes(pos)) continue;
+      roles.push(pos);
+      assign(i + 1, roles, score + (rates[ids[i]]?.[pos] || 0));
+      roles.pop();
+    }
+  };
+  assign(0, [], 0);
+  const i = best.roles.indexOf(position);
+  return i !== -1 && (rates[ids[i]]?.[position] || 0) >= 0.25 ? ids[i] : null;
 }
 
 // ---------- Jungle-ruter (OP.GG jungle-paths) ----------
@@ -407,21 +526,36 @@ function fetchJungleRoutes(championKey) {
       signal: AbortSignal.timeout(20000),
     });
     if (!res.ok) throw new Error(`Jungle-ruter: ${res.status}`);
-    return parseJungleRoutes(await res.text());
+    // Ingen ruter på siden: fejl (caches ikke), så der prøves igen senere.
+    const routes = parseJungleRoutes(await res.text());
+    if (!routes) throw Object.assign(new Error(`Jungle-ruter: ingen ruter fundet for ${champ.name}`), { empty: true });
+    return routes;
   });
 }
 
 function ensureJungleRoutes(championKey, position) {
-  if (position !== 'JUNGLE' || app.jungleKey === championKey) return;
+  // Ikke jungle (fx rolle skiftet i vinduet): fjern et gammelt rutekort.
+  if (position !== 'JUNGLE') {
+    if (app.jungleKey || app.jungle) { app.jungle = null; app.jungleKey = null; broadcast(); }
+    return;
+  }
+  if (app.jungleKey === championKey) return;
+  if (app.jungleRetry?.key === championKey && Date.now() < app.jungleRetry.at) return;
   app.jungleKey = championKey;
   app.jungle = null;
   fetchJungleRoutes(championKey)
     .then((routes) => {
       if (app.jungleKey !== championKey) return;
       app.jungle = routes;
+      app.jungleRetry = null;
       broadcast();
     })
-    .catch((e) => log(`  ${e.message}`));
+    .catch((err) => {
+      log(`  ${err.message}`);
+      // Prøv igen senere i samme kamp: om 1 min ved netværksfejl, 10 min hvis siden ingen ruter havde.
+      if (app.jungleKey === championKey) app.jungleKey = null;
+      app.jungleRetry = { key: championKey, at: Date.now() + (err.empty ? 600000 : 60000) };
+    });
 }
 
 // ---------- Gameplan mod din lane-modstander ----------
@@ -433,17 +567,21 @@ const genitive = (name) => (/[sxz]$/i.test(name) ? `${name}'` : `${name}s`);
 const coreOf = (build) => (build?.core_items?.[0]?.ids || []).map(String);
 
 // Hvem skalerer bedst: hvor meget win rate ændrer sig fra korte (<25 min) til lange (40+ min) kampe.
+// OP.GG sender rate: null uden data (fx off-role) - så siges intet.
 function scalingNote(myBuild, oppBuild, oppName) {
   const curve = (b) => {
     const g = b?.game_lengths || [];
-    return g.length >= 2 ? g[g.length - 1].rate - g[0].rate : null;
+    if (g.length < 2) return null;
+    const first = g[0].rate;
+    const last = g[g.length - 1].rate;
+    return typeof first === 'number' && typeof last === 'number' ? last - first : null;
   };
   const mine = curve(myBuild);
   const his = curve(oppBuild);
   if (mine == null || his == null) return null;
-  if (mine - his > 0.02) return `Du skalerer bedre end ${oppName} (din win rate stiger mere jo længere kampen varer).`;
-  if (his - mine > 0.02) return `${oppName} skalerer bedre end dig - din bedste chance i kampen er før 25 min.`;
-  return `I skalerer nogenlunde ens.`;
+  if (mine - his > 0.02) return `Du skalerer bedre end ${oppName} (din win rate stiger mere fra kampe under 25 min til kampe over 40 min).`;
+  if (his - mine > 0.02) return `${oppName} skalerer bedre end dig (${genitive(oppName)} win rate stiger mere fra kampe under 25 min til kampe over 40 min).`;
+  return 'I skalerer nogenlunde ens (win rate i kampe under 25 min mod over 40 min).';
 }
 
 async function buildPlan(myKey, oppKey, position, myBuild) {
@@ -463,16 +601,20 @@ async function buildPlan(myKey, oppKey, position, myBuild) {
     if (x.toLowerCase() === myName.toLowerCase()) return 'dig';
     return x;
   };
+  // Guidens domme (lane-fordel, solo kills, spillestil) kun med nok kampe bag - tippet vises altid.
+  const fewGames = typeof guide?.games === 'number' && guide.games < MATCHUP_MIN_GAMES;
+  if (fewGames) log(`  Matchup-guide mod ${oppName}: kun ${guide.games} kampe - lane-fordel og spillestil vises ikke.`);
   return {
     key: `${myKey}_${oppKey}_${position}`,
+    guideGames: guide?.games ?? null,
     myKey: String(myKey),
     oppKey: String(oppKey),
     opponent: oppName,
     position,
     stats: matchupStats(myBuild, oppKey),
-    laneAdvantage: who(guide?.laneAdvantage),
-    soloKill: who(guide?.soloKill),
-    playStyle: guide?.playStyle ? PLAY_STYLE[guide.playStyle] || guide.playStyle : null,
+    laneAdvantage: fewGames ? null : who(guide?.laneAdvantage),
+    soloKill: fewGames ? null : who(guide?.soloKill),
+    playStyle: !fewGames && guide?.playStyle ? PLAY_STYLE[guide.playStyle] || guide.playStyle : null,
     tip: guide?.tip || null,
     scaling: scalingNote(myBuild, oppBuild, oppName),
     myCore: coreOf(myBuild),
@@ -566,9 +708,22 @@ function matchupStats(build, opponentId) {
   return c && c.play ? { games: c.play, winRate: c.win / c.play } : null;
 }
 
+// Spiltype -> OP.GG-data. Summoner's Rift-typer bruger ranked; ARAM og URF har egne data.
+// Ukendte typer: ranked på Summoner's Rift (map 11), ellers springes de over (null).
+const SR_MODES = ['CLASSIC', 'SWIFTPLAY', 'PRACTICETOOL', 'TUTORIAL'];
+function buildMode(gameMode, mapId) {
+  if (!gameMode || SR_MODES.includes(gameMode)) return 'ranked';
+  if (gameMode === 'ARAM' || mapId === 12) return 'aram';
+  if (gameMode === 'URF' || gameMode === 'ARURF') return 'urf';
+  return mapId === 11 ? 'ranked' : null;
+}
+
 // Finder build for championen. Uden rolle (blind pick) bruges championens hovedrolle.
-async function getBuild(cfg, championId, position, gameMode) {
-  if (gameMode === 'ARAM') return { build: await fetchBuild(cfg.region, 'aram', championId, 'none'), position: 'ARAM' };
+async function getBuild(cfg, championId, position, gameMode, mapId) {
+  const mode = buildMode(gameMode, mapId);
+  if (mode === 'aram') return { build: await fetchBuild(cfg.region, 'aram', championId, 'none'), position: 'ARAM' };
+  if (mode === 'urf') return { build: await fetchBuild(cfg.region, 'urf', championId, 'none'), position: 'URF' };
+  if (!mode) throw new Error(`Spiltypen ${gameMode} har ingen builds hos OP.GG`);
   if (position) return { build: await fetchBuild(cfg.region, 'ranked', championId, position), position };
   const probe = await fetchBuild(cfg.region, 'ranked', championId, 'MID');
   position = probe.summary?.positions?.[0]?.name || 'MID';
@@ -746,15 +901,27 @@ async function applyRunes(client, rune, title) {
     // Har vi lige slettet vores egen side, er der en ledig plads - så skyldes fejlen noget andet
     // (fx runer der ikke passer til en ny patch). Rør aldrig dine egne sider i det tilfælde.
     if (ours) throw e;
-    // Er siderne faktisk fulde? (Kan klienten ikke svare, antager vi det, som før.)
+    // Slet kun en af dine sider, når der er bevis for at siderne er fulde: klientens optælling
+    // eller en fejltekst om max antal sider. Ellers skyldes fejlen noget andet.
     const inventory = await lcu(client, 'GET', '/lol-perks/v1/inventory').catch(() => null);
-    if (typeof inventory?.ownedPageCount === 'number' && editable.length < inventory.ownedPageCount) throw e;
+    const full = typeof inventory?.ownedPageCount === 'number'
+      ? editable.length >= inventory.ownedPageCount
+      : /max|maximum|limit|full|too many/i.test(e.message);
+    if (!full) throw e;
     // Erstat helst en side du ikke bruger lige nu.
     const victim = editable.filter((p) => !p.current).pop() || editable.find((p) => p.current);
     if (!victim) throw e;
     log(`  Alle rune-sider er fulde - erstatter siden "${victim.name}" (sker kun første gang).`);
     await lcu(client, 'DELETE', `/lol-perks/v1/pages/${victim.id}`);
-    await lcu(client, 'POST', '/lol-perks/v1/pages', page);
+    try {
+      await lcu(client, 'POST', '/lol-perks/v1/pages', page);
+    } catch (e2) {
+      // Auto-siden blev afvist alligevel: læg din side tilbage, så intet går tabt.
+      const { name, primaryStyleId, subStyleId, selectedPerkIds } = victim;
+      const restored = await lcu(client, 'POST', '/lol-perks/v1/pages', { name, primaryStyleId, subStyleId, selectedPerkIds, current: Boolean(victim.current) })
+        .then(() => true, () => false);
+      throw new Error(`Auto-siden kunne ikke oprettes (${e2.message}). Din side "${victim.name}" ${restored ? 'er lagt tilbage' : 'kunne ikke lægges tilbage'}.`);
+    }
   }
 }
 
@@ -803,17 +970,10 @@ async function myChampionPool(cfg, position) {
   } catch {}
   // + dine 8 mest spillede fra historikken (ikke alle - det ville give et udbrud af OP.GG-kald).
   const played = new Map();
-  for (const g of history.games) if (g.championId) played.set(g.championId, (played.get(g.championId) || 0) + 1);
+  for (const g of srGames()) if (g.championId) played.set(g.championId, (played.get(g.championId) || 0) + 1);
   for (const [id] of [...played].sort((a, b) => b[1] - a[1]).slice(0, 8)) if (!ids.includes(id)) ids.push(id);
-  const withRole = await Promise.all(ids.map(async (id) => {
-    try {
-      const probe = await fetchBuild(cfg.region, 'ranked', id, 'MID');
-      return { id, rate: probe.summary?.positions?.find((p) => p.name === position)?.stats?.role_rate || 0 };
-    } catch {
-      return { id, rate: 0 };
-    }
-  }));
-  return withRole.filter((x) => x.rate >= 0.2).map((x) => x.id).slice(0, 6);
+  const rates = await roleRates(cfg, ids);
+  return ids.filter((id) => (rates[id]?.[position] || 0) >= 0.2).slice(0, 6);
 }
 
 async function analyzeDraft(cfg, position, enemyIds, unavailable) {
@@ -869,17 +1029,24 @@ function updateDraft(session, me) {
   const unavailable = [
     ...actions.filter((a) => a.type === 'ban' && a.completed && a.championId).map((a) => a.championId),
     ...[...(session.myTeam || []), ...(session.theirTeam || [])].map((m) => m.championId).filter((id) => id > 0),
+    // Holdkammeraters erklærede picks (ikke din egen hover) skal heller ikke foreslås som ban.
+    ...(session.myTeam || []).filter((m) => m.cellId !== session.localPlayerCellId).map((m) => m.championPickIntent).filter((id) => id > 0),
   ];
   const enemyIds = (session.theirTeam || []).map((m) => m.championId).filter((id) => id > 0);
   const myBanTurn = actions.some((a) => a.actorCellId === session.localPlayerCellId && a.type === 'ban' && a.isInProgress);
-  const key = `${position}|${enemyIds.sort().join(',')}|${unavailable.sort().join(',')}`;
+  const key = `${position}|${enemyIds.sort().join(',')}|${[...new Set(unavailable)].sort().join(',')}`;
+  const banChanged = app.draftBanTurn !== myBanTurn;
+  app.draftBanTurn = myBanTurn;
   if (app.draft) app.draft.myBanTurn = myBanTurn;
-  if (key === app.draftKey) return;
+  if (key === app.draftKey) {
+    if (banChanged && app.draft) broadcast(); // din tur til at banne: vis det med det samme
+    return;
+  }
   app.draftKey = key;
   analyzeDraft(app.cfg, position, enemyIds, unavailable)
     .then((d) => {
       if (app.draftKey !== key) return;
-      app.draft = { ...d, myBanTurn };
+      app.draft = { ...d, myBanTurn: app.draftBanTurn };
       broadcast();
     })
     .catch((e) => log(`Draft-hjælp fejlede: ${e.message}`));
@@ -888,6 +1055,8 @@ function updateDraft(session, me) {
 // ---------- Kampoversigt og historik ----------
 
 const HISTORY_FILE = process.env.LOL_HELPER_HISTORY || path.join(APP_DIR, 'history.json');
+// Statistik og champion-pulje bygger kun på Summoner's Rift-kampe (ældre poster uden spiltype tæller med).
+const srGames = () => history.games.filter((g) => !g.gameMode || ['CLASSIC', 'SWIFTPLAY'].includes(g.gameMode));
 const history = (() => {
   try {
     const games = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')).games;
@@ -916,6 +1085,8 @@ function trackGame(data, L) {
     if (isCompleted(dd.items[id])) g.buys.push({ id, t, suggested: g.seen.has(id), adapted: g.adapted.has(id) });
   }
   g.lastItems = [...L.me.itemIds];
+  g.gameMode = data.gameData?.gameMode || g.gameMode || null;
+  g.mapNumber = data.gameData?.mapNumber || g.mapNumber || null;
   // GameEnd-eventet har (efter Riots eksempler) et Result-felt; findes det ikke, er resultatet ukendt.
   const end = (data.events?.Events || []).find((e) => e.EventName === 'GameEnd');
   if (end?.Result) g.result = /win/i.test(end.Result) ? 'Sejr' : 'Nederlag';
@@ -938,12 +1109,16 @@ function finishGame() {
   app.game = null;
   clearPick();
   if (!g?.last || g.last.gameTime < 300) return; // remakes og afbrudte kampe tæller ikke
+  if (['PRACTICETOOL', 'TUTORIAL'].includes(g.gameMode)) return log('Træningskamp - gemmes ikke i historikken.');
   const L = g.last;
   const minutes = L.gameTime / 60;
   const summary = {
     date: new Date().toISOString(),
     championId: Number(L.me.champ?.key) || null,
     champion: L.me.champ?.name || '?',
+    gameMode: g.gameMode || null,
+    mapNumber: g.mapNumber || null,
+    account: L.me.key || null,
     position: LIVE_POSITION[L.me.position] || L.me.position || '',
     result: g.result,
     duration: Math.round(L.gameTime),
@@ -1093,6 +1268,7 @@ function livePlayer(p) {
     champ,
     team: p.team,
     position: p.position || '',
+    hasSmite: Object.values(p.summonerSpells || {}).some((s) => /smite/i.test(`${s?.rawDisplayName || ''} ${s?.displayName || ''}`)),
     level: p.level || 1,
     kills: s.kills || 0,
     deaths: s.deaths || 0,
@@ -1254,7 +1430,11 @@ function analyzeLive(data, build) {
 
   // Lane-modstander: samme rolle i live-API'et; mangler rollerne, så den der blev fundet i champion select.
   const knownOpp = app.plan?.oppKey || (app.rec?.matchup?.id != null ? String(app.rec.matchup.id) : null);
+  // Jungle uden roller i live-API'et: den eneste modstander med Smite.
+  const smiters = enemies.filter((p) => p.hasSmite);
+  const iJungle = me.position === 'JUNGLE' || (!me.position && me.hasSmite);
   const opponent = (me.position && enemies.find((p) => p.position === me.position))
+    || (iJungle && smiters.length === 1 ? smiters[0] : null)
     || (knownOpp && enemies.find((p) => String(p.champ?.key) === knownOpp))
     || null;
   // Gameplanen (og dens matchup-build) gælder kun hvis den er mod den samme modstander.
@@ -1515,16 +1695,18 @@ async function updateLive(data) {
   if (!champ) { app.live = null; return; }
 
   // Genbrug buildet fra champion select; ellers hent det (fx hvis programmet startes midt i kampen).
-  if (app.liveBuild?.championKey !== champ.key) {
+  // Fejlede hentningen, prøves der igen hvert halve minut.
+  if (app.liveBuild?.championKey !== champ.key || (!app.liveBuild.build && Date.now() >= app.liveBuild.retryAt)) {
     let build = null;
     if (app.build && app.pick?.championId === Number(champ.key)) build = app.build.build;
     else {
-      const aram = data.gameData?.gameMode === 'ARAM';
       try {
-        build = (await getBuild(app.cfg, Number(champ.key), aram ? null : LIVE_POSITION[meRaw.position] || null, aram ? 'ARAM' : 'CLASSIC')).build;
-      } catch (e) { log(`Kunne ikke hente build til live-forslag: ${e.message}`); }
+        build = (await getBuild(app.cfg, Number(champ.key), LIVE_POSITION[meRaw.position] || null, data.gameData?.gameMode, data.gameData?.mapNumber)).build;
+      } catch (e) {
+        if (app.liveBuild?.championKey !== champ.key) log(`Kunne ikke hente build til live-forslag (prøver igen): ${e.message}`);
+      }
     }
-    app.liveBuild = { championKey: champ.key, build };
+    app.liveBuild = { championKey: champ.key, build, retryAt: Date.now() + 30000 };
   }
   const first = !app.live;
   app.live = analyzeLive(data, app.liveBuild.build);
@@ -1548,6 +1730,7 @@ async function liveLoop() {
     try {
       data = await liveGet('/liveclientdata/allgamedata');
       gone = 0;
+      if (app.reconnecting) { app.reconnecting = false; log('Spillet er tilbage - fortsætter samme kamp.'); }
     } catch (e) {
       // Kun "porten er lukket" eller 404 betyder at spillet er væk; en timeout er bare et hak.
       if (e.code === 'ECONNREFUSED' || e.status === 404) gone++;
@@ -1561,7 +1744,14 @@ async function liveLoop() {
         log(`Fejl i live-data: ${e.message}`); // fejl i vores egen behandling afslutter ikke kampen
       }
     }
-    if (app.live && gone >= 2) {
+    // Spillet er væk. Men står klienten stadig "i kamp" (crash/genforbindelse) og er GameEnd ikke set,
+    // er kampen ikke slut: behold køb, gameplan og stemme til spillet er tilbage.
+    const phase = app.live && gone >= 2 && app.client && !app.game?.result
+      ? await lcu(app.client, 'GET', '/lol-gameflow/v1/gameflow-phase').catch(() => null) : null;
+    if (app.live && gone >= 2 && ['InProgress', 'Reconnect', 'GameStart'].includes(phase)) {
+      if (!app.reconnecting) { app.reconnecting = true; log('Spillet svarer ikke - venter på at du genforbinder.'); }
+    } else if (app.live && gone >= 2) {
+      app.reconnecting = false;
       app.live = null;
       app.liveBuild = null;
       app.voice = null;
@@ -1596,6 +1786,12 @@ const app = {
   jungleKey: null,
   draft: null,         // ban/counterpick-forslag før du låser
   draftKey: null,
+  draftBanTurn: false, // din tur til at banne lige nu
+  pickRetry: null,     // { pickKey, n, at } når buildet ikke kunne hentes - næste forsøg
+  pickStatus: null,    // status efter sidste champion select-anvendelse
+  jungleRetry: null,   // { key, at } når jungle-ruterne fejlede
+  reconnecting: false, // spillet er væk, men klienten er stadig i kamp (crash/genforbindelse)
+  shapesLogged: false, // klientens dataformat er gemt (lcu-shapes.json)
   game: null,          // køb og forslag i den igangværende kamp (til kampoversigten)
   update: null,        // { version, url, notes } hvis en nyere version findes
   server: null,
@@ -1715,7 +1911,7 @@ function draftView() {
 }
 
 function historyView() {
-  const games = history.games;
+  const games = srGames();
   if (!games.length) return null;
   const item = (id) => ({ id, name: itemName(id), icon: dd.items[id]?.icon });
   // Pr. champion: kampe, sejre (hvor kendt), gennemsnitlig KDA og hvor ofte du fulgte forslagene.
@@ -1998,6 +2194,7 @@ async function handleRequest(req, res, html) {
     if (position !== null && !POSITIONS.includes(position)) return json(400, { error: 'Ukendt rolle' });
     app.roleOverride = position;
     app.applied.pickKey = null; // løkken anvender igen med ny rolle
+    app.pickRetry = null;
     log(position ? `Rolle sat manuelt til ${position}.` : 'Rolle: automatisk.');
     return json(200, { ok: true });
   }
@@ -2097,35 +2294,83 @@ async function applyItems() {
   if (cfg.setItemSet) log(`  Item set "${PREFIX}${titleFor()}" ligger i butikken i spillet.`);
 }
 
+// Runer/summoners venter højst så længe på lane-modstanderen; kommer den senere, opdateres bagefter.
+const MATCHUP_WAIT_MS = 1500;
+const PENDING = Symbol('pending');
+
 async function handlePick(pick, pickKey, itemKey) {
   const { cfg } = app;
   const fullApply = pickKey !== app.applied.pickKey;
   app.pick = pick;
   const champName = dd.champions[pick.championId]?.name || `Champion ${pick.championId}`;
-  if (pick.gameMode === 'CHERRY') {
+  if (pick.gameMode === 'CHERRY' || !buildMode(pick.gameMode, pick.mapId)) {
     app.applied = { pickKey, itemKey };
-    return log(`${champName}: Arena har ingen runer - springer over.`);
+    app.pickStatus = 'Champion select - ingen builds til denne spiltype.';
+    return log(pick.gameMode === 'CHERRY'
+      ? `${champName}: Arena har ingen runer - springer over.`
+      : `${champName}: spiltypen ${pick.gameMode} har ingen builds hos OP.GG - springer over.`);
   }
 
-  // Sæt nøglerne først, så en fejl ikke giver en uendelig gentagelse (rolle-knappen i vinduet prøver igen).
-  app.applied = { pickKey, itemKey };
   if (fullApply) {
     app.build = null;
     app.rec = null;
     app.runeIndex = 0;
     app.appliedSpells = null;
     app.appliedPerks = null;
+    app.plan = null; // gameplanen fra en anden champion/rolle må ikke blive stående
+    app.planKey = null;
     const position = app.roleOverride || POSITION_MAP[pick.assignedPosition];
-    app.build = await getBuild(cfg, pick.championId, position, pick.gameMode);
+    try {
+      app.build = await getBuild(cfg, pick.championId, position, pick.gameMode, pick.mapId);
+    } catch (e) {
+      // Nøglerne sættes først når buildet er hentet: løkken prøver igen med stigende pause (15 sek. -> 1 min).
+      const n = app.pickRetry?.pickKey === pickKey ? app.pickRetry.n + 1 : 1;
+      const waitS = Math.min(15 * n, 60);
+      app.pickRetry = { pickKey, n, at: Date.now() + waitS * 1000 };
+      app.applied = { pickKey: null, itemKey: null };
+      app.pickStatus = `Champion select - kunne ikke hente build fra OP.GG, prøver igen om ${waitS} sek.`;
+      log(`Kunne ikke hente build til ${champName}: ${e.message}`);
+      return;
+    }
   }
   if (!app.build) return;
+  app.applied = { pickKey, itemKey };
+  app.pickRetry = null;
+  const build = app.build;
+  const matchupP = findMatchup(pick, build);
+  const matchup = fullApply ? await Promise.race([matchupP, sleep(MATCHUP_WAIT_MS).then(() => PENDING)]) : await matchupP;
+  if (matchup === PENDING) {
+    // OP.GG er langsom: sæt runer/summoners/item set nu, og skift til matchup-data når de kommer
+    // (runerne kun hvis auto-siden er urørt - samme vej som når modstanderholdet ændrer sig).
+    await applyRec(pick, null, true);
+    matchupP
+      .then((m) => m && serial(() => {
+        if (app.build !== build || app.applied.itemKey !== itemKey) return;
+        return applyRec(pick, m, false);
+      }))
+      .then(() => broadcast(), (e) => log(`Fejl: ${e.message}`));
+  } else {
+    await applyRec(pick, matchup, fullApply);
+  }
+  app.pickStatus = 'Champion select - build sat.';
+}
+
+// Anbefaling ud fra buildet + (evt.) lane-modstanderen, og sæt runer, summoners og item set.
+// Hvert trin har sin egen fejlhåndtering, så en afvist rune-side ikke også koster spells og item set.
+async function applyRec(pick, matchup, fullApply) {
+  const { cfg } = app;
+  const champName = dd.champions[pick.championId]?.name || `Champion ${pick.championId}`;
+  const step = async (what, fn) => {
+    try { await fn(); } catch (e) { log(`Fejl (${what}): ${e.message}`); }
+  };
   const prevMatchup = app.rec?.matchup?.id ?? null;
-  app.rec = recommend(app.build.build, cfg, pick.enemyIds, await findMatchup(pick));
+  app.rec = recommend(app.build.build, cfg, pick.enemyIds, matchup);
   const matchupChanged = (app.rec.matchup?.id ?? null) !== prevMatchup;
   // Rune-valgene kan være omrokeret (matchup-side først) - peg på den side der faktisk er sat.
   if (app.appliedPerks) app.runeIndex = app.rec.runeOptions.findIndex((r) => perkKey(r) === app.appliedPerks);
   // Gameplan mod lane-modstanderen og jungle-ruter (i baggrunden - runer/items venter ikke på dem).
   if (app.rec.matchup) ensurePlan(pick.championId, app.rec.matchup.id, app.build.position, app.build.build);
+  else { app.plan = null; app.planKey = null; }
   ensureJungleRoutes(String(pick.championId), app.build.position);
 
   if (fullApply) {
@@ -2133,10 +2378,12 @@ async function handlePick(pick, pickKey, itemKey) {
     log(`${champName} (${app.build.position}) - patch ${app.build.build.version || '?'}` +
       (app.build.build.thinPatch ? ` (${app.build.build.newestVersion} har for få kampe endnu)` : '') +
       (stats ? `, ${stats.play.toLocaleString('da-DK')} kampe, ${pct(stats.winRate)} WR (${stats.scope})` : ''));
-    if (cfg.setRunes && app.rec.runeOptions.length) await applyRuneChoice(0);
+    if (cfg.setRunes && app.rec.runeOptions.length) await step('runer', () => applyRuneChoice(0));
     if (cfg.setSpells && app.rec.spells) {
-      app.appliedSpells = await applySpells(app.client, cfg, pick.me, app.rec.spells);
-      log(`  Summoners: ${spellName(app.appliedSpells[0])} (D) + ${spellName(app.appliedSpells[1])} (F)`);
+      await step('summoners', async () => {
+        app.appliedSpells = await applySpells(app.client, cfg, pick.me, app.rec.spells);
+        log(`  Summoners: ${spellName(app.appliedSpells[0])} (D) + ${spellName(app.appliedSpells[1])} (F)`);
+      });
     }
     if (app.rec.skills.start.length) log(`  Skills: start ${app.rec.skills.start.join(' > ')}, max ${app.rec.skills.max.join(' > ')}`);
   } else {
@@ -2146,15 +2393,17 @@ async function handlePick(pick, pickKey, itemKey) {
     const top = app.rec.runeOptions[0];
     if (cfg.setRunes && top?.matchup && app.appliedPerks && perkKey(top) !== app.appliedPerks) {
       // Matchup-runer kun hvis du ikke selv har ændret auto-siden.
-      if (await autoPageUntouched()) {
-        await applyRuneChoice(0);
-        log(`  Runer skiftet til matchuppet mod ${top.matchup}.`);
-      } else {
-        log(`  Du har selv ændret rune-siden - matchup-runerne mod ${top.matchup} ligger som fane i vinduet.`);
-      }
+      await step('runer', async () => {
+        if (await autoPageUntouched()) {
+          await applyRuneChoice(0);
+          log(`  Runer skiftet til matchuppet mod ${top.matchup}.`);
+        } else {
+          log(`  Du har selv ændret rune-siden - matchup-runerne mod ${top.matchup} ligger som fane i vinduet.`);
+        }
+      });
     }
   }
-  await applyItems();
+  await step('item set', applyItems);
 }
 
 async function autoPageUntouched() {
@@ -2166,17 +2415,60 @@ async function autoPageUntouched() {
   }
 }
 
-async function findMatchup(pick) {
-  if (pick.gameMode === 'ARAM' || !POSITIONS.includes(app.build.position)) return null;
-  const id = app.opponentOverride ?? await laneOpponent(app.cfg, app.build.position, pick.enemyIds);
+// b = buildet da opslaget startede (app.build kan skifte undervejs, fx ved rolleskift).
+async function findMatchup(pick, b = app.build) {
+  if (!b || !POSITIONS.includes(b.position)) return null; // ARAM/URF har ingen lane-modstander
+  const id = app.opponentOverride ?? await laneOpponent(app.cfg, b.position, pick.enemyIds);
   if (!id) return null;
   let build = null;
   try {
-    build = await fetchBuild(app.cfg.region, 'ranked', pick.championId, app.build.position, id);
+    build = await fetchBuild(app.cfg.region, 'ranked', pick.championId, b.position, id);
   } catch (e) {
     log(`  Kunne ikke hente matchup-data: ${e.message}`);
   }
-  return { id, build, stats: matchupStats(app.build.build, id), manual: app.opponentOverride != null };
+  return { id, build, stats: matchupStats(b.build, id), manual: app.opponentOverride != null };
+}
+
+// Første rigtige champion select: gem formen af klientens svar (felter og typer - ingen navne eller id'er
+// på spillere) i lcu-shapes.json, så programmets antagelser om LCU-felterne kan tjekkes bagefter.
+// Kun én gang: slet filen for at få en ny.
+const SHAPES_FILE = process.env.LOL_HELPER_SHAPES || path.join(APP_DIR, 'lcu-shapes.json');
+const SHAPE_VALUES = new Set(['type', 'assignedPosition', 'gameMode', 'phase', 'position', 'cellId', 'actorCellId', 'localPlayerCellId',
+  'championId', 'championPickIntent', 'spell1Id', 'spell2Id', 'ownedPageCount', 'mapId', 'id', 'isDeletable', 'current',
+  'completed', 'isInProgress', 'isEditable', 'isActive', 'isValid']);
+function shapeOf(v, key, depth = 0) {
+  if (Array.isArray(v)) {
+    const seen = new Map();
+    for (const x of v.slice(0, 5)) { const s = shapeOf(x, key, depth + 1); seen.set(JSON.stringify(s), s); }
+    return [...seen.values(), `(${v.length} stk.)`];
+  }
+  if (v && typeof v === 'object') {
+    return depth > 6 ? 'object' : Object.fromEntries(Object.entries(v).map(([k, x]) => [k, shapeOf(x, k, depth + 1)]));
+  }
+  if (v === null || v === undefined) return null;
+  return SHAPE_VALUES.has(key) && typeof v !== 'string' ? v : SHAPE_VALUES.has(key) && String(v).length <= 20 ? v : typeof v;
+}
+
+async function logLcuShapes(session) {
+  if (app.shapesLogged || (process.env.LOL_HELPER_LCU && !process.env.LOL_HELPER_SHAPES)) return; // ikke mod testklienten
+  app.shapesLogged = true;
+  if (fs.existsSync(SHAPES_FILE)) return;
+  const get = (p) => lcu(app.client, 'GET', p).catch((err) => ({ fejl: err.status || err.message }));
+  const summoner = await get('/lol-summoner/v1/current-summoner');
+  const out = {
+    version: VERSION,
+    champSelect: session,
+    gameflow: await get('/lol-gameflow/v1/session'),
+    pages: await get('/lol-perks/v1/pages'),
+    inventory: await get('/lol-perks/v1/inventory'),
+    currentpage: await get('/lol-perks/v1/currentpage'),
+    summoner,
+    itemSets: summoner?.summonerId ? await get(`/lol-item-sets/v1/item-sets/${summoner.summonerId}/sets`) : null,
+  };
+  try {
+    fs.writeFileSync(SHAPES_FILE, JSON.stringify({ date: new Date().toISOString(), ...shapeOf(out) }, null, 1));
+    log(`Klientens dataformat gemt i ${path.basename(SHAPES_FILE)} (kun felter og typer).`);
+  } catch {}
 }
 
 async function tick() {
@@ -2193,6 +2485,8 @@ async function tick() {
       app.roleOverride = null;
       app.opponentOverride = null;
     }
+    app.pickRetry = null;
+    app.pickStatus = null;
     app.prefetched = null;
     if (app.draft || app.draftKey) { app.draft = null; app.draftKey = null; }
     // Tilbage i lobbyen uden kamp (fx dodge): vis ikke den gamle champion select.
@@ -2206,25 +2500,40 @@ async function tick() {
   if (!(me?.championId > 0) || pickPending) {
     setStatus('Champion select - venter på at du låser en champion.');
     if (me) updateDraft(session, me);
-    // Hent buildet allerede mens du hover, så runerne sættes i samme sekund du låser.
+    // Hent buildet allerede mens du hover, så runerne sættes i samme sekund du låser
+    // (og matchup-buildet, når lane-modstanderen er kendt fra draften).
     const hover = me?.championId || me?.championPickIntent;
-    if (hover > 0 && hover !== app.prefetched) {
-      app.prefetched = hover;
-      getBuild(cfg, hover, app.roleOverride || POSITION_MAP[me.assignedPosition], 'CLASSIC').catch(() => {});
+    const hoverPos = app.roleOverride || POSITION_MAP[me?.assignedPosition];
+    const hoverOpp = app.draft?.opponent;
+    const prefetch = `${hover}|${hoverOpp || ''}`;
+    if (hover > 0 && prefetch !== app.prefetched) {
+      app.prefetched = prefetch;
+      getBuild(cfg, hover, hoverPos, 'CLASSIC').catch(() => {});
+      if (hoverOpp && POSITIONS.includes(hoverPos)) fetchBuild(cfg.region, 'ranked', hover, hoverPos, hoverOpp).catch(() => {});
     }
     return cfg.pollMs;
   }
-  setStatus('Champion select - build sat.');
   const enemyIds = (session.theirTeam || []).map((m) => m.championId).filter((id) => id > 0).sort((a, b) => a - b);
   const pickKey = `${me.championId}:${me.assignedPosition}:${app.roleOverride || ''}`;
   const itemKey = `${pickKey}|${enemyIds.join(',')}|${app.opponentOverride ?? ''}`;
-  if (pickKey !== app.applied.pickKey || itemKey !== app.applied.itemKey) {
-    const gameMode = pickKey === app.applied.pickKey && app.pick ? app.pick.gameMode
-      : await lcu(app.client, 'GET', '/lol-gameflow/v1/session').then(
-        (f) => f?.gameData?.queue?.gameMode || f?.map?.gameMode || 'CLASSIC', () => 'CLASSIC');
-    await serial(() => handlePick({ championId: me.championId, assignedPosition: me.assignedPosition, gameMode, me, enemyIds }, pickKey, itemKey));
+  // Fejlede buildet sidst, ventes der lidt før næste forsøg (handlePick sætter pausen).
+  const retryWait = app.pickRetry?.pickKey === pickKey && Date.now() < app.pickRetry.at;
+  if ((pickKey !== app.applied.pickKey || itemKey !== app.applied.itemKey) && !retryWait) {
+    let gameMode = app.pick?.gameMode;
+    let mapId = app.pick?.mapId;
+    if (pickKey !== app.applied.pickKey || !app.pick) {
+      setStatus('Champion select - henter build...');
+      // Svarer klienten ikke, prøves igen næste gang i stedet for at gætte på Summoner's Rift.
+      const flow = await lcu(app.client, 'GET', '/lol-gameflow/v1/session').catch(() => null);
+      if (!flow) return cfg.pollMs;
+      gameMode = flow.gameData?.queue?.gameMode || flow.map?.gameMode || 'CLASSIC';
+      mapId = flow.map?.id ?? flow.gameData?.queue?.mapId;
+    }
+    await serial(() => handlePick({ championId: me.championId, assignedPosition: me.assignedPosition, gameMode, mapId, me, enemyIds }, pickKey, itemKey));
     broadcast();
+    logLcuShapes(session).catch(() => {});
   }
+  setStatus(app.pickStatus || 'Champion select - build sat.');
   return cfg.pollMs;
 }
 
@@ -2258,8 +2567,7 @@ async function main() {
   }
 
   log(`LoL Rune Helper ${VERSION} starter...`);
-  const ddVersion = await loadStaticData();
-  log(`Data Dragon ${ddVersion} hentet. Builds fra OP.GG (${app.cfg.region}, ${app.cfg.buildChoice}).`);
+  // Vinduet startes før Data Dragon, så det kan vise "Venter på internet" i stedet for at programmet lukker.
   setupRemote(app.cfg);
   const port = await startWindowServer(app.cfg.port);
   const url = `http://127.0.0.1:${port}`;
@@ -2270,6 +2578,9 @@ async function main() {
   }
   setAllowedHosts(port);
   if (app.cfg.openWindow) openBrowser(url);
+  const ddVersion = await loadStaticDataWithRetry();
+  log(`Data Dragon ${ddVersion} hentet. Builds fra OP.GG (${app.cfg.region}, ${app.cfg.buildChoice}).`);
+  setInterval(refreshStaticData, 15 * 60 * 1000); // ny patch / tilbage fra offline
   if (app.cfg.liveAdvice) liveLoop();
   pruneCache();
   setInterval(pruneCache, 3600 * 1000);

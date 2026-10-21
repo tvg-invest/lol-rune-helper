@@ -26,11 +26,17 @@ const state = {
 
 const session = () => ({
   localPlayerCellId: 2,
-  myTeam: [{ cellId: 2, championId: state.championId, assignedPosition: 'middle', spell1Id: 14, spell2Id: 4 }],
+  myTeam: [
+    { cellId: 2, championId: state.championId, assignedPosition: 'middle', spell1Id: 14, spell2Id: 4 },
+    // Robusthed: en holdkammerat der har erklæret sit pick (championPickIntent)
+    ...(state.mateIntent ? [{ cellId: 1, championId: 0, championPickIntent: state.mateIntent, assignedPosition: 'top', spell1Id: 4, spell2Id: 12 }] : []),
+  ],
   theirTeam: state.enemies.map((championId, i) => ({ cellId: 5 + i, championId })),
   actions: [
     [{ actorCellId: 2, type: 'ban', completed: state.banDone, isInProgress: !state.banDone, championId: state.banDone ? 157 : 0 }],
     [{ actorCellId: 2, type: 'pick', completed: state.pickCompleted, championId: state.championId }],
+    // Robusthed: en ekstra ban-tur der starter uden at noget andet ændrer sig
+    ...(state.secondBan ? [[{ actorCellId: 2, type: 'ban', completed: false, isInProgress: true, championId: 0 }]] : []),
   ],
 });
 // Mastery: Ahri, LeBlanc, Syndra (mid) + Lee Sin (jungle, skal filtreres fra til MID)
@@ -89,6 +95,8 @@ const mcpServer = http.createServer((req, res) => {
       lane_advantage_champion: a.opponent_champion === 'ZED' ? 'Zed' : 'EVEN',
       lane_solo_kill_advantage_champion: 'EVEN',
       recommended_play_style: 'defensive',
+      // Robusthed: mod Jhin har guiden kun 13 kampe bag sig
+      ...(a.opponent_champion === 'JHIN' ? { summoner_spells: [{ ids: [4, 14], play: 12 }, { ids: [4, 12], play: 1 }] } : {}),
     };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify({ data }) }] } }));
@@ -168,6 +176,28 @@ const count = (method) => calls.filter((c) => c.method === method).length;
 const runePosts = () => calls.filter((c) => c.method === 'POST' && c.url === '/lol-perks/v1/pages').length;
 const autoSet = () => state.itemSets.itemSets.find((s) => s.title.startsWith('Auto: '));
 const autoPage = () => state.pages.find((p) => p.name.startsWith('Auto: '));
+// Læs vinduets SSE-strøm, indtil en besked opfylder pred (eller tiden løber ud).
+async function sseUntil(base, pred, ms) {
+  const ctrl = new AbortController();
+  const res = await fetch(base + '/events', { signal: ctrl.signal });
+  const reader = res.body.getReader();
+  let buf = '';
+  let found = null;
+  const end = Date.now() + ms;
+  try {
+    while (!found && Date.now() < end) {
+      const r = await Promise.race([reader.read(), wait(end - Date.now()).then(() => null)]);
+      if (!r || r.done) break;
+      buf += Buffer.from(r.value).toString();
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const m of parts) {
+        try { const s = JSON.parse(m.replace(/^data: /, '')); if (pred(s)) { found = s; break; } } catch {}
+      }
+    }
+  } finally { ctrl.abort(); }
+  return found;
+}
 
 liveServer.listen(0, '127.0.0.1');
 mcpServer.listen(0, '127.0.0.1');
@@ -195,6 +225,7 @@ server.listen(0, '127.0.0.1', async () => {
     HOME: tmp,
     LOL_HELPER_CACHE: path.join(tmp, 'cache'),
     LOL_HELPER_HISTORY: path.join(tmp, 'history.json'),
+    LOL_HELPER_SHAPES: path.join(tmp, 'lcu-shapes.json'),
     LOL_HELPER_UPDATE_URL: 'http://127.0.0.1:9/ingen-opdatering',
     LOL_HELPER_LCU: `http:${port}:${PASSWORD}`,
     LOL_HELPER_LIVE: `http:${livePort}`,
@@ -217,6 +248,8 @@ server.listen(0, '127.0.0.1', async () => {
     await waitFor(() => out.includes('venter på champion select'), 20000, 'forbindelse');
     const page = await gui('GET', '/');
     assert(page.body.includes('LoL Rune Helper'), 'vinduet serveres');
+    // Robusthed: Data Dragon gemt på disken (start uden internet bruger den)
+    assert(fs.existsSync(path.join(env.LOL_HELPER_CACHE, 'ddragon.json')), 'Data Dragon gemt til offline-start');
 
     // 0) Draft: din tur til at banne -> ban-forslag ud fra din pulje; Zed vælges -> counterpicks
     state.phase = 'ChampSelect';
@@ -239,6 +272,26 @@ server.listen(0, '127.0.0.1', async () => {
     assert(d.poolVs.length >= 1 && d.counters.length >= 1, `counterpicks: ${JSON.stringify({ poolVs: d.poolVs.length, counters: d.counters.length })}`);
     assert(!d.bans.some((b) => b.name === 'Zed'), 'valgte champions foreslås ikke som ban');
     console.log('Mod Zed:', d.poolVs.map((x) => `${x.name} ${(x.winRate * 100).toFixed(1)}%`).join(', '), '| counters:', d.counters.map((x) => `${x.name} ${(x.winRate * 100).toFixed(1)}%`).join(', '));
+    assert(fs.existsSync(path.join(env.LOL_HELPER_CACHE, 'GLOBAL_roles.json')), 'rollefordeling hentet i ét kald');
+
+    // 0-robust a) En holdkammerats erklærede pick foreslås ikke som ban
+    if (d.bans.length) {
+      const mateBan = d.bans[0];
+      state.mateIntent = mateBan.id;
+      for (let i = 0; i < 40 && (d = (await gui('GET', '/state')).body.draft)?.bans?.some((b) => b.id === mateBan.id); i++) await wait(500);
+      assert(!d.bans.some((b) => b.id === mateBan.id), `holdkammeratens pick (${mateBan.name}) foreslås ikke som ban`);
+      state.mateIntent = 0;
+    }
+    // 0-robust b) Ny ban-tur uden andre ændringer -> vinduet får besked med det samme (SSE), ikke først ved næste ændring
+    {
+      const base = /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
+      await wait(2000); // lad draften falde til ro
+      const seen = sseUntil(base, (s) => s.draft?.myBanTurn === true, 6000);
+      await wait(300);
+      state.secondBan = true;
+      assert(await seen, 'din tur til at banne vises straks i vinduet');
+      state.secondBan = false;
+    }
     if (process.env.HOLD_DRAFT) {
       console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
       await wait(Number(process.env.HOLD_DRAFT));
@@ -267,6 +320,11 @@ server.listen(0, '127.0.0.1', async () => {
     assert(state.itemSets.itemSets.some((s) => s.title === 'Mit eget set'), 'brugerens eget set bevaret');
     assert.deepStrictEqual(autoSet().associatedChampions, [103]);
     assert.strictEqual(count('PUT'), 1, 'kun anvendt én gang');
+    // Robusthed: klientens dataformat gemt én gang (felter og typer, ingen navne)
+    await waitFor(() => fs.existsSync(env.LOL_HELPER_SHAPES), 10000, 'lcu-shapes.json');
+    const shapes = JSON.parse(fs.readFileSync(env.LOL_HELPER_SHAPES, 'utf8'));
+    assert(shapes.champSelect?.actions && shapes.champSelect.myTeam?.[0]?.cellId === 2, `LCU-format: ${JSON.stringify(shapes).slice(0, 300)}`);
+    assert(Array.isArray(shapes.pages) && shapes.itemSets, 'rune-sider og item sets med i formatet');
 
     // 3) Modstanderne vælger et AD-tungt hold med healing -> items opdateres, Zed gættes som lane-modstander,
     //    og runerne skiftes kun til matchup-siden (auto-siden er urørt)
@@ -341,6 +399,11 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(st.matchup.manual, true);
     for (let i = 0; i < 40 && (await gui('GET', '/state')).body.plan?.opponent?.name !== 'Jhin'; i++) await wait(500);
     assert.strictEqual((await gui('GET', '/state')).body.plan?.opponent?.name, 'Jhin', 'gameplan følger manuelt valgt modstander');
+    // Robusthed: guiden mod Jhin har kun 13 kampe -> ingen lane-fordel/spillestil, men tippet vises
+    const jhinPlan = (await gui('GET', '/state')).body.plan;
+    assert.strictEqual(jhinPlan.laneAdvantage, null, 'ingen lane-fordel på 13 kampe');
+    assert.strictEqual(jhinPlan.playStyle, null, 'ingen spillestil på 13 kampe');
+    assert(jhinPlan.tip?.startsWith('Testtip'), 'tippet vises stadig');
     assert.strictEqual(runePosts(), postsBeforeManual, 'din egen rune-side overskrives ikke');
     const putsAuto = count('PUT');
     await gui('POST', '/api/opponent', { championId: null });
@@ -396,6 +459,14 @@ server.listen(0, '127.0.0.1', async () => {
     assert(Math.abs(jg.BLUE[0].share - 0.6) < 0.001, `andel: ${jg.BLUE[0].share}`);
     assert.strictEqual(jg.BLUE.length, 3);
     assert.strictEqual(jg.RED[0].games, 500);
+    // 5c) Robusthed: rolle tilbage til MID -> rutekortet forsvinder
+    const putsMid = count('PUT');
+    assert.strictEqual((await gui('POST', '/api/role', { position: 'MID' })).status, 200);
+    await waitFor(() => count('PUT') > putsMid, 20000, 'anvend efter rolle MID');
+    let stMid;
+    for (let i = 0; i < 40 && ((stMid = (await gui('GET', '/state')).body).position !== 'MID' || stMid.jungle); i++) await wait(500);
+    assert.strictEqual(stMid.position, 'MID');
+    assert.strictEqual(stMid.jungle, null, 'ingen jungle-ruter efter skift væk fra JUNGLE');
 
     // 6) Næste kamp: auto-siden genbruges, ingen ekstra item sets, rolle-override nulstilles
     state.phase = 'Lobby';
@@ -604,6 +675,23 @@ server.listen(0, '127.0.0.1', async () => {
     assert(!out.includes('Kampen er slut.'), 'et hak afslutter ikke kampen');
     assert((await gui('GET', '/state')).body.live, 'stadig live efter hak');
 
+    // 7c3) Robusthed: spillet crasher (porten svarer ikke), men klienten er stadig i kamp (Reconnect)
+    //      -> kampen er ikke slut; spillet kommer tilbage og samme kamp fortsætter
+    {
+      const keep = live.data;
+      state.phase = 'Reconnect';
+      live.data = null;
+      await waitFor(() => out.includes('venter på at du genforbinder'), 15000, 'genforbindelse');
+      await wait(3000);
+      assert(!out.includes('Kampen er slut.'), 'crash/genforbindelse afslutter ikke kampen');
+      live.data = keep;
+      state.phase = 'InProgress';
+      await waitFor(() => out.includes('Spillet er tilbage'), 15000, 'spillet tilbage');
+      await wait(2500);
+      assert((await gui('GET', '/state')).body.live, 'live igen efter genforbindelse');
+      assert(!out.includes('Kampen er slut.'), 'stadig samme kamp');
+    }
+
     // 7d) Du køber Zhonya's (var foreslået + tilpasset mod Zed), og kampen vindes
     setMyItems([1056, 3020, 3157]);
     await wait(2500);
@@ -649,6 +737,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert(g, 'kampoversigt');
     assert.strictEqual(g.champion, 'Ahri');
     assert.strictEqual(g.result, 'Sejr', 'resultat fra GameEnd');
+    assert.strictEqual(g.gameMode, 'CLASSIC', 'spiltype gemt i historikken');
     // (7e/7f gav dig også nogle items, så der er flere køb - Zhonya's fra 7d skal være foreslået og tilpasset)
     assert(g.buys.some((b) => b.id === '3157' && b.suggested && b.adapted), `Zhonya-køb markeret som foreslået/tilpasset: ${JSON.stringify(g.buys)}`);
     assert(g.buys.every((b) => isFinite(b.t) && b.id), 'køb har tid og item');

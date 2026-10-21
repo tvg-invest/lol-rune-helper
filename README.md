@@ -12,28 +12,31 @@ Hent den færdige zip (ingen installation nødvendig), pak ud, og start programm
 
 Når du har **låst** en champion:
 
-- **Runer:** laver en rune-side `Auto: <Champion> <ROLLE>` og gør den aktiv. Samme side genbruges hver gang. Har du ingen ledige sider, erstattes din aktive side én gang.
+- **Runer:** laver en rune-side `Auto: <Champion> <ROLLE>` og gør den aktiv. Samme side genbruges hver gang. Har du ingen ledige sider (klienten melder fulde sider), erstattes én af dine egne sider én gang - helst en du ikke har aktiv. Afviser klienten alligevel auto-siden, lægges din side tilbage.
 - **Valg af build (`buildChoice: smart`):** højeste win rate blandt muligheder med mindst 25% af den mest spilledes kampe (og mindst 100 kampe). `popular` = mest spillede.
 - **Summoners:** de mest spillede. Flash bliver på den tast, du havde den på.
 - **Item set:** start-items + skill-rækkefølge, core build, "Mod deres hold", støvler, alternativer, situationelle items. Dine egne item sets røres ikke.
 - **Mod deres hold:** når modstanderne har valgt, analyseres holdet (AD/AP-fordeling fra Data Dragon, kendte healere, tanks/supports som CC). Der foreslås anti-heal, armor eller magic resist - men **kun items som din champion faktisk bygger** ifølge OP.GG - og Plated Steelcaps / Mercury's Treads hvis championen bruger dem. Kun item set'et opdateres; runerne røres ikke igen.
 - **Vindue** (`http://127.0.0.1:3399`, kun lokalt): vælg mellem 3 rune-sider, tving en rolle, se analysen af modstanderholdet og en log.
 
-Rolle: tildelt rolle i draft/ranked, ellers championens hovedrolle. ARAM har egne data. Arena springes over.
+Rolle: tildelt rolle i draft/ranked, ellers championens hovedrolle. ARAM og URF har egne data. Arena og ukendte spiltyper uden for Summoner's Rift springes over.
 
 ## Draft, kampoversigt og opdateringer
 
 - **Draft (før du låser):** din pulje = top-15 mastery (`/lol-champion-mastery/v1/local-player/champion-mastery`) + champions fra `history.json`, filtreret på rollen (OP.GG role_rate >= 20%). Ban-forslag = champions som puljen i snit taber til (OP.GG `counters`, min. 200 kampe). Når lane-modstanderen er valgt: puljen sorteret efter win rate mod den + de 3 stærkeste counters (min. 500 kampe). Valgte/bannede champions foreslås ikke.
-- **Kampoversigt:** færdige items du køber registreres med tid og om de var blandt forslagene (og tilpassede). Resultat fra live-API'ens `GameEnd`-event (`Result`), ellers ukendt. Gemmes i `history.json` (max 100); kampe under 5 min tæller ikke.
+- **Kampoversigt:** færdige items du køber registreres med tid og om de var blandt forslagene (og tilpassede). Resultat fra live-API'ens `GameEnd`-event (`Result`), ellers ukendt. Gemmes i `history.json` (max 100) med spiltype, map og konto; kampe under 5 min og Practice Tool tæller ikke. Statistikken og draft-puljen bruger kun Summoner's Rift-kampe.
+- **Kampen er slut** når spillets port lukker og klienten ikke længere er "i kamp" (eller `GameEnd` er set). Crasher spillet og du genforbinder, fortsætter samme kamp (køb, gameplan og stemme bevares).
 - **Opdateringer:** tjekker `https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest` ved start og hver 6. time. Asset `LoL-Rune-Helper.exe` / `LoL-Rune-Helper-mac`. "Opdater nu" henter filen, erstatter programmet (Windows: den kørende .exe omdøbes til .old) og genstarter med `--updated`. Udgiv med `bash scripts/build.sh && bash scripts/release.sh "noter"` efter at have hævet `VERSION`.
-- Tests: `node test/fake-lcu.test.js` (alt) og `HELPER_BIN=... node test/update.test.js` (selv-opdatering mod falsk udgivelse).
+- Tests: `node test/fake-lcu.test.js` (alt), `node test/robust.test.js` (uden net: forrige patch, skalering, OP.GG-kø, spiltyper) og `HELPER_BIN=... node test/update.test.js` (selv-opdatering mod falsk udgivelse).
 
 ## Matchup, hastighed og autostart
 
-- **Lane-modstander:** den modstander hvis OP.GG-rollefordeling passer bedst til din rolle (min. 25%), eller den du klikker på i vinduet. Under kampen: samme `position` i live-API'en.
+- **Lane-modstander:** et gæt ud fra OP.GG's rollefordeling (`/api/<region>/champions/ranked`, ét kald for alle champions): hver modstander får én rolle, så summen af rollernes andel er størst; modstanderen på din rolle bruges med min. 25%. Eller den du klikker på i vinduet. Under kampen: samme `position` i live-API'en; mangler den og spiller du jungle, den eneste modstander med Smite.
 - **Matchup-data:** `?target_champion=<id>` på OP.GG giver runer/items kun fra kampe mod den champion. Bruges kun med mindst 150 kampe: "Mod X"-rune-side først og start-items. Win rate mod modstanderen fra `counters`.
 - **Din side er din:** når modstanderen kendes efter du har låst, skiftes runerne kun hvis den aktive side stadig er programmets urørte auto-side (`/lol-perks/v1/currentpage`).
-- **Hurtigt:** buildet hentes mens du hover; OP.GG-svar caches i hukommelsen og i `cache/` i 6 timer.
+- **Hurtigt:** buildet (og matchup-buildet, når draften kender modstanderen) hentes mens du hover. Runer og summoners venter højst 1,5 sek. på matchup-opslaget; kommer det senere, skiftes til matchup-runerne hvis auto-siden er urørt. OP.GG-svar caches i hukommelsen og i `cache/` i 6 timer (regnet fra filens alder); en fejl huskes i 15 sek., og uden net bruges en ældre fil (op til 24 t).
+- **Fejl og offline:** kan buildet ikke hentes, prøves igen efter 15, 30, 45 og derefter hvert 60. sek. Runer, summoners og item set sættes hver for sig, så én fejl ikke stopper resten. Data Dragon gemmes i `cache/ddragon.json`: uden internet ved start bruges den gemte kopi, ellers venter programmet (vinduet viser status). Ny patch i Data Dragon hentes automatisk (tjek hvert 15. min).
+- **Klientens dataformat:** første rigtige champion select gemmer formen af klientens svar (felter og typer, ingen navne) i `lcu-shapes.json` ved siden af programmet, så antagelserne om LCU-felterne kan tjekkes. Slet filen for at få en ny.
 - **Én kopi:** startes programmet igen, åbner det bare det kørende vindue.
 - **Autostart:** knap i vinduet. Windows: genvej i Start-mappen (minimeret). macOS: LaunchAgent `~/Library/LaunchAgents/dk.tvginvest.lolrunehelper.plist`. Starter med `--autostart` (åbner ikke browseren).
 
@@ -70,12 +73,12 @@ Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General 
 - **Pladser:** live-API'ens `slot` (0-5 = inventory). Nyt item uden ejede dele og ingen ledig plads -> "sælg Doran's/Dark Seal/Cull" (Dark Seal beholdes hvis Mejai's er i buildet); ingen "råd nu til delen" uden plads.
 - **Fuldt build** (6 færdige items): ingen almindelige køb; højst 2 begrundede bytninger (det mindst brugte af dine items, støvler beholdes) + elixir efter skadetype (Wrath/Sorcery/Iron).
 - **Unikke passiver:** items der deler et `<passive>`-navn i Data Dragon (Spellblade, Lifeline, Cleave, Manaflow, Annul ...) foreslås ikke oven i hinanden.
-- **Ny patch:** under 20.000 kampe på den nye patch -> OP.GG `?version=<forrige>` bruges (også for matchup-data), vises i vinduet.
+- **Ny patch:** er OP.GG's patch den nyeste i Data Dragon og har under 20.000 kampe -> OP.GG `?version=<forrige>` bruges hvis den har mindst 3x så mange kampe (også for matchup-data), vises i vinduet. Halter OP.GG efter Data Dragon, bruges OP.GG's patch som den er.
 - Ingen notifikationer om modstanderens level 6 / "har ult" (Overwolfs Riot-regler forbyder modstander-power-spike-notifikationer).
 
 ## Gameplan mod lane-modstanderen
 
-- **Fast del** (champion select og kamp): win rate i matchuppet (OP.GG `counters`), lane-fordel / flest solo kills / spillestil + tip-tekst fra OP.GG's offentlige MCP-tjeneste (`https://mcp-api.op.gg/mcp`, værktøj `lol_get_lane_matchup_guide`; navne i UPPER_SNAKE_CASE, kun engelsk; udokumenteret - fejler den, laves planen uden), skalering ud fra begge champions' `game_lengths`, og begges typiske core build.
+- **Fast del** (champion select og kamp): win rate i matchuppet (OP.GG `counters`), lane-fordel / flest solo kills / spillestil + tip-tekst fra OP.GG's offentlige MCP-tjeneste (`https://mcp-api.op.gg/mcp`, værktøj `lol_get_lane_matchup_guide`; navne i UPPER_SNAKE_CASE, kun engelsk; udokumenteret - fejler den, laves planen uden; sender den antal kampe (`summoner_spells[].play`) under 150, vises kun tippet), skalering ud fra begge champions' `game_lengths`, og begges typiske core build.
 - **Live** ("Lige nu"): level og hvem der har ult, item-guld, KDA, core-fremskridt for begge, hans armor/MR/anti-heal/skadetype med items fra DIT build (min. 2% pick rate) der svarer på det.
 - **Ændringer**: hans nye færdige items og level 6 logges med tid og siges højt (`voiceEnemy`).
 - Kun fakta + valg, ingen "engage nu" (Riot: "Apps that dictate player decisions"). Research: `docs/research-tryndamere-evelynn.md`.
