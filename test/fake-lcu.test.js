@@ -253,8 +253,9 @@ server.listen(0, '127.0.0.1', async () => {
     // Robusthed: Data Dragon gemt på disken (start uden internet bruger den)
     assert(fs.existsSync(path.join(env.LOL_HELPER_CACHE, 'ddragon.json')), 'Data Dragon gemt til offline-start');
     // Stemme/overlay/policy: overlayet viser intet om modstandernes items eller "fed", QR-scriptet har SRI-hash
-    assert(!page.body.includes("'Fed: '") && !page.body.includes('plan.log[0]'), 'overlay uden modstander-notifikationer');
-    assert(!page.body.includes('fedtag'), 'ingen FED-mærke på scoreboardet');
+    // enemyAlerts (standard til): overlayet kan vise "Fed:" og modstanderens seneste køb, scoreboardet FED-mærke
+    assert(page.body.includes("'Fed: '") && page.body.includes('plan.log[0]'), 'overlay med modstander-notifikationer');
+    assert(page.body.includes('fedtag'), 'FED-mærke på scoreboardet');
     assert(/sc\.integrity = 'sha384-/.test(page.body), 'QR-script med SRI');
     assert(page.body.includes('function morph('), 'vinduet opdateres uden at blive bygget forfra');
     const st0 = (await gui('GET', '/state')).body;
@@ -543,7 +544,7 @@ server.listen(0, '127.0.0.1', async () => {
     await wait(2500);
     assert(said().includes('Level op: W'), `stemme ved level op: ${said()}`);
 
-    // Stemme: råd til et forslag. En ny fed modstander siges IKKE (Riot: ingen power spike-notifikationer)
+    // Stemme: råd til et forslag + en ny fed modstander (enemyAlerts)
     live.data.activePlayer.currentGold = 5000;
     await wait(2500);
     assert(/Råd til /.test(said()), `stemme ved råd nu: ${said()}`);
@@ -551,7 +552,7 @@ server.listen(0, '127.0.0.1', async () => {
     const darius = live.data.allPlayers.find((p) => p.championName === 'Darius');
     darius.scores.kills = 10;
     await wait(2500);
-    assert(!said().includes('er fed'), `ingen stemme om fede modstandere: ${said()}`);
+    assert(said().includes('Darius er fed'), `stemme ved ny fed modstander: ${said()}`);
     darius.scores.kills = 2;
     // Stemme fra/til gemmes i config
     assert.strictEqual((await gui('POST', '/api/voice', { enabled: false })).body.enabled, false);
@@ -571,7 +572,7 @@ server.listen(0, '127.0.0.1', async () => {
     await wait(2500);
     lp = (await gui('GET', '/state')).body.plan;
     assert(lp.log[0]?.text === "Zed har købt Serylda's Grudge", `ændringslog: ${JSON.stringify(lp.log)}`);
-    assert(!said().includes('har købt'), `ingen stemme om modstanderens køb (kun ændringsloggen): ${said()}`);
+    assert(said().includes("Zed har købt Serylda's Grudge"), `stemme om modstanderens køb: ${said()}`);
     zed.items.pop();
     console.log('Gameplan lige nu:', lp.now.join(' | '));
 
@@ -616,7 +617,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert(L.advice.length >= 2 && L.advice.length <= 3, `2-3 forslag: ${L.advice.length}`);
     for (const a of L.advice) assert(a.reasons.length && a.cost > 0, 'forslag har begrundelse og pris');
     assert(!L.advice.some((a) => ['1056', '3020', String(zhonyaPart)].includes(a.id)), 'foreslår ikke noget jeg ejer');
-    assert(L.advice.some((a) => a.reasons.some((r) => r.startsWith('Zed: 9/1/3,'))), 'reagerer på Zed (KDA + skadetype som fakta)');
+    assert(L.advice.some((a) => a.reasons.some((r) => r.startsWith('Zed er fed (9/1/3) og laver AD-skade'))), 'reagerer på fed Zed');
     assert(L.advice.some((a) => a.reasons.some((r) => r.startsWith('Anti-heal'))), 'anti-heal mod Soraka/Darius');
     assert(L.advice.some((a) => !a.adapted), 'mindst ét fast build-item med');
     const zh = L.advice.find((a) => a.id === '3157');
@@ -625,11 +626,9 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(zh.inProgress, items[String(zhonyaPart)].gold.total >= 700, "Zhonya's er 'i gang' med en dyr del");
     if (zh.inProgress) assert.strictEqual(L.advice[0].id, '3157', "item du er i gang med står først");
     console.log('Live-forslag:', JSON.stringify(L.advice.map((a) => ({ item: a.name, cost: a.cost, råd: a.canAfford, del: a.part?.name, hvorfor: a.reasons }))));
-    // Riot-regler: forslag der kun skyldes modstandernes tilstand er "quiet" (ingen stemme/bip/blink) og har
-    // ingen overlay-begrundelse; ingen overlay-begrundelse nævner modstandernes KDA eller trussel.
+    // enemyAlerts (standard til): forslag drevet af modstanderne giver stemme/bip og vises med begrundelse i overlayet
     const antiheal = L.advice.filter((a) => a.reasons.length && a.reasons.every((r) => r.startsWith('Anti-heal')));
-    assert(antiheal.length >= 1 && antiheal.every((a) => a.quiet && a.overlayReason === null), `anti-heal-forslag er quiet: ${JSON.stringify(antiheal)}`);
-    assert(!L.advice.some((a) => a.overlayReason && /Zed:|trussel|Anti-heal|bygger (armor|magic)/.test(a.overlayReason)), `overlay uden modstander-tilstand: ${JSON.stringify(L.advice.map((a) => a.overlayReason))}`);
+    assert(antiheal.length >= 1 && antiheal.every((a) => !a.quiet && a.overlayReason && a.overlayReason.startsWith('Anti-heal')), `anti-heal-forslag med overlay-begrundelse: ${JSON.stringify(antiheal)}`);
     // Byggerækkefølge: ingen færdige items endnu (kun støvler) -> "Typisk 1. item"
     assert(L.advice.some((a) => a.reasons.some((r) => r.startsWith('Typisk 1. item'))), 'næste item i byggerækkefølgen');
     // Control Ward-påmindelse: 20 min, 1.400 g, plads og ingen ward

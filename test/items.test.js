@@ -132,12 +132,17 @@ const eve = {
     assert(pen && !pen.includes(prof.name), `ingen Profane Hydra ved Ravenous: ${pen}`);
   }
 
-  // 13) Begrundelser er fakta (ingen "er fed"), og salg/bytte er muligheder
+  // 13) "X er fed" med enemyAlerts (standard), kun fakta uden
   const fedZed = { champ: { name: 'Zed' }, kills: 9, deaths: 1, assists: 3, dmg: { ad: 0.9, ap: 0.1 } };
   const armorBuild = { core_items: [], last_items: [{ ids: [3157], play: 500, win: 250, pick_rate: 0.3 }], boots: [] };
-  const fedAdv = H.liveAdvice(armorBuild, meWith([]), { ...noEnemy, fed: [fedZed] }, 5000, 11);
-  const r = fedAdv.find((a) => a.id === '3157')?.reasons || [];
-  assert(r.some((x) => x.startsWith('Zed: 9/1/3')) && !r.some((x) => /er fed/.test(x)), `fakta-begrundelse: ${r}`);
+  const fedReasons = () => H.liveAdvice(armorBuild, meWith([]), { ...noEnemy, fed: [fedZed] }, 5000, 11).find((a) => a.id === '3157')?.reasons || [];
+  let r = fedReasons();
+  assert(r.some((x) => x.startsWith('Zed er fed (9/1/3) og laver AD-skade')), `enemyAlerts-begrundelse: ${r}`);
+  const savedCfg = H.app.cfg;
+  H.app.cfg = { ...savedCfg, enemyAlerts: false };
+  r = fedReasons();
+  assert(r.some((x) => x.startsWith('Zed: 9/1/3')) && !r.some((x) => /er fed/.test(x)), `fakta-begrundelse uden enemyAlerts: ${r}`);
+  H.app.cfg = savedCfg;
   // Svag grund (kun AD-andel) giver ingen tilpasset plads
   const share = H.liveAdvice(armorBuild, meWith([]), { ...noEnemy, adShare: 0.8 }, 5000, 11).find((a) => a.id === '3157');
   assert(share && !share.adapted, 'AD-andel alene er ikke en tilpasset grund');

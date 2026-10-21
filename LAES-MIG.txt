@@ -145,6 +145,8 @@ INDSTILLINGER (config.json ved siden af programmet)
 - region: GLOBAL (flest kampe), EUW, EUNE, NA, KR ...
 - buildChoice: "smart" (højeste win rate blandt populære builds) eller "popular"
 - setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice / voice: true eller false
+- enemyAlerts: true = stemme/overlay om lane-modstanderens køb og level 6, "X er fed",
+  FED-mærker og "har ult" (forbudt efter Overwolfs Riot-regler); false = slået fra
 - flashKey: "keep", "D" eller "F"
 - openWindow: false hvis browservinduet ikke skal åbne ved start
 - remoteAccess: true = vinduet kan åbnes fra telefonen (via Tailscale)

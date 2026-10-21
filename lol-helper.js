@@ -32,7 +32,10 @@ const DEFAULT_CONFIG = {
   setItemSet: true,
   adaptToEnemies: true,   // tilpas items/støvler til modstanderholdet
   liveAdvice: true,       // købsforslag + scoreboard under kampen
-  voice: true,            // sig "Råd til ...", "Level op: Q", "Level 6" og færdige core-items højt - kun din egen tilstand (virker også i ægte fuldskærm)
+  voice: true,            // sig "Råd til ...", "Level op: Q", "Level 6" og færdige core-items højt (virker også i ægte fuldskærm)
+  // Notifikationer om modstanderne: stemme/overlay når lane-modstanderen køber et item eller når level 6, "X er fed",
+  // "har ult" og FED-mærket. OBS: Overwolfs regler for Riot-spil forbyder notifikationer om modstanderes power spikes.
+  enemyAlerts: true,
   openWindow: true,       // åbn vinduet i browseren ved start
   remoteAccess: false,    // true = vinduet kan åbnes fra telefonen via Tailscale med en hemmelig nøgle
   remoteLan: false,       // true = også via wifi/LAN (ukrypteret HTTP - nøglen kan aflyttes på delte netværk)
@@ -715,18 +718,19 @@ function trackOpponent(L) {
   const opp = L.matchup?.player;
   if (!plan || !opp || String(opp.champ?.key) !== plan.oppKey) return;
   const completed = opp.itemIds.filter((id) => isCompleted(dd.items[id]));
-  const add = (text) => {
+  const add = (kind, text) => {
     plan.log.unshift({ t: L.gameTime, text });
     plan.log.length = Math.min(plan.log.length, 12);
+    if (app.cfg.enemyAlerts && app.cfg.voice) speak(kind, text);
   };
   if (plan.seen) {
     const before = [...plan.seen.items];
     for (const id of completed) {
       const i = before.indexOf(id);
       if (i !== -1) before.splice(i, 1);
-      else add(`${plan.opponent} har købt ${itemName(id)}`);
+      else add('opp-item', `${plan.opponent} har købt ${itemName(id)}`);
     }
-    // Bevidst ingen besked når han når level 6: Riot/Overwolf forbyder notifikationer om modstanderens power spikes.
+    if (app.cfg.enemyAlerts && plan.seen.level < 6 && opp.level >= 6) add('opp-level', `${plan.opponent} er level 6`);
   }
   plan.seen = { items: completed, level: opp.level };
 }
@@ -739,8 +743,13 @@ function planNow(plan, L) {
   const n = plan.opponent;
   const num = (x) => Math.round(x).toLocaleString('da-DK');
   const lines = [];
-  // Kun levels (står på TAB) - ingen "han har ult"-fortolkning (modstanderens power spikes må ikke fremhæves).
-  lines.push(`Level: dig ${me.level}, ${n} ${opp.level}`);
+  // Levels (står på TAB); med enemyAlerts også hvem der har ult.
+  let lvl = `Level: dig ${me.level}, ${n} ${opp.level}`;
+  if (app.cfg.enemyAlerts) {
+    if (me.level >= 6 && opp.level < 6) lvl += ` - du har ult, ${n} har ikke endnu`;
+    else if (opp.level >= 6 && me.level < 6) lvl += ` - ${n} har ult, du har ikke endnu`;
+  }
+  lines.push(lvl);
   const diff = me.itemGold - opp.itemGold;
   lines.push(`Items: dig ${num(me.itemGold)} g, ${n} ${num(opp.itemGold)} g (${diff >= 0 ? '+' : ''}${num(diff)} til dig)`);
   lines.push(`KDA: dig ${me.kills}/${me.deaths}/${me.assists}, ${n} ${opp.kills}/${opp.deaths}/${opp.assists}`);
@@ -1217,7 +1226,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.13.0';
+const VERSION = '1.14.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -1809,9 +1818,12 @@ function liveAdvice(build, me, enemy, gold, mapNumber, ctx = {}) {
     if (it.tags.includes('MagicPenetration') && !iAmAD && enemy.mrHeavy) { score += 35; strong = true; enemyReason(`${names(enemy.mrStackers)} bygger magic resist`); }
     const fedAD = enemy.fed.find((p) => p.dmg.ad >= 0.6);
     const fedAP = enemy.fed.find((p) => p.dmg.ap >= 0.6);
-    // Fakta fra TAB (KDA + skadetype ud fra items), ingen konklusion.
-    if (it.tags.includes('Armor') && fedAD) { score += 30; strong = true; enemyReason(`${fedAD.champ?.name || fedAD.name}: ${kda(fedAD)}, ${pct(fedAD.dmg.ad)} AD-skade`); }
-    if (it.tags.includes('SpellBlock') && fedAP) { score += 30; strong = true; enemyReason(`${fedAP.champ?.name || fedAP.name}: ${kda(fedAP)}, ${pct(fedAP.dmg.ap)} AP-skade`); }
+    // Med enemyAlerts: "X er fed (KDA) og laver AD-skade"; ellers kun fakta fra TAB (KDA + skadetype ud fra items).
+    const fedText = (p, kind) => (app.cfg.enemyAlerts
+      ? `${p.champ?.name || p.name} er fed (${kda(p)}) og laver ${kind}-skade`
+      : `${p.champ?.name || p.name}: ${kda(p)}, ${pct(kind === 'AD' ? p.dmg.ad : p.dmg.ap)} ${kind}-skade`);
+    if (it.tags.includes('Armor') && fedAD) { score += 30; strong = true; enemyReason(fedText(fedAD, 'AD')); }
+    if (it.tags.includes('SpellBlock') && fedAP) { score += 30; strong = true; enemyReason(fedText(fedAP, 'AP')); }
     if (it.tags.includes('Armor') && enemy.adShare >= 0.65) { score += 15; enemyReason(`${pct(enemy.adShare)} af deres trussel er AD`); }
     if (it.tags.includes('SpellBlock') && enemy.apShare >= 0.55) { score += 15; enemyReason(`${pct(enemy.apShare)} af deres trussel er AP`); }
     if (vs) { score += Math.min(30, 15 * vs.ratio); strong = true; reasons.push(`Bygges oftere mod ${ctx.oppName} (${pct(vs.vs)} mod ${pct(vs.general)} generelt)`); }
@@ -1849,7 +1861,8 @@ function liveAdvice(build, me, enemy, gold, mapNumber, ctx = {}) {
     const part = cost > budget && freeSlots > 0 && !full ? affordablePart(id, owned, gold) : null;
     // Til overlay/stemme: første begrundelse om dit eget build (ikke om modstanderne). Findes ingen, er forslaget
     // der kun pga. modstandernes tilstand -> "quiet": ingen stemme, bip, blink eller overlay-begrundelse.
-    const ownReasons = reasons.filter((r) => !enemyTexts.has(r) && !r.startsWith('Fuldt build') && !r.startsWith('Kræver en ledig plads'));
+    // Med enemyAlerts tæller modstander-begrundelserne med (overlay, stemme, bip) som før.
+    const ownReasons = reasons.filter((r) => (app.cfg.enemyAlerts || !enemyTexts.has(r)) && !r.startsWith('Fuldt build') && !r.startsWith('Kræver en ledig plads'));
     const overlayReason = ownReasons.find((r) => !r.startsWith('Du er i gang')) || null;
     const quiet = ownReasons.length === 0;
     scored.push({ id, score, reasons, cost, canAfford: cost <= budget, part, adapted, inProgress, used, sell, swap, nextShare: share, overlayReason, quiet });
@@ -1986,10 +1999,16 @@ function announce(L) {
       speak('start', `Start: ${st.items.map((i) => `${i.count > 1 ? `${i.count} ` : ''}${itemName(i.id)}`).join(' og ')}`);
     }
   }
+  const fed = new Set(L.enemy.fed.map((p) => p.champ?.name || p.name));
   if (!v || !v.core) {
     // Første gang i kampen (eller efter opdatering): intet at annoncere, bare husk tilstanden.
-    app.voice = { afford: new Set(afford), skillNext: L.skill.next, core, level: L.me.level };
+    app.voice = { afford: new Set(afford), skillNext: L.skill.next, core, level: L.me.level, fed };
     return;
+  }
+  // "X er fed" (kun med enemyAlerts): nye modstandere med høj KDA siden sidst.
+  if (app.cfg.enemyAlerts) {
+    const newFed = [...fed].filter((n) => !v.fed?.has(n));
+    if (newFed.length) say('fed', `${newFed.join(' og ')} er fed`);
   }
   // "Råd til": et forslag du ikke længere har råd til, må siges igen senere. Et der bare falder ud af listen, glemmes ikke.
   for (const a of L.advice) if (!a.canAfford) v.afford.delete(a.id);
@@ -2012,7 +2031,7 @@ function announce(L) {
   const newCore = core.filter((c) => !v.core.includes(c));
   const done = core.filter((c) => v.core.includes(c));
   if (newCore.length && say('core', `${itemName(newCore[0])} færdig - ${done.length + 1} af ${coreList.length} i dit core build`)) done.push(newCore[0]);
-  app.voice = { afford: v.afford, skillNext, core: done, level: L.me.level };
+  app.voice = { afford: v.afford, skillNext, core: done, level: L.me.level, fed };
 }
 
 async function updateLive(data) {
@@ -2293,6 +2312,7 @@ function viewModel() {
     version: VERSION,
     pid: process.pid,
     voice: Boolean(app.cfg.voice),
+    enemyAlerts: Boolean(app.cfg.enemyAlerts),
     update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA && !RUNS_FROM_ZIP, inProgress: updateRunning, error: app.update.error || null },
     draftStatus: app.draftStatus,
     minGames: MATCHUP_MIN_GAMES, // matchup-tal med færre kampe vises som usikre

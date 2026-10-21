@@ -166,6 +166,7 @@
   .skillup .key { width: 26px; height: 26px; }
   .skillup.compact { margin-top: 0; padding: 2px 6px; font-size: 12px; gap: 5px; }
   .skillup.compact .key { width: 22px; height: 22px; font-size: 12px; }
+  .fedtag { font-size: 10px; font-weight: 700; color: #111; background: var(--gold); border-radius: 3px; padding: 0 4px; margin-left: 4px; }
   .tip-ic { width: 22px; height: 22px; border-radius: 4px; flex: none; }
   ol.routes { margin: 6px 0 0; padding-left: 20px; }
   ol.routes li { margin-bottom: 8px; }
@@ -510,7 +511,7 @@ function enemyLiveCard(L) {
   const line = (label, list) => list.length ? el('li', {}, el('b', {}, label + ': '), list.join(', ')) : null;
   // Kun fakta fra TAB (items). Oracle Lens/Control Ward vises kun for champions med camouflage/usynlighed.
   const v = L.vision;
-  const lines = [line('Bygger armor', e.armorStackers), line('Bygger magic resist', e.mrStackers), line('Healing', e.healers),
+  const lines = [lastState && lastState.enemyAlerts ? line('Fed', e.fed) : null, line('Bygger armor', e.armorStackers), line('Bygger magic resist', e.mrStackers), line('Healing', e.healers),
     v ? line('Oracle Lens', v.lens) : null, v ? line('Control Ward', v.ward) : null].filter(Boolean);
   return el('div', { class: 'card' },
     el('h2', {}, 'Modstanderne'),
@@ -529,7 +530,8 @@ function teamBlock(t, label, cls, diff) {
         `drager ${t.dragons}`, `baron ${t.barons}`, `herald ${t.heralds}`, `tårne ${t.turrets}`].map((x) => el('span', {}, x))),
     t.players.map((p) => el('div', { class: 'prow' + (p.me ? ' me' : '') + (p.isDead ? ' dead' : '') },
       img(p.champion.icon, p.champion.name),
-      el('div', { class: 'pn' }, p.champion.name, el('div', { class: 'lvl' }, `lvl ${p.level} · ${p.name}`)),
+      el('div', { class: 'pn' }, p.champion.name, lastState && lastState.enemyAlerts && p.fed ? el('span', { class: 'fedtag' }, 'FED') : null,
+        el('div', { class: 'lvl' }, `lvl ${p.level} · ${p.name}`)),
       el('div', {}, `${p.kills}/${p.deaths}/${p.assists}`),
       el('div', { class: 'cs muted' }, p.cs),
       el('div', { class: 'its' }, p.items.map((it) => img(it.icon, it.name))))));
@@ -732,7 +734,9 @@ function overlayContent(s) {
           a.overlayReason ? el('div', { class: 'r' }, a.overlayReason) : null),
         // Som i hovedvinduet: salgs-/bytteværdien tæller med i det du har.
         el('div', { class: 'c' + (a.canAfford ? ' ok' : '') }, a.canAfford ? 'RÅD NU' : `mangler ${gold(a.cost - L.gold - ((a.sell && a.sell.value) || (a.swap && a.swap.value) || 0))}`))),
-      // Bevidst intet om modstandernes items eller "fed" i overlayet (ingen power spike-notifikationer).
+      // Modstander-notifikationer kun med enemyAlerts (Overwolfs Riot-regler forbyder dem).
+      s.enemyAlerts && L.enemy.fed.length ? el('div', { class: 'ov-foot' }, 'Fed: ' + L.enemy.fed.join(', ')) : null,
+      s.enemyAlerts && s.plan && s.plan.log.length ? el('div', { class: 'ov-foot' }, `${clock(s.plan.log[0].t)} ${s.plan.log[0].text}`) : null,
       L.matchup && L.matchup.winRate != null ? el('div', { class: 'ov-foot' }, `Mod ${L.matchup.name}: ${pct(L.matchup.winRate)} WR` + (fewGames(L.matchup.games) ? ' (få kampe)' : '')) : null,
     ];
   }

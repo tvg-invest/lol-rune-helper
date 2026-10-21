@@ -74,22 +74,22 @@ Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General 
 - **Fuldt build** (6 færdige items): ingen almindelige køb; højst 2 begrundede bytninger (det mindst brugte af dine items, støvler beholdes) + elixir efter skadetype (Wrath/Sorcery/Iron).
 - **Unikke passiver:** items der deler et `<passive>`-navn i Data Dragon (Spellblade, Lifeline, Cleave, Manaflow, Annul ...) foreslås ikke oven i hinanden.
 - **Ny patch:** er OP.GG's patch den nyeste i Data Dragon og har under 20.000 kampe -> OP.GG `?version=<forrige>` bruges hvis den har mindst 3x så mange kampe (også for matchup-data), vises i vinduet. Halter OP.GG efter Data Dragon, bruges OP.GG's patch som den er.
-- Ingen notifikationer (stemme/overlay) om modstandernes level 6 / "har ult", færdige items eller "fed" (Overwolfs Riot-regler forbyder modstander-power-spike-notifikationer). Det står kun passivt i hovedvinduet, som på TAB.
+- **Modstander-notifikationer (`enemyAlerts`, standard til):** stemme og overlay når lane-modstanderen køber et item eller når level 6, "X er fed" (stemme, overlay, FED-mærke), "har ult" i "Lige nu" og modstander-begrundelser i overlay/stemme/bip. OBS: Overwolfs regler for Riot-spil forbyder notifikationer om modstanderes power spikes - sæt `"enemyAlerts": false` for at slå det hele fra (så står det kun passivt i hovedvinduet).
 
 ## Gameplan mod lane-modstanderen
 
 - **Fast del** (champion select og kamp): win rate i matchuppet (OP.GG `counters`; under 150 kampe vises den grå med "få kampe"), lane-fordel ("Tidligt i kampen" for junglere) / flest solo kills / spillestil + tip-tekst fra OP.GG's offentlige MCP-tjeneste (`https://mcp-api.op.gg/mcp`, værktøj `lol_get_lane_matchup_guide`; navne i UPPER_SNAKE_CASE, kun engelsk; udokumenteret - fejler den, laves planen uden; sender den antal kampe (`summoner_spells[].play`) under 150, vises kun tippet), skalering ud fra begge champions' `game_lengths`, og begges typiske core build. Spillestil, tip og skalering vises kun i champion select - ikke under kampen.
 - **Live** ("Lige nu", står øverst i kortet under kampen): begges level, item-guld, KDA, core-fremskridt for begge, hans armor/MR/anti-heal/skadetype med items fra DIT build (min. 2% pick rate) der svarer på det.
-- **Ændringer**: hans nye færdige items logges med tid i hovedvinduet - ingen stemme og intet i overlayet.
+- **Ændringer**: hans nye færdige items (og level 6) logges med tid; med `enemyAlerts` siges de også og står i overlayet.
 - Kun fakta + valg, ingen "engage nu" (Riot: "Apps that dictate player decisions"). Research: `docs/research-tryndamere-evelynn.md`.
 
 ## Stemme og fuldskærm
 
-Ægte fuldskærm (exclusive fullscreen) kan ikke overlejres af andre vinduer; det kræver injektion i spilprocessen, som programmet bevidst ikke gør (Vanguard). Derfor en stemme, der virker uanset vindue - kun din egen tilstand: startitems, "Råd til <item>" (vigtigste nye forslag du kan købe uden at sælge/bytte), "Level op: Q", "Level 6 - R" (Evelynn: "Level 6 - camouflage og R") og færdige core-items. Kun nye hændelser, max én pr. slags hvert 8. sek.; en besked der blev afvist af 8-sek.-grænsen, prøves igen ved næste tjek. Beskederne siges én ad gangen (kø), og en besked der har ventet over 6 sek. i køen, droppes og gentages ikke. "Råd til" siges ikke for forslag, der kun skyldes modstandernes tilstand (fx en modstander med høj KDA) - de står kun passivt i hovedvinduet. Windows: `System.Speech` via PowerShell med en dansk stemme (da-DK) hvis der er en; macOS: `say` med en dansk stemme hvis der er en. Den valgte stemme og evt. fejl står i loggen. Til/fra i vinduet (gemmes i `config.json` som `voice`).
+Ægte fuldskærm (exclusive fullscreen) kan ikke overlejres af andre vinduer; det kræver injektion i spilprocessen, som programmet bevidst ikke gør (Vanguard). Derfor en stemme, der virker uanset vindue: startitems, "Råd til <item>" (vigtigste nye forslag du kan købe uden at sælge/bytte), "Level op: Q", "Level 6 - R" (Evelynn: "Level 6 - camouflage og R") og færdige core-items - og med `enemyAlerts` også "X er fed" og lane-modstanderens køb/level 6. Kun nye hændelser, max én pr. slags hvert 8. sek.; en besked der blev afvist af 8-sek.-grænsen, prøves igen ved næste tjek. Beskederne siges én ad gangen (kø), og en besked der har ventet over 6 sek. i køen, droppes og gentages ikke. Med `"enemyAlerts": false` siges "Råd til" ikke for forslag, der kun skyldes modstandernes tilstand (fx en modstander med høj KDA). Windows: `System.Speech` via PowerShell med en dansk stemme (da-DK) hvis der er en; macOS: `say` med en dansk stemme hvis der er en. Den valgte stemme og evt. fejl står i loggen. Til/fra i vinduet (gemmes i `config.json` som `voice`).
 
 ## Overlay
 
-Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozilla.org/en-US/docs/Web/API/Document_Picture-in-Picture_API)-vindue (Chrome/Edge 116+), som altid ligger øverst: guld, startitems, de 3 forslag (RÅD NU / mangler X, hvor salgs-/bytteværdien er trukket fra) og din matchup-win rate. Intet om modstandernes items, KDA eller "fed": overlayet viser kun begrundelser om dit eget build (fx "Typisk 2. item ..."). Bip + blink når et forslag skifter til "råd nu" (kun dit eget guld, og ikke for forslag der kun skyldes modstandernes tilstand). Mistes forbindelsen til programmet, viser overlayet "Forbindelse tabt" i stedet for gamle tal. Intet injiceres i spillet - det er et almindeligt browservindue, så League skal køre i Borderless.
+Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozilla.org/en-US/docs/Web/API/Document_Picture-in-Picture_API)-vindue (Chrome/Edge 116+), som altid ligger øverst: guld, startitems, de 3 forslag (RÅD NU / mangler X, hvor salgs-/bytteværdien er trukket fra) og din matchup-win rate. Med `enemyAlerts` (standard) også "Fed: ...", lane-modstanderens seneste køb og begrundelser om modstanderne; med `"enemyAlerts": false` kun begrundelser om dit eget build. Bip + blink når et forslag skifter til "råd nu". Mistes forbindelsen til programmet, viser overlayet "Forbindelse tabt" i stedet for gamle tal. Intet injiceres i spillet - det er et almindeligt browservindue, så League skal køre i Borderless.
 
 ## Telefon
 
@@ -104,7 +104,8 @@ Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozi
 | `setRunes` / `setSpells` / `setItemSet` / `adaptToEnemies` | `true`/`false` |
 | `flashKey` | `keep`, `D` eller `F` |
 | `liveAdvice` | Købsforslag, scoreboard og gameplan under kampen |
-| `voice` | Stemme til/fra (kun din egen tilstand) |
+| `voice` | Stemme til/fra |
+| `enemyAlerts` | Notifikationer om modstanderne (stemme/overlay om lane-modstanderens køb og level 6, "X er fed", FED-mærke, "har ult"). Forbudt efter Overwolfs Riot-regler - `false` slår dem fra |
 | `openWindow` | Åbn vinduet i browseren ved start |
 | `autoUpdate` | Tjek for nye versioner (opdatering sker først når du klikker) |
 | `remoteAccess` | Vinduet kan åbnes fra telefonen (kun via Tailscale, medmindre `remoteLan`) |
@@ -124,4 +125,4 @@ Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozi
 
 ## Er det tilladt?
 
-Programmet bruger kun Riots officielle, lokale API'er: League-klientens API i champion select (runer, summoners, item sets - det samme som U.GG, Blitz og Porofessor) og under kampen spillets Live Client Data API, som kun giver det du også kan se på TAB (items, levels, KDA, eget guld). Ingen injektion i spillet, ingen hukommelses- eller skærmlæsning. Forslag er fakta og valg, ingen notifikationer om modstanderes power spikes. Riot kræver at produkter registreres i Developer Portal.
+Programmet bruger kun Riots officielle, lokale API'er: League-klientens API i champion select (runer, summoners, item sets - det samme som U.GG, Blitz og Porofessor) og under kampen spillets Live Client Data API, som kun giver det du også kan se på TAB (items, levels, KDA, eget guld). Ingen injektion i spillet, ingen hukommelses- eller skærmlæsning. Forslag er fakta og valg. OBS: med `enemyAlerts` (standard) giver programmet notifikationer om modstanderes power spikes, som Overwolfs regler for Riot-spil forbyder - det er din risiko; `"enemyAlerts": false` slår dem fra. Riot kræver at produkter registreres i Developer Portal.
