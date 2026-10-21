@@ -373,6 +373,57 @@ async function laneOpponent(cfg, position, enemyIds) {
   return best && best.rate >= 0.25 ? best.id : null;
 }
 
+// ---------- Jungle-ruter (OP.GG jungle-paths) ----------
+// Mest brugte første clear pr. side. Ligger som indlejret data i OP.GG's side (ingen JSON-API) -
+// kan ændre sig uden varsel, så en fejl giver bare intet rutekort.
+const OPGG_WEB = process.env.LOL_HELPER_OPGG_WEB || 'https://op.gg';
+const CAMP_NAMES = { BLUE: 'Blue', RED: 'Red', GROMP: 'Gromp', WOLVES: 'Wolves', RAPTORS: 'Raptors', KRUG: 'Krugs' };
+
+function parseJungleRoutes(html) {
+  const text = html.replace(/\\"/g, '"');
+  const out = {};
+  for (const side of ['BLUE', 'RED']) {
+    const prefix = `{"team_key":"${side}","routes":[`;
+    const start = text.indexOf(prefix);
+    if (start === -1) continue;
+    // Læs rute-objekterne ét ad gangen fra listens start, og stop når listen slutter.
+    const re = /\{"route":\[([^\]]*)\],"play":(\d+),"rank":(\d+)\},?/y;
+    re.lastIndex = start + prefix.length;
+    const routes = [];
+    let m;
+    while ((m = re.exec(text))) routes.push({ route: JSON.parse(`[${m[1]}]`), play: Number(m[2]) });
+    const total = routes.reduce((s, r) => s + r.play, 0) || 1;
+    if (routes.length) out[side] = routes.slice(0, 3).map((r) => ({ ...r, share: r.play / total }));
+  }
+  return out.BLUE || out.RED ? out : null;
+}
+
+function fetchJungleRoutes(championKey) {
+  const champ = dd.champions[championKey];
+  if (!champ) return Promise.resolve(null);
+  return cachedJson(`jungle_${championKey}`, async () => {
+    const res = await fetch(`${OPGG_WEB}/lol/champions/${champ.id.toLowerCase()}/jungle-paths/jungle`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 lol-rune-helper' },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) throw new Error(`Jungle-ruter: ${res.status}`);
+    return parseJungleRoutes(await res.text());
+  });
+}
+
+function ensureJungleRoutes(championKey, position) {
+  if (position !== 'JUNGLE' || app.jungleKey === championKey) return;
+  app.jungleKey = championKey;
+  app.jungle = null;
+  fetchJungleRoutes(championKey)
+    .then((routes) => {
+      if (app.jungleKey !== championKey) return;
+      app.jungle = routes;
+      broadcast();
+    })
+    .catch((e) => log(`  ${e.message}`));
+}
+
 // ---------- Gameplan mod din lane-modstander ----------
 // Fast del: OP.GG's matchup-guide + tal. Live del: fakta om jer to (level, items, core) + valg fra dit build.
 // Bevidst ingen "engage nu"-råd: Riot tillader ikke apps der træffer beslutninger for spilleren.
@@ -874,6 +925,8 @@ function clearPick() {
   app.rec = null;
   app.plan = null;
   app.planKey = null;
+  app.jungle = null;
+  app.jungleKey = null;
 }
 
 function finishGame() {
@@ -909,7 +962,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.9.0';
+const VERSION = '1.10.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -1169,7 +1222,11 @@ function analyzeLive(data, build) {
   const enemy = { fed, adShare, apShare, armorStackers, mrStackers, armorHeavy, mrHeavy, healers };
 
   const advice = liveAdvice(build, me, enemy, gold, data.gameData?.mapNumber || 11);
-  const opponent = me.position ? enemies.find((p) => p.position === me.position) : null;
+  // Lane-modstander: samme rolle i live-API'et; mangler rollerne, så den der blev fundet i champion select.
+  const knownOpp = app.plan?.oppKey || (app.rec?.matchup?.id != null ? String(app.rec.matchup.id) : null);
+  const opponent = (me.position && enemies.find((p) => p.position === me.position))
+    || (knownOpp && enemies.find((p) => String(p.champ?.key) === knownOpp))
+    || null;
   const matchup = opponent && { player: opponent, stats: matchupStats(build, opponent.champ?.key) };
   const skill = skillHint(data.activePlayer, build);
   const inventory = inventoryInfo(me, gold, data.gameData?.mapNumber || 11);
@@ -1320,15 +1377,23 @@ function announce(L) {
   const v = app.voice;
   const afford = new Set(L.advice.filter((a) => a.canAfford).map((a) => a.id));
   const fed = new Set(L.enemy.fed.map((p) => p.champ?.name || p.name));
+  // Dine færdige core-items (core fra gameplanen, ellers fra buildet).
+  const coreList = app.plan?.myCore?.length ? app.plan.myCore : coreOf(app.liveBuild?.build);
+  const core = coreList.filter((id) => L.me.itemIds.includes(id) && isCompleted(dd.items[id]));
+  if (v && !v.core) v.core = core; // første gang efter opdatering: intet at annoncere
   if (v) {
     const newAfford = [...afford].filter((id) => !v.afford.has(id));
     // Kun det vigtigste forslag (de står i prioriteret rækkefølge) - kort besked midt i en kamp.
     if (newAfford.length) speak('afford', `Råd til ${itemName(newAfford[0])}`);
     if (L.skill.next && !v.skillNext) speak('skill', `Level op: ${L.skill.next}`);
+    // Dit eget power spike: et item fra dit core build er færdigt (egen tilstand - tilladt).
+    for (const id of core.filter((c) => !v.core.includes(c))) {
+      speak('core', `${itemName(id)} færdig - ${core.length} af ${coreList.length} i dit core build`);
+    }
     const newFed = [...fed].filter((n) => !v.fed.has(n));
     if (newFed.length) speak('fed', `${newFed.join(' og ')} er fed`);
   }
-  app.voice = { afford, fed, skillNext: L.skill.next };
+  app.voice = { afford, fed, skillNext: L.skill.next, core };
 }
 
 async function updateLive(data) {
@@ -1356,6 +1421,7 @@ async function updateLive(data) {
     trackGame(data, app.live);
     const opp = app.live.matchup?.player;
     if (opp?.champ) ensurePlan(champ.key, opp.champ.key, LIVE_POSITION[meRaw.position] || app.build?.position, app.liveBuild.build);
+    ensureJungleRoutes(champ.key, LIVE_POSITION[meRaw.position] || app.build?.position);
     trackOpponent(app.live);
     announce(app.live);
   }
@@ -1414,6 +1480,8 @@ const app = {
   voice: null,         // hvad stemmen allerede har sagt i denne kamp
   plan: null,          // gameplan mod lane-modstanderen
   planKey: null,
+  jungle: null,        // mest brugte jungle-ruter for din champion (kun jungle)
+  jungleKey: null,
   draft: null,         // ban/counterpick-forslag før du låser
   draftKey: null,
   game: null,          // køb og forslag i den igangværende kamp (til kampoversigten)
@@ -1573,6 +1641,11 @@ function viewModel() {
     update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA },
     draft: draftView(),
     plan: planView(),
+    jungle: app.jungle && Object.fromEntries(Object.entries(app.jungle).map(([side, routes]) => [side, routes.map((r) => ({
+      camps: r.route.map((c) => CAMP_NAMES[c] || c),
+      games: r.play,
+      share: r.share,
+    }))])),
     history: historyView(),
   };
   if (!pick || !b || !rec) return base;
@@ -1926,8 +1999,9 @@ async function handlePick(pick, pickKey, itemKey) {
   const matchupChanged = (app.rec.matchup?.id ?? null) !== prevMatchup;
   // Rune-valgene kan være omrokeret (matchup-side først) - peg på den side der faktisk er sat.
   if (app.appliedPerks) app.runeIndex = app.rec.runeOptions.findIndex((r) => perkKey(r) === app.appliedPerks);
-  // Gameplan mod lane-modstanderen (i baggrunden - runer/items venter ikke på den).
+  // Gameplan mod lane-modstanderen og jungle-ruter (i baggrunden - runer/items venter ikke på dem).
   if (app.rec.matchup) ensurePlan(pick.championId, app.rec.matchup.id, app.build.position, app.build.build);
+  ensureJungleRoutes(String(pick.championId), app.build.position);
 
   if (fullApply) {
     const stats = roleStats(app.build);

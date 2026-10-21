@@ -95,6 +95,18 @@ const mcpServer = http.createServer((req, res) => {
   });
 });
 
+// Falsk OP.GG jungle-paths-side: samme indlejrede (escaped) dataformat som den rigtige side.
+const jungleRequests = [];
+const route = (camps, play, rank) => `{\\"route\\":[${camps.map((c) => `\\"${c}\\"`).join(',')}],\\"play\\":${play},\\"rank\\":${rank}}`;
+const opggWeb = http.createServer((req, res) => {
+  jungleRequests.push(req.url);
+  const blue = [route(['BLUE', 'GROMP', 'WOLVES', 'RAPTORS', 'RED', 'KRUG'], 600, 1), route(['RED', 'KRUG', 'RAPTORS', 'WOLVES', 'BLUE', 'GROMP'], 300, 2), route(['RAPTORS', 'RED', 'KRUG', 'WOLVES', 'BLUE', 'GROMP'], 100, 3)];
+  const red = [route(['RED', 'KRUG', 'RAPTORS', 'WOLVES', 'BLUE', 'GROMP'], 500, 1)];
+  const body = `<script>self.__next_f.push([1,"4e:[{\\"teamName\\":\\"BLUE\\",\\"data\\":{\\"team_key\\":\\"BLUE\\",\\"routes\\":[${blue.join(',')}],\\"play\\":1000}},{\\"data\\":{\\"team_key\\":\\"RED\\",\\"routes\\":[${red.join(',')}],\\"play\\":500}}]"])</script>`;
+  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.end(body);
+});
+
 // Falsk Live Client Data API (spillets port 2999). Felter som i Riots dokumentation/eksempel.
 const live = { data: null };
 const liveServer = http.createServer(async (req, res) => {
@@ -159,6 +171,7 @@ const autoPage = () => state.pages.find((p) => p.name.startsWith('Auto: '));
 
 liveServer.listen(0, '127.0.0.1');
 mcpServer.listen(0, '127.0.0.1');
+opggWeb.listen(0, '127.0.0.1');
 server.listen(0, '127.0.0.1', async () => {
   const port = server.address().port;
   const livePort = liveServer.address().port;
@@ -175,6 +188,7 @@ server.listen(0, '127.0.0.1', async () => {
   const said = () => { try { return fs.readFileSync(saidFile, 'utf8'); } catch { return ''; } };
   const env = {
     LOL_HELPER_MCP: `http://127.0.0.1:${mcpServer.address().port}/mcp`,
+    LOL_HELPER_OPGG_WEB: `http://127.0.0.1:${opggWeb.address().port}`,
     LOL_HELPER_SAY_CMD: sayCmd,
     LOL_HELPER_CONFIG: path.join(tmp, 'config.json'),
     ...process.env,
@@ -372,6 +386,17 @@ server.listen(0, '127.0.0.1', async () => {
     assert(autoSet().title.endsWith('TOP'), autoSet().title);
     assert.strictEqual((await gui('POST', '/api/role', { position: 'XYZ' })).status, 400, 'ukendt rolle afvises');
 
+    // 5b) Rolle JUNGLE -> jungle-ruter fra OP.GG's side (Data Dragon-id med små bogstaver i URL'en)
+    assert.strictEqual((await gui('POST', '/api/role', { position: 'JUNGLE' })).status, 200);
+    let jg;
+    for (let i = 0; i < 40 && !(jg = (await gui('GET', '/state')).body.jungle); i++) await wait(500);
+    assert(jg, 'jungle-ruter vises');
+    assert(jungleRequests.includes('/lol/champions/ahri/jungle-paths/jungle'), `URL: ${jungleRequests}`);
+    assert.deepStrictEqual(jg.BLUE[0].camps, ['Blue', 'Gromp', 'Wolves', 'Raptors', 'Red', 'Krugs']);
+    assert(Math.abs(jg.BLUE[0].share - 0.6) < 0.001, `andel: ${jg.BLUE[0].share}`);
+    assert.strictEqual(jg.BLUE.length, 3);
+    assert.strictEqual(jg.RED[0].games, 500);
+
     // 6) Næste kamp: auto-siden genbruges, ingen ekstra item sets, rolle-override nulstilles
     state.phase = 'Lobby';
     await wait(2500);
@@ -380,6 +405,7 @@ server.listen(0, '127.0.0.1', async () => {
     await waitFor(() => count('PUT') > putsLobby, 20000, 'anvend i ny kamp');
     await wait(500);
     assert(autoSet().title.endsWith('MID'), 'rolle-override nulstillet');
+    assert.strictEqual((await gui('GET', '/state')).body.jungle, null, 'ingen jungle-ruter når du ikke spiller jungle');
     assert.strictEqual(state.pages.filter((p) => p.name.startsWith('Auto: ')).length, 1, 'stadig kun én auto-side');
     assert.strictEqual(state.itemSets.itemSets.filter((s) => s.title.startsWith('Auto: ')).length, 1, 'stadig kun ét auto-set');
     // 7) Kampen starter: live-forslag + scoreboard
@@ -442,6 +468,23 @@ server.listen(0, '127.0.0.1', async () => {
     assert(said().includes("Zed har købt Serylda's Grudge"), 'stemme om modstanderens køb');
     zed.items.pop();
     console.log('Gameplan lige nu:', lp.now.join(' | '));
+
+    // Live-API'et uden roller -> lane-modstanderen fra champion select bruges stadig
+    const meLive = live.data.allPlayers[0];
+    meLive.position = '';
+    zed.position = '';
+    await wait(2500);
+    assert.strictEqual((await gui('GET', '/state')).body.live.matchup?.name, 'Zed', 'modstander fra champion select når roller mangler');
+    meLive.position = 'MIDDLE';
+    zed.position = 'MIDDLE';
+
+    // Du færdiggør et item fra dit core build -> stemmen siger det (eget power spike)
+    const coreItem = lp.myCore[0];
+    const keepItems = meLive.items;
+    meLive.items = [...keepItems, { itemID: Number(coreItem.id), count: 1, slot: 5 }];
+    await wait(2500);
+    assert(said().includes(`${coreItem.name} færdig - 1 af ${lp.myCore.length} i dit core build`), `stemme ved core-item: ${said()}`);
+    meLive.items = keepItems;
     assert.strictEqual(L.matchup?.name, 'Zed', 'live lane-modstander ud fra position');
     assert(L.matchup.winRate > 0.3, 'live matchup win rate');
     assert(L.enemy.healers.includes('Soraka') && L.enemy.healers.includes('Darius'), 'healere');
@@ -631,6 +674,7 @@ server.listen(0, '127.0.0.1', async () => {
     server.close();
     liveServer.close();
     mcpServer.close();
+    opggWeb.close();
     if (!hadToken) fs.rmSync(tokenFile, { force: true });
     fs.rmSync(tmp, { recursive: true, force: true });
   }

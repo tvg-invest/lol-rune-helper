@@ -162,6 +162,10 @@
   .skillup .key { width: 26px; height: 26px; }
   .skillup.compact { margin-top: 0; padding: 2px 6px; font-size: 12px; gap: 5px; }
   .skillup.compact .key { width: 22px; height: 22px; font-size: 12px; }
+  ol.routes { margin: 6px 0 0; padding-left: 20px; }
+  ol.routes li { margin-bottom: 8px; }
+  ol.routes .camps { font-weight: 600; font-size: 13px; }
+  .plan-sub.blue { color: #4f8cff; } .plan-sub.red { color: var(--red); }
   .plan-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
   .plan-ic { width: 30px; height: 30px; border-radius: 6px; }
   .pill b { color: var(--gold2); font-weight: 600; }
@@ -250,6 +254,20 @@ function renderDraft(s) {
           el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Ud fra din mastery og dine kampe med programmet.')),
         phoneCard(s))),
     logCard(s));
+}
+
+// Mest brugte første clear pr. side (kun når du spiller jungle).
+function jungleCard(j) {
+  if (!j) return null;
+  const side = (key, label, cls) => j[key] ? el('div', {},
+    el('div', { class: 'plan-sub ' + cls, style: 'margin-top:0' }, label),
+    el('ol', { class: 'routes' }, j[key].map((r) => el('li', {},
+      el('div', { class: 'camps' }, r.camps.join(' → ')),
+      el('div', { class: 'muted', style: 'font-size:11px' }, `${pct(r.share)} · ${num(r.games)} kampe`))))) : null;
+  return el('div', { class: 'card' },
+    el('h2', {}, 'Jungle-ruter (første clear)'),
+    el('div', { class: 'grid' }, side('BLUE', 'Blå side', 'blue'), side('RED', 'Rød side', 'red')),
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' }, 'Mest spillede rækkefølger fra OP.GG - vælg den der passer til dit hold og modstanderens jungler.'));
 }
 
 // Gameplan mod lane-modstanderen: fast del (matchup) + "Lige nu" og ændringer under kampen.
@@ -455,6 +473,7 @@ function renderLive(s) {
         el('div', { class: 'meta' }, `${clock(L.gameTime)} · ${L.gameMode || ''} · ${L.me.kills}/${L.me.deaths}/${L.me.assists}`), statusLine(s), matchupLine(L.matchup), skillLine(L)),
       el('div', { class: 'right' }, el('div', { class: 'gold' }, gold(L.gold)), el('div', { class: 'meta' }, 'dit guld'))),
     adviceCard(L),
+    L.gameTime < 300 ? jungleCard(s.jungle) : null, // de første 5 min
     gameplanCard(s.plan),
     el('div', { class: 'grid' },
       el('div', { class: 'card' }, el('h2', {}, 'Scoreboard'),
@@ -531,6 +550,7 @@ function render(s) {
       el('button', { class: role ? '' : 'active', onclick: () => post('/api/role', { position: null }) }, 'Auto'),
       s.positions.map((p) => el('button', { class: role === p ? 'active' : '', onclick: () => post('/api/role', { position: p }) }, p))) : null,
     gameplanCard(s.plan),
+    jungleCard(s.jungle),
     el('div', { class: 'grid' },
       el('div', {}, runesCard(s), itemsCard(s)),
       el('div', {}, spellsCard(s), enemyCard(s), phoneCard(s))),

@@ -41,6 +41,14 @@ Klik "Autostart: fra" øverst i vinduet for at starte programmet i baggrunden, n
 logger ind (det åbner ikke browseren). Starter du det igen, åbner det bare vinduet.
 Builds gemmes i mappen "cache" i 6 timer, så champion select går hurtigt.
 
+JUNGLE-RUTER
+Spiller du jungle (fx Evelynn), viser vinduet de 3 mest spillede første clears for blå og
+rød side fra OP.GG - i champion select og de første 5 minutter af kampen.
+
+STEMME OM DIT CORE BUILD
+Når du færdiggør et item fra dit core build, siger stemmen fx
+"Ravenous Hydra færdig - 1 af 3 i dit core build".
+
 INVENTORY OG FULDT BUILD
 Købsforslagene tæller dine 6 pladser. Er de fyldt, foreslår den at sælge et starter-item
 (Doran's, Dark Seal, Cull) for at få plads. Har du 6 færdige items (fuldt build), foreslår

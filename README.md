@@ -51,6 +51,12 @@ Læser spillets [Live Client Data API](https://developer.riotgames.com/docs/lol)
 
 Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General Policies](https://developer.riotgames.com/policies/general)) forbyder information spilleren ikke allerede kender og apps der bestemmer spillerens beslutninger, men tillader at fremhæve vigtige beslutninger og give flere valg. Derfor: kun TAB-information, 2-3 begrundede forslag, ingen timere. Bemærk at Riot kræver at produkter registreres i Developer Portal.
 
+## Jungle-ruter og core-stemme
+
+- **Jungle-ruter:** `op.gg/lol/champions/<ddragon-id i små bogstaver>/jungle-paths/jungle` har ruterne som indlejret (escaped) data: `{"team_key":"BLUE|RED","routes":[{"route":[6 camps],"play":N,"rank":N}, ...]}`. Ruterne læses ét objekt ad gangen fra listens start. Top 3 pr. side med andel; caches 6 timer; fejl = intet kort. Vises for JUNGLE i champion select og de første 5 min.
+- **Core-stemme:** når et item fra dit core build (gameplanens eller buildets) bliver færdigt: "<item> færdig - N af M i dit core build". Egen tilstand.
+- **Lane-modstander under kampen:** samme rolle i live-API'et; mangler rollerne, bruges modstanderen fra champion select.
+
 ## Inventory, fuldt build og ny patch
 
 - **Pladser:** live-API'ens `slot` (0-5 = inventory). Nyt item uden ejede dele og ingen ledig plads -> "sælg Doran's/Dark Seal/Cull" (Dark Seal beholdes hvis Mejai's er i buildet); ingen "råd nu til delen" uden plads.
