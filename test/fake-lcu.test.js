@@ -27,7 +27,7 @@ const state = {
 const session = () => ({
   localPlayerCellId: 2,
   myTeam: [
-    { cellId: 2, championId: state.championId, assignedPosition: 'middle', spell1Id: 14, spell2Id: 4 },
+    { cellId: 2, championId: state.championId, championPickIntent: state.myIntent || 0, assignedPosition: 'middle', spell1Id: 14, spell2Id: 4 },
     // Robusthed: en holdkammerat der har erklæret sit pick (championPickIntent)
     ...(state.mateIntent ? [{ cellId: 1, championId: 0, championPickIntent: state.mateIntent, assignedPosition: 'top', spell1Id: 4, spell2Id: 12 }] : []),
   ],
@@ -274,6 +274,16 @@ server.listen(0, '127.0.0.1', async () => {
     assert(!poolNames.includes('Lee Sin'), 'jungle-champion filtreret fra til MID');
     assert(d.bans.length >= 1 && d.bans.every((b) => b.reason.includes(' vinder ')), `ban-forslag: ${JSON.stringify(d.bans)}`);
     console.log('Ban-forslag:', d.bans.map((b) => `${b.name}: ${b.reason}`).join(' | '));
+    assert.strictEqual(d.bansFor, null, 'uden hover: bans mod puljen');
+    // 0b) Du hover Ahri (erklæret pick) -> bans mod netop Ahri
+    state.myIntent = 103;
+    for (let i = 0; i < 60 && (d = (await gui('GET', '/state')).body.draft)?.bansFor?.name !== 'Ahri'; i++) await wait(500);
+    assert.strictEqual(d.bansFor?.name, 'Ahri', `bans til hovered champion: ${JSON.stringify(d.bansFor)}`);
+    assert(d.bans.length >= 1 && d.bans.every((b) => b.reason.startsWith('Ahri vinder kun ') && b.name !== 'Ahri'), `bans mod Ahri: ${JSON.stringify(d.bans)}`);
+    console.log('Bans til Ahri:', d.bans.map((b) => `${b.name}: ${b.reason}`).join(' | '));
+    state.myIntent = 0;
+    for (let i = 0; i < 60 && (d = (await gui('GET', '/state')).body.draft)?.bansFor; i++) await wait(500);
+    assert.strictEqual(d.bansFor, null, 'hover fjernet: tilbage til puljen');
     state.banDone = true;
     state.enemies = [238]; // Zed låst før dig
     for (let i = 0; i < 60 && !(d = (await gui('GET', '/state')).body.draft)?.opponent; i++) await wait(500);

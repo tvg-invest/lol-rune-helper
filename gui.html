@@ -310,7 +310,9 @@ function renderDraft(s) {
         d.myBanTurn ? el('div', { class: 'turn' }, 'DIN TUR TIL AT BANNE') : null)),
     el('div', { class: 'grid' },
       el('div', {},
-        el('div', { class: 'card' }, el('h2', {}, 'Ban-forslag'),
+        el('div', { class: 'card' }, el('h2', {}, d.bansFor ? `Ban-forslag til ${d.bansFor.name}` : 'Ban-forslag'),
+          el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' },
+            d.bansFor ? `De champions ${d.bansFor.name} har sværest ved (OP.GG).` : 'Hover en champion for at få bans mod netop den. Indtil da: mod hele din pulje.'),
           d.bans.length ? el('div', { class: 'clist' }, d.bans.map((b) => crow(b, b.reason)))
             : el('div', { class: 'muted' }, d.pool.length ? 'Ingen klare trusler mod dine champions.' : 'Jeg kender ikke dine champions til rollen endnu (mastery eller kampe med programmet).')),
         d.opponent ? el('div', { class: 'card' }, el('h2', {}, `Mod ${d.opponent.name}`),

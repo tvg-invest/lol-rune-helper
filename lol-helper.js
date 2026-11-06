@@ -1228,10 +1228,31 @@ async function myChampionPool(cfg, position) {
   return ids.filter((id) => (rates[id]?.[position] || 0) >= 0.2).slice(0, 6);
 }
 
-async function analyzeDraft(cfg, position, enemyIds, unavailable) {
+// Bans mod én bestemt champion (den du hover/har valgt): dem den har lavest win rate imod.
+function bansAgainst(champId, build, unavailable, name) {
+  return (build?.counters || [])
+    .filter((c) => c.play >= DRAFT_MIN_GAMES && c.champion_id !== champId && !unavailable.includes(c.champion_id))
+    .map((c) => ({ id: c.champion_id, wr: c.win / c.play, games: c.play }))
+    .filter((x) => x.wr < 0.5)
+    .sort((a, b) => a.wr - b.wr)
+    .slice(0, 3)
+    .map((x) => ({ id: x.id, reason: `${name(champId)} vinder kun ${pct(x.wr)} mod ${name(x.id)} (${x.games.toLocaleString('da-DK')} kampe)` }));
+}
+
+async function analyzeDraft(cfg, position, enemyIds, unavailable, myChamp) {
   const pool = await myChampionPool(cfg, position);
   const builds = (await Promise.all(pool.map((id) => fetchBuild(cfg.region, 'ranked', id, position).then((b) => ({ id, b }), () => null)))).filter(Boolean);
   const name = (id) => dd.champions[id]?.name || String(id);
+
+  // Har du valgt (hover/lås) en champion, bannes der mod den. Ellers mod hele din pulje.
+  let bansFor = null;
+  let champBans = [];
+  if (myChamp > 0) {
+    const own = builds.find((x) => x.id === myChamp)?.b
+      || await fetchBuild(cfg.region, 'ranked', myChamp, position).catch((e) => { log(`  Ban-forslag til ${name(myChamp)}: ${e.message}`); return null; });
+    champBans = bansAgainst(myChamp, own, unavailable, name);
+    if (champBans.length) bansFor = myChamp;
+  }
 
   // Bans: de champions dine champions klarer sig dårligst imod (vægtet efter hvor mange af dem de rammer).
   const threat = new Map();
@@ -1244,7 +1265,7 @@ async function analyzeDraft(cfg, position, enemyIds, unavailable) {
       threat.set(c.champion_id, t);
     }
   }
-  const bans = [...threat]
+  const bans = bansFor ? champBans : [...threat]
     .map(([id, t]) => ({ id, score: t.loss / Math.max(builds.length, 1), wr: t.hits.reduce((s, h) => s + h.wr, 0) / t.hits.length, hits: t.hits }))
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score)
@@ -1270,7 +1291,7 @@ async function analyzeDraft(cfg, position, enemyIds, unavailable) {
         .slice(0, 3);
     } catch {}
   }
-  return { position, pool, bans, opponent, poolVs, counters };
+  return { position, pool, bans, bansFor, opponent, poolVs, counters };
 }
 
 // Kører i baggrunden, så champion select-løkken ikke venter på OP.GG.
@@ -1286,7 +1307,9 @@ function updateDraft(session, me) {
   ];
   const enemyIds = (session.theirTeam || []).map((m) => m.championId).filter((id) => id > 0);
   const myBanTurn = actions.some((a) => a.actorCellId === session.localPlayerCellId && a.type === 'ban' && a.isInProgress);
-  const key = `${position}|${enemyIds.sort().join(',')}|${[...new Set(unavailable)].sort().join(',')}`;
+  // Din valgte champion: erklæret pick (hover før bans) eller den du hover/har låst.
+  const myChamp = me.championPickIntent > 0 ? me.championPickIntent : me.championId > 0 ? me.championId : 0;
+  const key = `${position}|${myChamp}|${enemyIds.sort().join(',')}|${[...new Set(unavailable)].sort().join(',')}`;
   const banChanged = app.draftBanTurn !== myBanTurn;
   app.draftBanTurn = myBanTurn;
   if (app.draft) app.draft.myBanTurn = myBanTurn;
@@ -1296,7 +1319,7 @@ function updateDraft(session, me) {
   }
   app.draftKey = key;
   app.draftStatus = 'loading';
-  analyzeDraft(app.cfg, position, enemyIds, unavailable)
+  analyzeDraft(app.cfg, position, enemyIds, unavailable, myChamp)
     .then((d) => {
       if (app.draftKey !== key) return;
       app.draft = { ...d, myBanTurn: app.draftBanTurn };
@@ -1456,7 +1479,7 @@ function finishGame() {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.16.0';
+const VERSION = '1.17.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -2530,6 +2553,7 @@ function draftView() {
     myBanTurn: Boolean(d.myBanTurn),
     pool: d.pool.map(champView),
     bans: d.bans.map((b) => ({ ...champView(b.id), reason: b.reason })),
+    bansFor: d.bansFor ? champView(d.bansFor) : null,
     opponent: d.opponent ? champView(d.opponent) : null,
     poolVs: d.poolVs.map((x) => ({ ...champView(x.id), winRate: x.winRate, games: x.games })),
     counters: d.counters.map((x) => ({ ...champView(x.id), winRate: x.winRate, games: x.games })),
