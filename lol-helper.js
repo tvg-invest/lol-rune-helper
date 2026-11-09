@@ -388,7 +388,7 @@ async function limited(fn) {
 
 // Ryd udløbne builds i hukommelsen og gamle filer i cache-mappen (kører hver time).
 function pruneCache() {
-  for (const [key, hit] of buildCache) if (Date.now() - hit.at > CACHE_TTL) buildCache.delete(key);
+  for (const [key, hit] of buildCache) if (Date.now() - hit.at > (hit.ttl || CACHE_TTL)) buildCache.delete(key);
   try {
     for (const f of fs.readdirSync(CACHE_DIR)) {
       if (f === 'ddragon.json') continue; // offline-kopien af Data Dragon skal overleve
@@ -402,16 +402,17 @@ function pruneCache() {
 // En fejl huskes i 15 sek. (så draften ikke hamrer løs på en OP.GG der fejler), og findes en ældre fil
 // (op til 24 t, se pruneCache), bruges den hellere end ingenting.
 const FAIL_TTL = 15 * 1000;
-function cachedJson(key, loader) {
+// ttl: hvor længe data er friske (standard 6 t; din egen profil kun 10 min).
+function cachedJson(key, loader, ttl = CACHE_TTL) {
   const hit = buildCache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL) return hit.promise;
+  if (hit && Date.now() - hit.at < (hit.ttl || CACHE_TTL)) return hit.promise;
   const file = path.join(CACHE_DIR, `${key}.json`);
   let fileAt = 0;
   try { fileAt = fs.statSync(file).mtimeMs; } catch {}
-  const fresh = fileAt > 0 && Date.now() - fileAt < CACHE_TTL;
+  const fresh = fileAt > 0 && Date.now() - fileAt < ttl;
   // Data fra disken er så gamle som filen - ellers kunne de leve 6 t mere i hukommelsen.
-  const entry = { promise: null, at: fresh ? fileAt : Date.now() };
-  const expireSoon = () => { entry.at = Date.now() - CACHE_TTL + FAIL_TTL; };
+  const entry = { promise: null, at: fresh ? fileAt : Date.now(), ttl };
+  const expireSoon = () => { entry.at = Date.now() - ttl + FAIL_TTL; };
   entry.promise = (async () => {
     if (fresh) {
       try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { entry.at = Date.now(); }
@@ -833,10 +834,11 @@ async function mcpCall(name, args, timeout = 20000) {
   return parseOpggText(j.result?.content?.[0]?.text);
 }
 
-function fetchSummonerScout(region, gameName, tagLine) {
+// prefix/ttl: din egen profil caches for sig og kun 10 min (spejderen: 6 t).
+function fetchSummonerScout(region, gameName, tagLine, { prefix = 'scout', ttl } = {}) {
   // Spillernavne ikke i filnavnet: kort hash.
   const id = createHash('sha1').update(`${region}|${gameName}#${tagLine}`.toLowerCase()).digest('hex').slice(0, 16);
-  return cachedJson(`scout_${id}`, async () => {
+  return cachedJson(`${prefix}_${id}`, async () => {
     const d = await mcpCall('lol_get_summoner_profile', { game_name: gameName, tag_line: tagLine, region, desired_output_fields: SCOUT_FIELDS });
     const s = d?.data?.summoner;
     if (!s || typeof s !== 'object') throw new Error('OP.GG: ingen spiller i svaret');
@@ -852,7 +854,7 @@ function fetchSummonerScout(region, gameName, tagLine) {
         champs: (Array.isArray(r.my_champion_stats) ? r.my_champion_stats : []).map((c) => ({ id: String(c.id), play: Number(c.play) || 0, win: Number(c.win) || 0 })),
       } : null,
     };
-  });
+  }, ttl);
 }
 
 const TIER_NAME = (t) => String(t).charAt(0) + String(t).slice(1).toLowerCase();
@@ -931,6 +933,169 @@ function scoutView() {
     rank: e.result.rank,
     age: e.result.age,
   }));
+}
+
+// ---------- Din profil: link til din OP.GG + dine egne tal øverst i vinduet ----------
+// Klientens egne tal først (gratis, lokalt): Riot ID, rank/LP/sejre/nederlag og kamphistorikken.
+// OP.GG (samme MCP-opslag, cache og max-4-grænse som spejderen) kun til det klienten ikke har: mest spillede champions i sæsonen.
+// Hvert tal har sin kilde med. Svarer OP.GG ikke, vises kun klientens tal - aldrig gættede tal.
+const OPGG_LINK = 'https://op.gg';
+const PROFILE_REFRESH_MS = 10 * 60 * 1000; // højst hvert 10. min (plus efter hver kamp)
+const PROFILE_ID_MS = Number(process.env.LOL_HELPER_PROFILE_ID_MS) || 60 * 1000; // hvem er logget ind (vennen kan skifte konto)
+const PROFILE_RECENT = 20;                 // seneste kampe til formen
+const ROMAN = { 1: 'I', 2: 'II', 3: 'III', 4: 'IV' };
+const APEX = ['MASTER', 'GRANDMASTER', 'CHALLENGER'];
+// OP.GG's profil-URL (verificeret 9/11-2026 mod op.gg): /lol/summoners/<region, små bogstaver>/<gameName>-<tagLine>,
+// begge dele URL-kodet som OP.GG's egne links (mellemrum = %20, æøå/ś/Ν som UTF-8). Region = OP.GG's slug (eune, euw, na, kr ...).
+function opggProfileUrl(region, gameName, tagLine) {
+  if (!region || !gameName || !tagLine) return null;
+  return `${OPGG_LINK}/lol/summoners/${String(region).toLowerCase()}/${encodeURIComponent(gameName)}-${encodeURIComponent(tagLine)}`;
+}
+
+// Hvem er logget ind: /lol-summoner/v1/current-summoner (gameName, tagLine, puuid - verificeret i rigtig klient),
+// ellers /lol-chat/v1/me (gameName, gameTag, platformId). Skifter kontoen, nulstilles profilen.
+async function refreshIdentity(force = false) {
+  if (!app.client || (!force && app.meAt && Date.now() - app.meAt < PROFILE_ID_MS)) return app.me;
+  app.meAt = Date.now();
+  const s = await lcu(app.client, 'GET', '/lol-summoner/v1/current-summoner').catch(() => null);
+  let gameName = typeof s?.gameName === 'string' && s.gameName ? s.gameName : null;
+  let tagLine = typeof s?.tagLine === 'string' && s.tagLine ? s.tagLine : null;
+  let platform = null;
+  if (!gameName || !tagLine) {
+    const c = await lcu(app.client, 'GET', '/lol-chat/v1/me').catch(() => null);
+    if (typeof c?.gameName === 'string' && c.gameName && typeof c?.gameTag === 'string' && c.gameTag) { gameName = c.gameName; tagLine = c.gameTag; }
+    platform = c?.platformId || null;
+  }
+  if (!gameName || !tagLine) return app.me;
+  const puuid = typeof s?.puuid === 'string' && s.puuid ? s.puuid : null;
+  const region = (await summonerRegion()) || toOpggRegion(platform);
+  const key = puuid || `${gameName}#${tagLine}`;
+  if (app.me && app.me.key !== key) {
+    log(`Ny konto logget ind: ${gameName}#${tagLine} - henter din profil.`);
+    app.profile = null;
+    app.profileAt = 0;
+  }
+  const changed = !app.me || app.me.key !== key || app.me.region !== region || app.me.gameName !== gameName || app.me.tagLine !== tagLine;
+  app.me = { key, puuid, gameName, tagLine, region };
+  if (puuid) app.puuid = puuid;
+  if (changed) broadcast();
+  return app.me;
+}
+
+// Klientens rank pr. kø (/lol-ranked/v1/current-ranked-stats, queues[]: tier, division "II"/"NA", leaguePoints, wins, losses).
+function clientQueue(r, type) {
+  const q = r?.queueMap?.[type] || (Array.isArray(r?.queues) ? r.queues.find((x) => x?.queueType === type) : null);
+  if (!q || typeof q !== 'object') return null;
+  const tier = typeof q.tier === 'string' && q.tier && q.tier !== 'NONE' ? q.tier.toUpperCase() : null;
+  const div = typeof q.division === 'string' && /^(I|II|III|IV)$/.test(q.division) ? q.division : null;
+  const n = (v) => (typeof v === 'number' && v >= 0 ? v : null);
+  return { tier, division: tier && !APEX.includes(tier) ? div : null, lp: tier ? n(q.leaguePoints) : null, wins: n(q.wins), losses: n(q.losses) };
+}
+// OP.GG's league_stats (game_type SOLORANKED/FLEXRANKED, division som tal) - kun hvis klienten intet har.
+function opggQueue(o, type) {
+  const t = (o?.tiers || []).find((x) => x.type === type);
+  if (!t) return null;
+  const tier = t.tier ? String(t.tier).toUpperCase() : null;
+  const n = (v) => (typeof v === 'number' && v >= 0 ? v : null);
+  return { tier, division: tier && !APEX.includes(tier) ? ROMAN[t.division] || null : null, lp: tier ? n(t.lp) : null, wins: n(t.win), losses: n(t.lose) };
+}
+
+async function refreshProfile(force = false) {
+  if (!app.client || app.profileBusy) return;
+  const me = await refreshIdentity(force);
+  if (!me) return;
+  if (!force && app.profile && Date.now() - (app.profileAt || 0) < PROFILE_REFRESH_MS) return;
+  app.profileBusy = true;
+  app.profileAt = Date.now();
+  try {
+    const key = me.key;
+    const [ranked, mh] = await Promise.all([
+      lcu(app.client, 'GET', '/lol-ranked/v1/current-ranked-stats').catch(() => null),
+      lcu(app.client, 'GET', '/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=50').catch(() => null),
+    ]);
+    // Seneste kampe på Summoner's Rift (samme filter som klatre-tjekket), nyeste først.
+    const games = (Array.isArray(mh?.games?.games) ? mh.games.games : [])
+      .filter((x) => x?.mapId === 11 && ['CLASSIC', 'SWIFTPLAY'].includes(x.gameMode) && typeof x.participants?.[0]?.stats?.win === 'boolean'
+        && (!x.endOfGameResult || x.endOfGameResult === 'GameComplete'))
+      .sort((a, b) => (b.gameCreation || 0) - (a.gameCreation || 0))
+      .map((x) => ({ win: x.participants[0].stats.win, champ: x.participants[0].championId }));
+    if (app.me?.key !== key) return; // kontoen skiftede undervejs
+    const prev = app.profile?.key === key ? app.profile : null;
+    const p = {
+      key,
+      at: Date.now(),
+      solo: clientQueue(ranked, 'RANKED_SOLO_5x5'),
+      flex: clientQueue(ranked, 'RANKED_FLEX_SR'),
+      recent: games.length ? games.slice(0, PROFILE_RECENT) : null,
+      recentAll: games,
+      opgg: prev?.opgg || null,
+      opggStatus: prev?.opgg ? 'ok' : 'loading',
+    };
+    app.profile = p;
+    broadcast();
+    if (!me.region) { p.opggStatus = 'none'; broadcast(); return; }
+    try {
+      p.opgg = await fetchSummonerScout(me.region, me.gameName, me.tagLine, { prefix: 'me', ttl: PROFILE_REFRESH_MS });
+      p.opggStatus = 'ok';
+    } catch {
+      p.opgg = null; // stille: kun klientens tal
+      p.opggStatus = 'none';
+    }
+    if (app.me?.key === key) broadcast();
+  } finally { app.profileBusy = false; }
+}
+
+const fmtDate = (ms) => new Date(ms).toLocaleDateString('da-DK', { day: 'numeric', month: 'numeric' });
+function rankRow(label, q, source) {
+  if (!q) return null;
+  const games = q.wins != null && q.losses != null ? q.wins + q.losses : null;
+  return {
+    queue: label,
+    rank: q.tier ? `${TIER_NAME(q.tier)}${q.division ? ` ${q.division}` : ''}` : null,
+    lp: q.lp,
+    wins: q.wins, losses: q.losses, games,
+    wr: games ? q.wins / games : null,
+    source,
+  };
+}
+
+function profileLink() {
+  const m = app.me;
+  if (!m) return null;
+  return { name: `${m.gameName}#${m.tagLine}`, url: opggProfileUrl(m.region, m.gameName, m.tagLine) };
+}
+
+function profileView() {
+  const p = app.profile;
+  const m = app.me;
+  if (!p || !m || p.key !== m.key) return null;
+  const o = p.opggStatus === 'ok' ? p.opgg : null;
+  const opggAt = Date.parse(o?.updatedAt || '');
+  const opggSrc = `OP.GG${opggAt ? `, opdateret ${fmtDate(opggAt)}` : ''}`;
+  // Rank: klienten først; mangler køen helt i klientens svar, OP.GG's tal (med OP.GG som kilde).
+  const queue = (label, cq, type) => (cq ? rankRow(label, cq, 'klienten') : o ? rankRow(label, opggQueue(o, type), opggSrc) : null);
+  const ranks = [queue('Solo/duo', p.solo, 'SOLORANKED'), queue('Flex', p.flex, 'FLEXRANKED')].filter(Boolean);
+  // Mest spillede: OP.GG's ranked denne sæson; ellers klientens seneste kampe på Summoner's Rift.
+  let champs = null;
+  if (o?.ranked?.champs?.length) {
+    champs = { scope: 'ranked denne sæson', source: opggSrc,
+      list: [...o.ranked.champs].filter((c) => c.play > 0).sort((a, b) => b.play - a.play).slice(0, 3)
+        .map((c) => ({ champion: champView(c.id), games: c.play, wins: c.win, wr: c.win / c.play })) };
+  } else if (p.recentAll?.length) {
+    const by = new Map();
+    for (const g of p.recentAll) { const x = by.get(g.champ) || { id: g.champ, games: 0, wins: 0 }; x.games++; if (g.win) x.wins++; by.set(g.champ, x); }
+    champs = { scope: `dine seneste ${p.recentAll.length} kampe på Summoner's Rift`, source: 'klienten',
+      list: [...by.values()].sort((a, b) => b.games - a.games).slice(0, 3)
+        .map((c) => ({ champion: champView(String(c.id)), games: c.games, wins: c.wins, wr: c.wins / c.games })) };
+  }
+  const r = p.recent;
+  return {
+    ...profileLink(),
+    ranks,
+    champs,
+    recent: r ? { games: r.length, wins: r.filter((g) => g.win).length, source: 'klienten' } : null,
+    opgg: p.opggStatus,
+  };
 }
 
 // ---------- Gameplan mod din lane-modstander ----------
@@ -3992,7 +4157,7 @@ function poolPick(championId, position) {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.22.2';
+const VERSION = '1.23.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -4926,6 +5091,13 @@ const app = {
   ejKey: null,
   ejFailAt: 0,
   summonerRegion: null, // OP.GG-region fra klienten (til spejder-opslag)
+  me: null,            // { key, puuid, gameName, tagLine, region } - kontoen der er logget ind (link til din OP.GG)
+  meAt: 0,
+  profile: null,       // din profil øverst i vinduet (klientens tal + OP.GG)
+  profileAt: 0,
+  profileBusy: false,
+  profileAfterGame: false, // hent profilen igen efter kampen
+  profileRecheckAt: 0,  // og én gang til lidt senere (LP/kamphistorik kan halte)
   puuid: null,         // din puuid (til kampgennemgangen)
   rank: null,          // { tier, division } i solo/duo fra klienten (klatre-tjekkets referencetal)
   pickMastery: null,   // { championId, points } for den champion du har låst
@@ -5148,6 +5320,9 @@ function viewModel() {
     autostart: autostartSupported() ? autostartEnabled() : null,
     version: VERSION,
     pid: process.pid,
+    // Link til din OP.GG (alle skærme) + din profil (kun før/efter kampen).
+    me: safeView(profileLink),
+    profile: app.live ? null : safeView(profileView),
     voice: Boolean(app.cfg.voice),
     enemyAlerts: Boolean(app.cfg.enemyAlerts),
     update: app.update && { version: app.update.version, notes: app.update.notes, canApply: IS_SEA && !RUNS_FROM_ZIP, inProgress: updateRunning, error: app.update.error || null },
@@ -5820,6 +5995,9 @@ async function tick() {
   }
   const phase = await lcu(app.client, 'GET', '/lol-gameflow/v1/gameflow-phase');
   if (app.phase !== phase) { app.phase = phase; broadcast(); }
+  // Din OP.GG-link: hvem er logget ind (kun GET, højst hvert minut) - også under kampen, så linket altid står der.
+  refreshIdentity().catch(() => {});
+  if (phase === 'InProgress') app.profileAfterGame = true;
   if (phase !== 'ChampSelect') {
     if (app.hover) { app.hover = null; broadcast(); }
     // Replay-knappen: klientens replay-indstillinger (kun GET, kun når klienten er ledig).
@@ -5836,7 +6014,14 @@ async function tick() {
     if (app.draft || app.draftKey || app.draftStatus) { app.draft = null; app.draftKey = null; app.draftStatus = null; }
     // Tilbage i lobbyen uden kamp (fx dodge): vis ikke den gamle champion select.
     if ((app.pick || app.enemyJungle) && ['None', 'Lobby', 'Matchmaking', 'ReadyCheck'].includes(phase)) { clearPick(); broadcast(); }
-    if (['None', 'Lobby', 'EndOfGame'].includes(phase)) { upgradeOldReviews(phase); refreshRecentGames().catch(() => {}); }
+    if (['None', 'Lobby', 'EndOfGame'].includes(phase)) {
+      upgradeOldReviews(phase);
+      refreshRecentGames().catch(() => {});
+      // Din profil: ved start, efter hver kamp (+ igen 2 min efter, LP kan halte) og ellers højst hvert 10. min.
+      const after = app.profileAfterGame || (app.profileRecheckAt && Date.now() > app.profileRecheckAt);
+      if (app.profileAfterGame) { app.profileAfterGame = false; app.profileRecheckAt = Date.now() + 120000; } else if (after) app.profileRecheckAt = 0;
+      refreshProfile(Boolean(after)).catch(() => {});
+    }
     return cfg.pollMs;
   }
   const session = await lcu(app.client, 'GET', '/lol-champ-select/v1/session');
@@ -6018,6 +6203,7 @@ async function main() {
         app.client = null;
         app.summonerRegion = null;
         app.puuid = null;
+        app.me = null; app.meAt = 0; app.profile = null; app.profileAt = 0; // ny klient kan være en anden konto
         setStatus('Mistede forbindelsen til klienten - leder igen...');
       } else {
         log(`Fejl: ${e.message}`);

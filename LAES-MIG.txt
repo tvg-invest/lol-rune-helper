@@ -43,6 +43,15 @@ EFTER KAMPEN
 Vinduet viser en kampoversigt: resultat, KDA, CS/min, dine køb (og om de var blandt
 forslagene) + en tabel over dine champions. Gemmes i history.json ved siden af programmet.
 
+DIN OP.GG OG DIN PROFIL (NYT I 1.23)
+Øverst i vinduet står "Din OP.GG" med dit Riot ID - et klik åbner din OP.GG-side i en ny
+fane (også fra telefonen). Linket følger kontoen der er logget ind i klienten.
+Øverst på startskærmen står "Din profil": rank og LP i solo/duo og flex, sejre, nederlag
+og win rate denne sæson og dine seneste 20 kampe (fra klienten) + dine 3 mest spillede
+champions i ranked denne sæson med kampe og win rate (fra OP.GG). Hvert tal står med sin
+kilde. Svarer OP.GG ikke, vises kun klientens tal. Opdateres ved start, efter hver kamp
+og ellers højst hvert 10. minut.
+
 SPEJDER (NYT I 1.18)
 Når kampen starter, slår programmet din lane-modstander og fjendens jungler op på OP.GG:
 fx "Darius: 340 ranked-kampe, 61% WR denne sæson (68% af spillerens ranked-kampe) · Gold 2"

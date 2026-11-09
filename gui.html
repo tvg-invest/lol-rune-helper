@@ -115,7 +115,18 @@
     .prow .cs { display: none; }
     .prow .its { grid-column: 2 / -1; }
   }
-  .toolbar { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 8px; }
+  .toolbar { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .toolbar .opgg { margin-right: auto; font-size: 13px; color: var(--gold); text-decoration: none; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .toolbar .opgg:hover { border-color: var(--gold); }
+  .toolbar .opgg .rid { color: var(--muted); margin-left: 6px; }
+  .prof-ranks { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 4px 0 8px; }
+  .prof-rank .q { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .prof-rank .t { font-size: 16px; color: var(--gold2); }
+  .prof-rank .s { font-size: 12px; color: var(--muted); }
+  .prof-champs { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; }
+  .prof-champs span { display: inline-flex; align-items: center; gap: 6px; }
+  .prof-champs img { width: 24px; height: 24px; border-radius: 5px; }
+  .prof-src { font-size: 11px; color: var(--muted); margin-top: 3px; }
   .toolbar button { font-size: 12px; padding: 4px 10px; background: var(--panel); }
   /* Overlay (Picture-in-Picture-vindue, altid øverst) */
   body.ov { background: rgba(10,14,20,.96); }
@@ -1178,13 +1189,14 @@ const DRAFT_STATUS = {
 };
 
 function renderInto(s) {
-  if (['127.0.0.1', 'localhost'].includes(location.hostname)) put(toolbar(s));
+  put(toolbar(s, ['127.0.0.1', 'localhost'].includes(location.hostname)));
   const banner = updateBanner(s);
   if (banner) put(banner);
   if (s.live) return renderLive(s);
   if (!s.champion && s.draft) return renderDraft(s);
   if (!s.champion) {
     put(
+      profileCard(s.profile),
       s.draftStatus ? el('div', { class: 'card' }, el('h2', {}, 'Champion select'), statusLine(s), el('div', { class: 'muted', style: 'margin-top:8px' }, DRAFT_STATUS[s.draftStatus] || '')) :
       el('div', { class: 'card' + (s.history ? '' : ' empty') }, el('div', { class: 'big', style: s.history ? 'font-size:18px;color:var(--gold2)' : '' }, 'LoL Rune Helper'), statusLine(s),
         el('p', { class: 'muted' }, 'I champion select får du ban- og counterpick-forslag; når du låser, sætter jeg runer, summoners og items. Under kampen kommer købsforslag og scoreboard her.'), obsLine(s)),
@@ -1342,8 +1354,37 @@ function trackAffordable(s) {
   affordable = now;
 }
 
-function toolbar(s) {
+// Link til din OP.GG - på alle skærme, også fra telefonen. Åbner i en ny fane.
+function opggLink(s) {
+  if (!s.me || !s.me.url) return null;
+  return el('a', { class: 'opgg', href: s.me.url, target: '_blank', rel: 'noopener', title: `Åbn ${s.me.name} på OP.GG` }, 'Din OP.GG', el('span', { class: 'rid' }, s.me.name));
+}
+
+// Din profil øverst på startskærmen. Hvert tal står med sin kilde (klienten eller OP.GG).
+function profileCard(p) {
+  if (!p) return null;
+  const wrTxt = (w, g) => `${Math.round(w / g * 100)} % WR`;
+  const rankEl = (r) => el('div', { class: 'prof-rank' }, el('div', { class: 'q' }, r.queue),
+    el('div', { class: 't' }, r.rank ? `${r.rank}${r.lp != null ? ` · ${r.lp} LP` : ''}` : 'Ingen rank'),
+    el('div', { class: 's' }, r.games ? `${r.wins} sejre, ${r.losses} nederlag · ${wrTxt(r.wins, r.games)} denne sæson` : 'Ingen kampe denne sæson'),
+    el('div', { class: 'prof-src' }, `Kilde: ${r.source}`));
+  return el('div', { class: 'card' },
+    el('h2', {}, 'Din profil ', p.url ? el('a', { href: p.url, target: '_blank', rel: 'noopener', style: 'font-size:13px;font-weight:400;text-transform:none;letter-spacing:0' }, `${p.name} på OP.GG`) : el('span', { class: 'muted', style: 'font-size:13px;font-weight:400;text-transform:none;letter-spacing:0' }, p.name)),
+    p.ranks.length ? el('div', { class: 'prof-ranks' }, p.ranks.map(rankEl)) : el('div', { class: 'muted', style: 'font-size:13px' }, 'Klienten sendte ingen rank.'),
+    p.recent ? el('div', { style: 'font-size:13px' }, `Seneste ${p.recent.games} kampe: ${p.recent.wins} sejre, ${p.recent.games - p.recent.wins} nederlag`,
+      el('span', { class: 'prof-src' }, ` · kilde: ${p.recent.source}`)) : null,
+    p.champs && p.champs.list.length ? [el('div', { class: 'plan-sub' }, `Mest spillede (${p.champs.scope})`),
+      el('div', { class: 'prof-champs' }, p.champs.list.map((c) => el('span', {}, img(c.champion.icon, c.champion.name), el('b', {}, c.champion.name),
+        `${num(c.games)} kampe · ${wrTxt(c.wins, c.games)}`))),
+      el('div', { class: 'prof-src' }, `Kilde: ${p.champs.source}`)] : null,
+    p.opgg === 'loading' ? el('div', { class: 'prof-src' }, 'Henter fra OP.GG...') : null,
+    p.opgg === 'none' ? el('div', { class: 'prof-src' }, 'OP.GG svarede ikke - kun klientens tal.') : null);
+}
+
+function toolbar(s, local) {
+  if (!local) { const a = opggLink(s); return a ? el('div', { class: 'toolbar' }, a) : null; }
   return el('div', { class: 'toolbar' },
+    opggLink(s),
     s.autostart != null ? el('button', {
       title: 'Starter programmet i baggrunden når du logger ind (uden at åbne browseren)',
       onclick: () => post('/api/autostart', { enabled: !s.autostart }),

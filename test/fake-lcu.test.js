@@ -103,7 +103,10 @@ const server = http.createServer((req, res) => {
     const second = req.headers.authorization === `Basic ${Buffer.from('riot:testpw2').toString('base64')}`;
     // Tredje kopi (replay-testen): egen fase og klientens replay-endpoints.
     const third = req.headers.authorization === `Basic ${Buffer.from('riot:testpw3').toString('base64')}`;
-    if (req.headers.authorization !== `Basic ${auth}` && !second && !third) { res.writeHead(401); return res.end(); }
+    // Fjerde kopi (profil-testen): egen konto, rank og kamphistorik - og kontoskift.
+    const fourth = req.headers.authorization === `Basic ${Buffer.from('riot:testpw4').toString('base64')}`;
+    if (req.headers.authorization !== `Basic ${auth}` && !second && !third && !fourth) { res.writeHead(401); return res.end(); }
+    if (fourth) return fakeProfileLcu(req, res);
     if (second && req.url === '/lol-gameflow/v1/gameflow-phase') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(state.phase2)); }
     if (third && fakeReplayLcu(req, res, body)) return;
     calls.push({ method: req.method, url: req.url, body: body ? JSON.parse(body) : undefined });
@@ -159,6 +162,8 @@ const mcpServer = http.createServer((req, res) => {
       const now = new Date().toISOString();
       const body2 = a.game_name === 'Fedzed'
         ? `LolGetSummonerProfile(Data(Summoner("${now}",[LeagueStat("SOLORANKED",TierInfo("GOLD",2,40),300,280),LeagueStat("FLEXRANKED",TierInfo(null,null,null),null,null)],RankedMostChampions("RANKED",33,500,290,[MyChampionStat(238,340,207),MyChampionStat(91,160,83)]))))`
+        : a.game_name === 'Tobias Æblegrød'
+          ? `LolGetSummonerProfile(Data(Summoner("${now}",[LeagueStat("SOLORANKED",TierInfo("BRONZE",2,14),33,53),LeagueStat("FLEXRANKED",TierInfo(null,null,null),null,null)],RankedMostChampions("RANKED",33,84,33,[MyChampionStat(28,11,7),MyChampionStat(7,52,19),MyChampionStat(17,5,3),MyChampionStat(23,4,2)]))))`
         : a.game_name === 'Jg'
           ? `LolGetSummonerProfile(Data(Summoner("${now}",[LeagueStat("SOLORANKED",TierInfo("MASTER",1,120),90,80)],RankedMostChampions("RANKED",33,170,90,[MyChampionStat(64,120,60),MyChampionStat(121,50,30)]))))`
           : null;
@@ -1157,6 +1162,121 @@ async function coachTest(cmd, args, baseEnv, tmp) {
   }
 }
 
+// ---------- Din profil + link til din OP.GG (fjerde kopi, egen falsk klient) ----------
+// Formen er den rigtige klients (verificeret 9/11-2026 på Tobias' pc): current-summoner har gameName/tagLine/puuid,
+// current-ranked-stats har queues[] + queueMap med tier "" og division "NA" når køen ikke er spillet.
+const PROFILE_ACCOUNTS = {
+  a: { summoner: { summonerId: 91, accountId: 92, puuid: 'acc-a', gameName: 'Tobias Æblegrød', tagLine: 'ØØ1', displayName: '' },
+    ranked: { queues: [
+      { queueType: 'RANKED_SOLO_5x5', tier: 'BRONZE', division: 'II', leaguePoints: 10, wins: 34, losses: 54, isProvisional: false },
+      { queueType: 'RANKED_FLEX_SR', tier: '', division: 'NA', leaguePoints: 0, wins: 0, losses: 0, isProvisional: true },
+      { queueType: 'RANKED_TFT', tier: '', division: 'NA', leaguePoints: 0, wins: 0, losses: 0, isProvisional: true },
+    ] } },
+  // Vennens konto: navnet findes ikke på OP.GG (fejl) -> kun klientens tal. Rank i flex, ingen i solo.
+  b: { summoner: { summonerId: 93, accountId: 94, puuid: 'acc-b', gameName: 'Ven #1 / ?&', tagLine: 'EUNE', displayName: '' },
+    ranked: { queueMap: {
+      RANKED_SOLO_5x5: { queueType: 'RANKED_SOLO_5x5', tier: '', division: 'NA', leaguePoints: 0, wins: 0, losses: 0 },
+      RANKED_FLEX_SR: { queueType: 'RANKED_FLEX_SR', tier: 'SILVER', division: 'IV', leaguePoints: 75, wins: 6, losses: 4 },
+    } } },
+};
+const profileState = { account: 'a', calls: [] };
+// Klientens kamphistorik (listen): participants[0] = dig. 3 kampe på SR + 1 ARAM (tæller ikke).
+const pgame = (gameId, championId, win, extra = {}) => ({ gameId, gameCreation: 1762700000000 + gameId * 1000, gameDuration: 1700, mapId: 11, gameMode: 'CLASSIC', queueId: 420,
+  endOfGameResult: 'GameComplete', participants: [{ championId, stats: { win } }], ...extra });
+const PROFILE_MATCHES = {
+  a: [pgame(3, 7, true), pgame(2, 7, false), pgame(1, 28, true), pgame(4, 103, true, { mapId: 12, gameMode: 'ARAM' })],
+  b: [pgame(5, 64, false), pgame(6, 64, true), pgame(7, 121, true)],
+};
+function fakeProfileLcu(req, res) {
+  const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(obj === undefined ? '' : JSON.stringify(obj)); };
+  const acc = PROFILE_ACCOUNTS[profileState.account];
+  const key = `${req.method} ${req.url}`;
+  profileState.calls.push(key);
+  if (req.method !== 'GET') return send(405, { message: 'kun GET i profil-testen' });
+  if (key === 'GET /lol-gameflow/v1/gameflow-phase') return send(200, profileState.phase || 'Lobby');
+  if (key === 'GET /riotclient/region-locale') return send(200, { locale: 'en_US', region: 'EUNE', webLanguage: 'en', webRegion: 'eune' });
+  if (key === 'GET /lol-summoner/v1/current-summoner') return send(200, acc.summoner);
+  if (key === 'GET /lol-ranked/v1/current-ranked-stats') return send(200, acc.ranked);
+  if (key.startsWith('GET /lol-match-history/v1/products/lol/current-summoner/matches')) return send(200, { games: { gameCount: PROFILE_MATCHES[profileState.account].length, games: PROFILE_MATCHES[profileState.account] } });
+  return send(404, { message: 'unknown ' + key });
+}
+
+async function profileTest(cmd, args, baseEnv, tmp) {
+  const dir = path.join(tmp, 'profil');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'config.json'), '{}');
+  const env = { ...baseEnv, LOL_HELPER_HISTORY: path.join(dir, 'history.json'), LOL_HELPER_CONFIG: path.join(dir, 'config.json'), LOL_HELPER_CACHE: path.join(dir, 'cache'),
+    LOL_HELPER_SHAPES: path.join(dir, 'lcu-shapes.json'), LOL_HELPER_LCU: baseEnv.LOL_HELPER_LCU.replace(/:[^:]+$/, ':testpw4'), LOL_HELPER_REMOTE: '',
+    LOL_HELPER_PROFILE_ID_MS: '1000', LOL_HELPER_LIVE: 'http:9' };
+  const scoutBefore = scoutCalls.length;
+  const child = spawn(cmd, args, { env });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  try {
+    await waitFor(() => out.includes('venter på champion select'), 30000, 'profil-kopien starter');
+    const base = /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
+    const st = async () => (await fetch(base + '/state')).json();
+    // Konto A: link + profil med OP.GG's mest spillede.
+    let s;
+    for (let i = 0; i < 60 && !((s = await st()).profile?.opgg === 'ok'); i++) await wait(250);
+    const urlA = 'https://op.gg/lol/summoners/eune/Tobias%20%C3%86blegr%C3%B8d-%C3%98%C3%981';
+    assert.strictEqual(urlA, `https://op.gg/lol/summoners/eune/${encodeURIComponent('Tobias Æblegrød')}-${encodeURIComponent('ØØ1')}`);
+    assert.deepStrictEqual(s.me, { name: 'Tobias Æblegrød#ØØ1', url: urlA }, `link til OP.GG: ${JSON.stringify(s.me)}`);
+    const p = s.profile;
+    assert(p, `profil: ${JSON.stringify(s.profile)}\n${out}`);
+    assert.strictEqual(p.url, urlA);
+    assert.deepStrictEqual(p.ranks, [
+      { queue: 'Solo/duo', rank: 'Bronze II', lp: 10, wins: 34, losses: 54, games: 88, wr: 34 / 88, source: 'klienten' },
+      { queue: 'Flex', rank: null, lp: null, wins: 0, losses: 0, games: 0, wr: null, source: 'klienten' },
+    ], `rank fra klienten: ${JSON.stringify(p.ranks)}`);
+    assert.deepStrictEqual(p.recent, { games: 3, wins: 2, source: 'klienten' }, 'ARAM tæller ikke i formen');
+    assert.strictEqual(p.champs.scope, 'ranked denne sæson');
+    assert(/^OP\.GG, opdateret /.test(p.champs.source), p.champs.source);
+    assert.deepStrictEqual(p.champs.list.map((c) => [c.champion.name, c.games, c.wins]), [['LeBlanc', 52, 19], ['Evelynn', 11, 7], ['Teemo', 5, 3]], 'top 3 fra OP.GG');
+    const sc = scoutCalls.slice(scoutBefore).find((a) => a.game_name === 'Tobias Æblegrød');
+    assert(sc && sc.tag_line === 'ØØ1' && sc.region === 'EUNE', `OP.GG-opslaget: ${JSON.stringify(scoutCalls.slice(scoutBefore))}`);
+    const page = await (await fetch(base + '/')).text();
+    assert(page.includes("'Din OP.GG'") && page.includes("target: '_blank'"), 'linket står i vinduet og åbner i ny fane');
+    assert(/function toolbar\(s, local\) \{\n  if \(!local\) \{ const a = opggLink\(s\)/.test(page), 'linket vises også fra telefonen (uden de lokale knapper)');
+    console.log('Profil A:', s.me.name, '|', p.ranks.map((r) => `${r.queue} ${r.rank || 'ingen'} ${r.lp ?? ''} (${r.source})`).join(' · '), '|', p.champs.list.map((c) => `${c.champion.name} ${c.games}`).join(', '));
+
+    // Under kampen: linket står der stadig, profilkortet ikke.
+    profileState.phase = 'InProgress';
+    let live;
+    for (let i = 0; i < 20 && (live = await st()).profile; i++) await wait(250);
+    // (ingen live-data i denne kopi, så app.live er tom - linket skal stadig være der)
+    assert.deepStrictEqual(live.me, s.me, 'linket under kamp');
+    profileState.phase = 'Lobby';
+
+    // Kontoskift (vennen logger ind på sin egen konto): nyt link, ny profil, OP.GG kender ham ikke -> kun klientens tal.
+    profileState.account = 'b';
+    let sb;
+    for (let i = 0; i < 80 && !((sb = await st()).profile?.opgg === 'none' && sb.me?.name.startsWith('Ven')); i++) await wait(250);
+    const urlB = 'https://op.gg/lol/summoners/eune/Ven%20%231%20%2F%20%3F%26-EUNE';
+    assert.deepStrictEqual(sb.me, { name: 'Ven #1 / ?&#EUNE', url: urlB }, `nyt link efter kontoskift: ${JSON.stringify(sb.me)}\n${out}`);
+    const pb = sb.profile;
+    assert(pb && pb.opgg === 'none', `uden OP.GG: ${JSON.stringify(pb)}`);
+    assert.deepStrictEqual(pb.ranks.map((r) => [r.queue, r.rank, r.lp, r.wins, r.losses, r.source]),
+      [['Solo/duo', null, null, 0, 0, 'klienten'], ['Flex', 'Silver IV', 75, 6, 4, 'klienten']]);
+    assert.strictEqual(pb.champs.source, 'klienten', 'mest spillede fra klienten når OP.GG ikke svarer');
+    assert.strictEqual(pb.champs.scope, "dine seneste 3 kampe på Summoner's Rift");
+    assert.deepStrictEqual(pb.champs.list.map((c) => [c.champion.name, c.games, c.wins]), [['Lee Sin', 2, 1], ["Kha'Zix", 1, 1]]);
+    assert(!JSON.stringify(pb).includes('LeBlanc'), 'intet fra konto A');
+    assert(/Ny konto logget ind: Ven/.test(out), 'kontoskiftet logges');
+    console.log('Profil B (uden OP.GG):', sb.me.name, '|', pb.ranks.map((r) => `${r.queue} ${r.rank || 'ingen'} (${r.source})`).join(' · '));
+    // Kun GET mod klienten.
+    assert(profileState.calls.every((c) => c.startsWith('GET ')), 'kun GET');
+    profileState.account = 'a';
+    assert(!/Fejl/.test(out), `ingen fejl i profil-kopien: ${out}`);
+  } catch (e) {
+    console.log(out);
+    throw e;
+  } finally {
+    child.kill();
+  }
+}
+
 liveServer.listen(0, '127.0.0.1');
 mcpServer.listen(0, '127.0.0.1');
 opggWeb.listen(0, '127.0.0.1');
@@ -1965,6 +2085,9 @@ server.listen(0, '127.0.0.1', async () => {
 
     // 8r) "Se det i replayet", klip ved rådene og champion-puljen (endnu en kopi, falsk Replay API)
     await replayTest(cmd, args, env, tmp);
+
+    // 8t) Din profil + link til din OP.GG: Riot ID med mellemrum/æøå, med og uden OP.GG, kontoskift (endnu en kopi)
+    await profileTest(cmd, args, env, tmp);
 
     // 8s) Klip der ikke blev koblet til kampen: Tobias' rigtige filer (10/10 og 7/7), skæve tilfælde og genstart midt i kampen
     await clipTest(cmd, args, env, tmp);
