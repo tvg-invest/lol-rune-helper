@@ -207,6 +207,9 @@
   .clip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
   .clip video { width: 100%; max-width: 480px; border-radius: 8px; }
   select { font: inherit; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  .climb-tip { margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: var(--panel2); border-left: 4px solid var(--blue); font-size: 13px; }
+  .climb-guard { margin: 4px 0 10px; padding: 8px 12px; border-radius: 8px; background: rgba(200,170,110,.12); border-left: 4px solid var(--gold); font-size: 13px; }
+  .climb-src { font-size: 11px; color: var(--muted); }
   .phone { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
   .phone .qr { background: #fff; padding: 8px; border-radius: 8px; }
   .phone a { color: var(--gold2); word-break: break-all; font-size: 12px; }
@@ -318,6 +321,7 @@ function renderDraft(s) {
     el('header', {},
       el('div', {}, el('h1', {}, 'Champion select'), el('div', { class: 'meta' }, `Din rolle: ${d.position}`), statusLine(s),
         d.myBanTurn ? el('div', { class: 'turn' }, 'DIN TUR TIL AT BANNE') : null)),
+    guardBox(s.climbGuard),
     el('div', { class: 'grid' },
       el('div', {},
         el('div', { class: 'card' }, el('h2', {}, d.bansFor ? `Ban-forslag til ${d.bansFor.name}` : 'Ban-forslag'),
@@ -494,6 +498,7 @@ function reviewCard(s) {
       r.team && r.team.length > 1 ? [el('div', { class: 'plan-sub' }, 'Holdets guldforskel pr. minut'), goldChart(r.team)] : null,
       r.items.length ? [el('div', { class: 'plan-sub' }, 'Dine første færdige items (fra live-data under kampen)'),
         el('div', { class: 'buys' }, r.items.map((it) => el('div', { class: 'buy' }, img(it.icon, it.name), clock(it.t))))] : null,
+      climbGameBlock(r.climb),
     ] : el('div', { class: 'muted' }, g.outdated
       ? 'Gennemgangen er lavet med en ældre version (uden lane-modstander og guld). Den hentes igen af sig selv, når klienten er ledig - eller klik herunder.'
       : 'Ingen timeline for denne kamp.'),
@@ -552,6 +557,73 @@ function patternsPickCard(p) {
   return el('div', { class: 'card' }, el('h2', {}, `Dine mønstre (${p.games} kampe)`),
     el('ul', { class: 'notes', style: 'margin-top:0' }, p.lines.map((l) => el('li', {}, l))),
     el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' }, 'Sammenhænge i dine egne kampe - ikke årsager.'));
+}
+
+// ---------- Klatre-tjek (de kendte low elo-huller i dine egne kampe) ----------
+const dec1 = (x, n = 1) => x.toFixed(n).replace('.', ',');
+const srcLink = (url, text = 'kilde') => url ? el('a', { href: url, target: '_blank', rel: 'noopener', class: 'climb-src' }, text) : null;
+function tipBox(tip) {
+  if (!tip) return null;
+  return el('div', { class: 'climb-tip' }, tip.text, el('div', { class: 'climb-src', style: 'margin-top:3px' }, tip.source, ' - ', srcLink(tip.url)));
+}
+const guardBox = (g) => (g ? el('div', { class: 'climb-guard' }, g.text, g.url ? [' ', srcLink(g.url)] : null) : null);
+
+// Under kampgennemgangen: kampens op til 3 største huller mod din median + kampen mod kilden.
+function climbGameBlock(c) {
+  if (!c) return null;
+  return [el('div', { class: 'plan-sub' }, 'Klatre-tjek: kampens største huller'),
+    c.leaks.length ? el('ol', { class: 'notes' }, c.leaks.map((l) => el('li', {}, l.text, el('div', { class: 'muted', style: 'font-size:12px' }, l.wins))))
+      : el('div', { class: 'muted', style: 'font-size:13px;margin-top:4px' }, `Ingen af de målte huller var værre end din median i denne kamp (eller der er under 10 kampe at sammenligne med i ${c.scope}).`),
+    c.leaks.length && c.leaks[0].tip ? tipBox(c.leaks[0].tip) : null,
+    c.refs && c.refs.length ? [el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Mod kilden (NA ranked solo, okt. 2026): ', srcLink(c.refUrl, 'amitilted.com')),
+      el('ul', { class: 'notes', style: 'font-size:12px;margin-top:2px' }, c.refs.map((r) => el('li', {}, r)))] : null];
+}
+
+function climbCard(c) {
+  if (!c) return null;
+  const t = c.tilt;
+  const row = (r) => `${r.wins} af ${r.games}`;
+  return el('div', { class: 'card' }, el('h2', {}, 'Klatre-tjek'),
+    el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:6px' },
+      `De kendte grunde til at man ikke klatrer i low elo, målt i ${c.scope} (${c.games} kampe). Kun tal - skillelinjen er din egen median.`),
+    // Sidste kamps huller står i kampgennemgangen ovenfor - kun her, hvis gennemgangen er slået fra.
+    c.last && c.last.leaks.length && !c.reviewShown ? [el('div', { class: 'plan-sub' }, `Sidste kamp: ${c.last.champion}${c.last.result ? ` (${c.last.result})` : ''}`),
+      el('ol', { class: 'notes' }, c.last.leaks.map((l) => el('li', {}, l.text, el('div', { class: 'muted', style: 'font-size:12px' }, l.wins)))),
+      tipBox(c.last.leaks[0].tip)] : null,
+    c.costs.length ? [el('div', { class: 'plan-sub' }, 'Det der hænger mest sammen med dine nederlag'),
+      el('ul', { class: 'notes' }, c.costs.map((x) => el('li', {}, x.text, ' ', x.tip ? srcLink(x.tip.url) : null)))]
+      : el('div', { class: 'muted', style: 'font-size:13px' }, `Sammenligningen kommer, når ${c.minGames} kampe har kampgennemgang med de nye tal.`),
+    c.lead || c.phases || c.multi ? [el('div', { class: 'plan-sub' }, 'Føring og dødsfald'),
+      el('ul', { class: 'notes' },
+        c.lead ? el('li', {}, c.lead) : null,
+        c.phases ? el('li', {}, `Dødsfald pr. 10 min: ${c.phases.rows.map((r) => `${r.label} ${dec1(r.per10)}`).join(' - ')} (${c.phases.games} kampe)`) : null,
+        c.multi ? el('li', {}, c.multi) : null)] : null,
+    c.trends.length ? [el('div', { class: 'plan-sub' }, 'Udvikling: median i dine sidste 10 kampe mod de 10 før'),
+      el('ul', { class: 'notes' }, c.trends.map((r) => el('li', {}, `${r.label}: `,
+        el('b', { class: r.better == null ? '' : r.better ? 'good' : 'bad' }, r.last), ` (før: ${r.before})`)))] : null,
+    c.pool ? [el('div', { class: 'plan-sub' }, `Champion-pulje (sidste ${c.pool.games} kampe)`),
+      el('div', { style: 'font-size:13px;margin-top:4px' }, `${c.pool.champions} champions i ${c.pool.roles} roller: `,
+        c.pool.list.map((x, i) => [i ? ' · ' : '', `${x.champion.name} ${x.position} ${x.wins}/${x.games}`])),
+      c.pool.topVsRest ? el('div', { style: 'font-size:13px;margin-top:2px' }, c.pool.topVsRest) : null,
+      el('div', { class: 'climb-src', style: 'margin-top:2px' }, 'iTero (1M+ solo queue-kampe omkring Gold): win rate krydser 50 % efter ca. 20 kampe på en champion - ', srcLink('https://itero.gg/articles/mastery-a-statistical-summary'))] : null,
+    t ? [el('div', { class: 'plan-sub' }, `Tilt og sessioner (klientens kamphistorik, ${t.games} kampe, ${t.wins} sejre)`),
+      el('ul', { class: 'notes' },
+        el('li', {}, 'Sejre efter tab i træk: ' + t.after.filter((r) => r.games).map((r) => `${r.k}${r.k === 3 ? '+' : ''} tab: ${row(r)}`).join(' - ')),
+        el('li', {}, `1.-2. kamp i en session: ${row(t.nth.early)} - 3. kamp eller senere: ${row(t.nth.late)}`),
+        t.hour ? el('li', {}, `Startet før kl. ${t.hour.medHour}: ${row(t.hour.before)} - fra kl. ${t.hour.medHour}: ${row(t.hour.from)} (din median for starttidspunkt)`) : null),
+      el('div', { class: 'climb-src' }, `"I træk" = næste kamp startede senest ${t.gapMin} min efter den forrige. Tilt-vagten melder efter ${t.k} tab i træk (${t.own ? 'ud fra dine egne kampe' : 'kildens tal - dine egne kampe viser ikke et tydeligt fald'}). `,
+        srcLink('https://www.itero.gg/articles/lol-tilt'))] : null,
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:8px' }, 'Sammenhænge i dine egne kampe (med antal) - ikke årsager. Kan ikke måles: minimap/jungle-tracking, recall-timing og positionering i teamfights. ',
+      srcLink(c.sources, 'Kilder og metode')));
+}
+
+// Champion select: én linje fokus + tilt-vagt + champion-erfaring.
+function climbPickCard(p) {
+  if (!p) return null;
+  return el('div', { class: 'card' }, el('h2', {}, 'Klatre-tjek'),
+    guardBox(p.guard),
+    p.focus ? [el('div', { style: 'font-size:13px' }, el('b', {}, 'Fokus: '), p.focus.text), tipBox(p.focus.tip)] : null,
+    p.mastery ? el('div', { class: 'climb-tip', style: 'border-left-color:var(--gold)' }, p.mastery.text, ' ', srcLink(p.mastery.url)) : null);
 }
 
 function obsLine(s) {
@@ -913,7 +985,9 @@ function renderInto(s) {
       el('div', { class: 'card' + (s.history ? '' : ' empty') }, el('div', { class: 'big', style: s.history ? 'font-size:18px;color:var(--gold2)' : '' }, 'LoL Rune Helper'), statusLine(s),
         el('p', { class: 'muted' }, 'I champion select får du ban- og counterpick-forslag; når du låser, sætter jeg runer, summoners og items. Under kampen kommer købsforslag og scoreboard her.'), obsLine(s)),
       s.draftStatus ? enemyJungleCard(s.enemyJungle) : null,
+      guardBox(s.climbGuard),
       reviewCard(s),
+      climbCard(s.climb),
       patternsCard(s.patterns),
       historyCards(s),
       phoneCard(s),
@@ -931,6 +1005,7 @@ function renderInto(s) {
     s.position !== 'ARAM' ? el('div', { class: 'roles' },
       el('button', { class: role ? '' : 'active', onclick: () => post('/api/role', { position: null }) }, 'Auto'),
       s.positions.map((p) => el('button', { class: role === p ? 'active' : '', onclick: () => post('/api/role', { position: p }) }, p))) : null,
+    climbPickCard(s.climbPick),
     patternsPickCard(s.patternsPick),
     gameplanCard(s.plan),
     enemyJungleCard(s.enemyJungle),

@@ -367,6 +367,14 @@ async function patternsTest(cmd, args, baseEnv, tmp) {
   games.unshift({ date: new Date(evDate).toISOString(), championId: 28, champion: 'Evelynn', gameMode: 'CLASSIC', mapNumber: 11, position: 'JUNGLE',
     result: 'Sejr', duration: 1800, kills: 8, deaths: 2, assists: 6, cs: 150, csPerMin: 5, items: [], buys: [] });
   state.matchList = [{ gameId: 5555, gameCreation: evDate - 1800 * 1000, gameDuration: 1800, participants: [{ championId: 28 }] }];
+  // Klientens kamphistorik til tilt-tallene (klatre-tjekket): 12 kampe i træk i dag, de sidste 2 tabt.
+  // Formen som den rigtige liste (list.json fra klienten): participants[0].stats.win, mapId, gameMode, queueId.
+  const now = Date.now();
+  const winSeq = [1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0];
+  winSeq.forEach((w, i) => state.matchList.push({ gameId: 9000 + i, gameCreation: now - (winSeq.length - i) * 40 * 60e3, gameDuration: 1800, mapId: 11, gameMode: 'CLASSIC',
+    queueId: 420, endOfGameResult: 'GameComplete', participants: [{ championId: 7, stats: { win: Boolean(w) } }] }));
+  // En ARAM-kamp tæller ikke med.
+  state.matchList.push({ gameId: 8999, gameCreation: now - 20 * 3600e3, gameDuration: 900, mapId: 12, gameMode: 'ARAM', queueId: 450, participants: [{ championId: 7, stats: { win: true } }] });
   // En Syndra mid-kamp med en gennemgang fra v1.18.0 (v1: ingen modstander, intet guld, ingen rute for mid, intet resultat).
   games.unshift({ date: '2026-11-03T20:00:00.000Z', championId: 134, champion: 'Syndra', gameMode: 'CLASSIC', mapNumber: 11, position: 'MID',
     result: null, duration: 1000, kills: 3, deaths: 1, assists: 2, cs: 100, csPerMin: 6, items: [], buys: [{ id: '6655', t: 700, suggested: true, adapted: false }], gameId: 6666,
@@ -422,11 +430,36 @@ async function patternsTest(cmd, args, baseEnv, tmp) {
     assert.deepStrictEqual(sy.review.items.map((x) => [x.id, x.t]), [['6655', 700]], 'items fra live-data (klientens timeline har ingen køb)');
     assert.strictEqual(sy.result, 'Sejr', 'manglende resultat udfyldt fra klienten');
     const syHist = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games.find((x) => x.gameId === 6666);
-    assert.strictEqual(syHist.review.v, 2, 'gennemgangen er gemt i det nye format');
+    assert.strictEqual(syHist.review.v, 3, 'gennemgangen er gemt i det nye format');
+    assert(syHist.review.stats && Array.isArray(syHist.review.csm) && Array.isArray(syHist.review.objectives), 'v3: stats, CS pr. minut og objectives');
+
+    // Klatre-tjekket: de 12 LeBlanc-kampe (v2-gennemgange vises stadig) + tilt fra klientens kamphistorik.
+    let climb;
+    for (let i = 0; i < 40 && !((climb = (await st()).climb)?.tilt); i++) await wait(500);
+    assert(climb?.tilt, `klatre-tjek med tilt: ${JSON.stringify(climb)}`);
+    assert.strictEqual(climb.scope, 'dine MID-kampe');
+    assert.strictEqual(climb.tilt.games, 12, 'kun Summoner\'s Rift-kampe fra klientens liste');
+    assert.deepStrictEqual(climb.tilt.after.map((r) => [r.games, r.wins]), [[7, 3], [4, 2], [1, 1], [0, 0]]);
+    // Ingen "koster"-linje her: med Syndra-kampen er medianen for dødsfald før 14 min 1, så ingen kampe ligger over den.
+    assert(Array.isArray(climb.costs) && climb.costs.every((c) => /\d+ af \d+ sejre/.test(c.text) && c.tip?.url), JSON.stringify(climb.costs));
+    // Sidste kamp (Syndra, v3): 1 dødsfald før 14 min mod din median 0,5 i de andre MID-kampe.
+    assert.strictEqual(climb.last?.champion, 'Syndra');
+    assert.deepStrictEqual(climb.last.leaks.map((l) => [l.text, l.wins]), [['Dødsfald før 14 min: 1 - din median er 0,5.', 'I dine MID-kampe: flere end medianen 3 af 6 sejre - ellers 4 af 6.']]);
+    assert(climb.last.leaks[0].tip?.url && climb.last.refs.includes('1 dødsfald - MID i snit i sejre / nederlag: Gold 5,0 / 7,8'), JSON.stringify(climb.last));
+    const syRv = (await st()).reviews.find((x) => x.champion === 'Syndra');
+    assert.strictEqual(syRv.review.climb?.leaks.length, 1, 'samme tjek i kampgennemgangen');
+    assert(/^Foran i lanen ved 10 min i 8 af 13 kampe - vandt 8 af de 8\./.test(climb.lead), climb.lead);
+    const guard = (await st()).climbGuard;
+    assert(guard && /^2 tab i træk\./.test(guard.text), `tilt-vagten efter 2 tab i træk: ${JSON.stringify(guard)}`);
+    const saved = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8'));
+    assert.strictEqual(saved.recent.length, 12, 'klientens kamphistorik gemt kompakt i history.json');
+    assert.deepStrictEqual(Object.keys(saved.recent[0]).sort(), ['champ', 'dur', 'id', 'queue', 'start', 'win']);
+    console.log('Klatre-tjek:', climb.last.leaks[0].text, '|', climb.lead, '|', guard.text);
 
     // Ældre kamp: kampens id findes i klientens kamphistorik (samme champion + sluttidspunkt), gennemgangen hentes
     const r = await (await fetch(base + '/api/review-old', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
-    assert.deepStrictEqual([r.found, r.tried], [1, 1], `ældre kampe (kun Evelynn mangler nu): ${JSON.stringify(r)}`);
+    // Evelynn mangler gennemgang; de 12 LeBlanc-kampe har v2 (uden klatre-tjekkets tal) og prøves også, men findes ikke i klienten.
+    assert.deepStrictEqual([r.found, r.tried], [1, 13], `ældre kampe: ${JSON.stringify(r)}`);
     const ev = (await st()).reviews.find((x) => x.champion === 'Evelynn');
     assert(ev?.review, 'gennemgang af den ældre kamp');
     assert.strictEqual(ev.review.path.length, 8, 'din rute minut 1-8');
@@ -446,6 +479,11 @@ async function patternsTest(cmd, args, baseEnv, tmp) {
     let pick = null;
     for (let i = 0; i < 60 && !(pick = (await st()).patternsPick); i++) await wait(500);
     assert(pick && pick.games === 12 && pick.lines.length === 2, `mønstre i champion select: ${JSON.stringify(pick)}`);
+    const cp = (await st()).climbPick;
+    // Intet fokus-hul her (ingen af hullerne skiller sejre fra nederlag i de 13 MID-kampe - se ovenfor), men tilt-vagten.
+    assert(cp && cp.focus === null && /^2 tab i træk/.test(cp.guard?.text), `klatre-tjek i champion select: ${JSON.stringify(cp)}`);
+    assert.strictEqual(cp.mastery, null, 'LeBlanc har 300.000 mastery - ingen erfarings-linje');
+    console.log('Klatre-tjek i champion select:', cp.guard.text);
     console.log('Mønstre i champion select:', pick.lines.join(' | '));
     assert(!/Fejl/.test(out), `ingen fejl i mønster-kopien: ${out}`);
   } catch (e) {
@@ -1195,7 +1233,7 @@ server.listen(0, '127.0.0.1', async () => {
     for (let i = 0; i < 40 && !((rv = (await gui('GET', '/state')).body.reviews?.[0])?.review); i++) await wait(500);
     assert(rv?.review, `kampgennemgang: ${JSON.stringify(rv)}`);
     assert.strictEqual(rv.champion, 'Ahri');
-    assert.deepStrictEqual(rv.review.deaths.map((d) => [d.t, d.killer, d.by, d.x, d.y]), [[300, 'Zed', 'lane', 7000, 7400]], JSON.stringify(rv.review.deaths));
+    assert.deepStrictEqual(rv.review.deaths.map((d) => [d.t, d.killer, d.by, d.x, d.y]), [[300, 'Zed', 'lane', 7000, 7400]], `dødsfald: ${JSON.stringify(rv.review.deaths)}`);
     assert.strictEqual(rv.review.opp?.name, 'Zed');
     assert.strictEqual(rv.review.jg?.name, 'Graves');
     assert.strictEqual(rv.review.gold.length, 13);
@@ -1209,7 +1247,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(hist.gameId, 4242, 'kampens id gemt');
     assert(!JSON.stringify(hist).includes('participantFrames') && JSON.stringify(hist.review).length < 4000, 'kun et kort uddrag i history.json');
     // Video af dødsfaldet: liste i gennemgangen + afspilning kun af programmets egne klip
-    assert.deepStrictEqual(rv.clips.map((c) => [c.t, c.killer, c.name]), [[1234, 'Darius', 'Replay 1.mp4']], JSON.stringify(rv.clips));
+    assert.deepStrictEqual(rv.clips.map((c) => [c.t, c.killer, c.name]), [[1234, 'Darius', 'Replay 1.mp4']], `klip: ${JSON.stringify(rv.clips)}`);
     const base8 = /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
     const clipRes = await fetch(`${base8}/clip?f=${encodeURIComponent(rv.clips[0].file)}`);
     assert.strictEqual(clipRes.status, 200, 'klip kan afspilles');
@@ -1275,7 +1313,7 @@ server.listen(0, '127.0.0.1', async () => {
       return;
     }
     console.log(out);
-    console.error('FEJL:', e.message);
+    console.error('FEJL:', e.message, (e.stack || '').split('\n').find((l) => l.includes('.test.js')) || '');
     process.exitCode = 1;
   } finally {
     child.kill();

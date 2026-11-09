@@ -7,6 +7,7 @@ const vm = require('vm');
 const assert = require('assert');
 const { createRequire } = require('module');
 const { lcuGame, lcuTimeline, fill, SHAPE } = require('./fixtures/lcu-match');
+const kill = (t, killerId, victimId, x, y, assistingParticipantIds = []) => ({ type: 'CHAMPION_KILL', timestamp: t, killerId, victimId, assistingParticipantIds, position: { x, y } });
 
 const file = path.join(__dirname, '..', 'lol-helper.js');
 const src = fs.readFileSync(file, 'utf8');
@@ -51,7 +52,7 @@ assert.strictEqual(adc.v, H.REVIEW_VERSION);
 assert.strictEqual(adc.opp, '202', 'ADC mod fjendens carry');
 assert.strictEqual(adc.oppBy, 'position');
 assert.strictEqual(adc.win, true);
-assert.deepStrictEqual(adc.deaths, [{ t: 125, x: 12000, y: 1300, killer: null, by: 'other', n: 0, zone: 'Bot', own: true }], 'tårn-død (killerId 0) på din halvdel');
+assert.deepStrictEqual(adc.deaths, [{ t: 125, x: 12000, y: 1300, killer: null, by: 'other', n: 0, zone: 'Bot', own: true, lvl: 1, dead: 10 }], 'tårn-død (killerId 0) på din halvdel');
 assert.deepStrictEqual(adc.at['10'], { cs: 80, oppCs: 70, gold: 500, xp: 0 });
 assert.deepStrictEqual(adc.team.find((x) => x[0] === 20), [20, 5 * 20 * 50], 'holdets guldforskel');
 assert.strictEqual(adc.path.length, 14);
@@ -75,5 +76,85 @@ assert.strictEqual(topNoPos.oppBy, 'client');
 // 5) Live-registreret modstander vinder over positionerne.
 const live = H.buildReview(game, tl, { championId: 103, position: 'MID', puuid: 'p3', oppChampionId: 122 });
 assert.deepStrictEqual([live.opp, live.oppBy], ['122', 'live']);
+
+// 6) v3 (klatre-tjek): dødstid efter wikiens formel, objectives med hold og "mens du var død", stats og CS pr. minut.
+const K = vm.runInContext('({ respawnSeconds, gameLeaks, metricSplit, CLIMB_METRICS, streakStats, tiltGuard, tiltThreshold, climbView, climbFocus, history, app, deathPhases, leadLine })', ctx);
+assert.strictEqual(K.respawnSeconds(1, 60), 10);
+assert.strictEqual(K.respawnSeconds(18, 14 * 60), 52.5, 'ingen TIF før 15 min');
+assert(Math.abs(K.respawnSeconds(10, 20 * 60) - 32.5 * (1 + 10 * 0.425 / 100)) < 1e-9, 'TIF 15-30 min: ceil(2 x (min - 15)) x 0,425 %');
+assert(Math.abs(K.respawnSeconds(18, 60 * 60) - 52.5 * 1.5) < 1e-9, 'loft på 50 %');
+{
+  const ps = players.map((p) => ({ ...p }));
+  const g3 = lcuGame({ gameId: 10, duration: 1500, players: ps });
+  g3.participants[2].stats = { ...g3.participants[2].stats, visionScore: 20, wardsPlaced: 9, wardsKilled: 2, visionWardsBoughtInGame: 1, kills: 3, deaths: 2, assists: 4, totalMinionsKilled: 150, neutralMinionsKilled: 10 };
+  g3.participants[0].stats = { ...g3.participants[0].stats, kills: 5 };
+  const tl3 = lcuTimeline({ minutes: 25, ids: ps.map((p) => p.id),
+    events: [
+      kill(600000, 8, 3, 7400, 7400, [10]), // mid (id 3) dør ved 10:00 mod 2 fjender
+      { type: 'ELITE_MONSTER_KILL', timestamp: 610000, killerId: 10, monsterType: 'DRAGON', monsterSubType: 'FIRE_DRAGON', position: { x: 9800, y: 4400 } }, // fjenden tager drage mens du er død
+      { type: 'ELITE_MONSTER_KILL', timestamp: 900000, killerId: 5, monsterType: 'HORDE', position: { x: 4800, y: 10200 } }, // dit hold
+      { type: 'BUILDING_KILL', timestamp: 1200000, killerId: 0, teamId: 100, buildingType: 'TOWER_BUILDING', towerType: 'OUTER_TURRET', laneType: 'MID_LANE', position: { x: 5800, y: 6400 } }, // fjenden tager dit tårn (minions)
+    ].map((e) => ({ assistingParticipantIds: [], ...e })),
+    frame: (m, id) => ({ totalGold: 500 + m * 400, minionsKilled: m * 6, level: Math.min(18, 1 + Math.floor(m / 2)), position: posOf(id) }) });
+  const r3 = H.buildReview(g3, tl3, { championId: 103, position: 'MID', puuid: 'p3' });
+  assert.strictEqual(r3.v, 3);
+  assert.strictEqual(r3.dur, 1500);
+  assert.deepStrictEqual(r3.deaths.map((d) => [d.t, d.n, d.lvl, d.dead]), [[600, 2, 6, 16]], 'level 6 ved 10:00 -> 16 sek. dødstid');
+  assert.deepStrictEqual(r3.objectives, [{ t: 610, k: 'DRAGON', mine: false, dead: true }, { t: 900, k: 'HORDE', mine: true, dead: false }, { t: 1200, k: 'TOWER', mine: false, dead: false }]);
+  assert.deepStrictEqual([r3.stats.vision, r3.stats.controlWards, r3.stats.cs, r3.stats.teamKills], [20, 1, 160, 8]);
+  assert.strictEqual(r3.csm.length, 26);
+  assert.strictEqual(r3.csm[14], 84);
+}
+
+// 7) Klatre-tjekket på en syntetisk historik: median som skillelinje, sejre på hver side, op til 3 huller,
+// referencetal fra kilden, tilt fra klientens kamphistorik.
+K.app.cfg = { ...K.app.cfg, climbCheck: true, matchReview: true };
+const mkGame = (i, o) => ({
+  date: new Date(Date.parse('2026-11-01T20:00:00Z') - i * 3600e3).toISOString(), championId: 7, champion: 'LeBlanc', gameMode: 'CLASSIC', position: 'MID',
+  result: o.win ? 'Sejr' : 'Nederlag', duration: 1800, kills: 5, deaths: o.deaths ?? 5, assists: 5, csPerMin: 6, buys: [],
+  review: { v: 3, dur: 1800, deaths: Array.from({ length: o.multi }, (_, k) => ({ t: 900 + k * 60, n: 2 })).concat(o.early ? [{ t: 300, n: 1 }] : []),
+    stats: { vision: o.vision * 30, controlWards: o.cw }, csm: Array.from({ length: 31 }, (_, m) => m * 6 + (m > 14 ? (m - 14) * (o.cs - 6) : 0)),
+    objectives: Array.from({ length: o.obj }, () => ({ t: 1000, k: 'TOWER', mine: false, dead: true })),
+    at: { 10: { gold: o.lead } }, team: [[10, 0], [20, o.team20]] },
+});
+// 12 kampe: sejrene har få dødsfald mod 2+ og ingen objectives tabt mens død; nederlagene det modsatte.
+const gamesK = [];
+for (let i = 0; i < 12; i++) {
+  const win = i % 2 === 0;
+  gamesK.push(mkGame(i, { win, multi: win ? 1 : 4, early: !win, vision: win ? 0.7 : 0.5, cw: win ? 2 : 0, cs: win ? 7 : 5, obj: win ? 0 : 3, lead: 500, team20: win ? 2000 : -2000 }));
+}
+K.history.games.splice(0, K.history.games.length, ...gamesK);
+const multi = K.metricSplit(K.CLIMB_METRICS.find((m) => m.key === 'multi'), gamesK);
+assert.deepStrictEqual([multi.med, multi.bad, multi.badWins, multi.good, multi.goodWins], [2.5, 6, 0, 6, 6], 'median 2,5 - over: 0 af 6, ellers 6 af 6');
+const leaks = JSON.parse(JSON.stringify(K.gameLeaks(gamesK[1])));
+assert.strictEqual(leaks.leaks.length, 3, 'højst 3 huller');
+assert(leaks.leaks.every((l) => l.tip && /^Næste kamp/.test(l.tip.text) && /^https:\/\//.test(l.tip.url)), 'hvert hul har et forsøg + kilde');
+assert.deepStrictEqual(leaks.leaks.map((l) => l.key), ['early', 'multi', 'objDead'], 'lige dyre huller i fast rækkefølge');
+assert.strictEqual(leaks.leaks[1].text, 'Dødsfald mod 2+ fjender: 4 - din median er 1.');
+assert.strictEqual(leaks.leaks[1].wins, 'I dine MID-kampe: flere end medianen 0 af 5 sejre - ellers 6 af 6.', 'kampen selv tæller ikke med i sammenligningen');
+const thrownGame = { ...gamesK[0], review: { ...gamesK[0].review, team: [[10, 0], [20, -2000]] } };
+const th = JSON.parse(JSON.stringify(K.gameLeaks(thrownGame))).leaks;
+assert.deepStrictEqual(th.map((l) => l.key), ['thrown']);
+assert.strictEqual(th[0].text, 'Foran i lanen ved 10 min (+500 g), men holdet var 2.000 g bagud ved 20 min.');
+assert(leaks.refs.some((r) => /^5 dødsfald - MID i snit i sejre \/ nederlag: Gold 5,0 \/ 7,8$/.test(r)), JSON.stringify(leaks.refs));
+assert.strictEqual(JSON.parse(JSON.stringify(K.gameLeaks(gamesK[0]))).leaks.length, 0, 'en god kamp har ingen huller');
+assert.strictEqual(K.leadLine(gamesK), 'Foran i lanen ved 10 min i 12 af 12 kampe - vandt 6 af de 12. I 6 af dem var holdet bagud ved 20 min (0 sejre). Holdet bagud ved 20 min i alt: 0 af 6 sejre.');
+const ph = JSON.parse(JSON.stringify(K.deathPhases(gamesK)));
+assert.deepStrictEqual(ph.rows.map((r) => r.deaths), [6, 30, 0], 'dødsfald pr. fase (0-14, 14-25, 25+)');
+// Tilt: 12 kampe i én session (10 min pause): V T T T V T T V ... -> efter 2 tab i træk
+const t0 = Date.now() - 12 * 40 * 60e3;
+const seq = [1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0];
+K.history.recent = seq.map((w, i) => ({ id: i, start: t0 + i * 40 * 60e3, dur: 1800, win: Boolean(w) }));
+const st = JSON.parse(JSON.stringify(K.streakStats()));
+assert.deepStrictEqual(st.after.map((r) => [r.games, r.wins]), [[5, 2], [3, 0], [3, 1], [1, 1]], JSON.stringify(st.after));
+assert.strictEqual(st.current, 3, '3 tab i træk lige nu');
+const guard = K.tiltGuard(st);
+assert(/^3 tab i træk\./.test(guard.text) && /iTero/.test(guard.text) && guard.url, `tilt-vagten bruger kilden når dine egne tal er for få: ${JSON.stringify(guard)}`);
+assert(!/blok|stop|må ikke/i.test(guard.text), 'ingen blokering');
+const view = JSON.parse(JSON.stringify(K.climbView()));
+assert.strictEqual(view.costs.length, 3);
+assert(view.trends.length === 0, 'udvikling kræver 15 kampe');
+const focus = JSON.parse(JSON.stringify(K.climbFocus('MID')));
+assert(focus.focus && focus.guard, JSON.stringify(focus));
 
 console.log('Kampgennemgang (rigtigt format): alle tests bestået');

@@ -207,6 +207,22 @@ Slet remote-token.txt for at lave en ny nøgle (telefonen skal så scanne igen).
 Som standard virker det kun via Tailscale, som krypterer forbindelsen. Over wifi er
 forbindelsen ukrypteret, og andre på samme netværk kan opsnappe nøglen. Vil du alligevel
 bruge wifi (kun derhjemme), så sæt "remoteLan": true i config.json.
+KLATRE-TJEK (NYT I 1.20)
+De kendte grunde til at man ikke klatrer i low elo (kilder i docs/research-low-elo.md),
+målt i dine egne kampe med din egen median som skillelinje:
+- Efter kampen (i kampgennemgangen): op til 3 "huller" i kampen, fx "Dødsfald mod 2+
+  fjender: 8 - din median er 3,5. I dine MID-kampe: flere end medianen 0 af 7 sejre -
+  ellers 5 af 7", ét konkret forsøg til næste kamp, og kampen mod kildens tal for din rank.
+  Hullerne: dødsfald før 14 min, dødsfald mod 2+, fjendens objectives mens du var død,
+  CS/min midt i kampen, vision, Control Wards, og "foran i lanen men holdet bagud ved 20".
+- Kortet "Klatre-tjek": hvad der hænger mest sammen med dine nederlag, føringer der ikke
+  blev til sejre, dødsfald pr. fase, udvikling, champion-pulje og tilt (sejre efter tab i
+  træk og tidspunkt, fra klientens kamphistorik).
+- Champion select: én linje "Fokus" + mastery hvis du har under 12.000 på championen.
+- Tilt-vagt: efter 2 tab i træk en rolig besked. Ingen blokering - du bestemmer.
+Intet nyt under kampen. Ældre gennemgange hentes igen i det nye format i lobbyen, så
+længe klienten har kampene. Slå fra med "climbCheck": false.
+
 Vil du bruge et navn i stedet for IP (fx Tailscale MagicDNS), så skriv det i
 "remoteHosts": ["min-pc"].
 
@@ -216,7 +232,7 @@ INDSTILLINGER (config.json ved siden af programmet)
 - setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice / voice: true eller false
 - enemyAlerts: true = stemme/overlay om lane-modstanderens køb og level 6, "X er fed",
   FED-mærker og "har ult" (forbudt efter Overwolfs Riot-regler); false = slået fra
-- scouting / enemyJungle / matchReview / patterns: true eller false (standard true)
+- scouting / enemyJungle / matchReview / patterns / climbCheck: true eller false (standard true)
 - obsClips: true = video af dine dødsfald med OBS (standard false); obsPassword: OBS'
   WebSocket-adgangskode; obsPort: standard 4455
 - flashKey: "keep", "D" eller "F"

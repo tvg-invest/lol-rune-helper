@@ -40,6 +40,7 @@ const DEFAULT_CONFIG = {
   enemyJungle: true,      // fjendens junglers mest spillede første clear (OP.GG) i champion select og de første 4 min
   matchReview: true,      // kampgennemgang efter kampen fra klientens timeline (kort, guldkurve, rute, items)
   patterns: true,         // dine mønstre på tværs af kampe (kun med mindst 10 kampe på champion + rolle)
+  climbCheck: true,       // klatre-tjek: de kendte low elo-huller (dødsfald, vision, CS, objectives, tilt) målt i dine egne kampe
   obsClips: false,        // video af dine dødsfald via OBS' replay buffer (OBS 28+ med WebSocket slået til)
   obsPassword: '',        // OBS WebSocket-adgangskode (logges aldrig)
   obsPort: 4455,
@@ -1645,11 +1646,15 @@ const HISTORY_FILE = process.env.LOL_HELPER_HISTORY || path.join(APP_DIR, 'histo
 const srGames = () => history.games.filter((g) => !g.gameMode || ['CLASSIC', 'SWIFTPLAY'].includes(g.gameMode));
 const history = (() => {
   try {
-    const games = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')).games;
+    const { games, recent } = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
     // Spring ødelagte/håndredigerede poster over i stedet for at fejle senere.
-    return { games: Array.isArray(games) ? games.filter((g) => g && typeof g === 'object' && g.champion) : [] };
+    return {
+      games: Array.isArray(games) ? games.filter((g) => g && typeof g === 'object' && g.champion) : [],
+      // Klientens kamphistorik (alle dine Summoner's Rift-kampe, også uden programmet): id, start, længde, sejr.
+      recent: Array.isArray(recent) ? recent.filter((x) => x && typeof x.start === 'number' && typeof x.win === 'boolean') : [],
+    };
   } catch {
-    return { games: [] };
+    return { games: [], recent: [] };
   }
 })();
 
@@ -1806,6 +1811,7 @@ function finishGame() {
   history.games.length = Math.min(history.games.length, 100);
   saveHistory();
   if (app.cfg.matchReview) fetchReview(summary, REVIEW_ATTEMPTS).catch(() => {});
+  app.recentAt = Date.now() - RECENT_REFRESH_MS + 60000; // klientens kamphistorik igen om 1 min (kampen skal nå at komme med)
   log(`Kampoversigt: ${summary.champion} ${summary.kills}/${summary.deaths}/${summary.assists}, ${String(summary.csPerMin).replace('.', ',')} CS/min` +
     (summary.followed != null ? `, ${pct(summary.followed)} af dine køb var blandt forslagene` : '') +
     (summary.duels?.length ? `, dueller mod ${summary.matchup.champion}: ${summary.duels.filter((d) => d.won).length}-${summary.duels.filter((d) => !d.won).length}` : ''));
@@ -1853,7 +1859,24 @@ function participantFrame(frame, id) {
 
 // Kampgennemgangens format. v1 (v1.18.0) fandt ingen lane-modstander i kampe uden live-data og
 // forventede ITEM_PURCHASED-events, som klientens timeline ikke har - de hentes igen (se reviewOlderGames).
-const REVIEW_VERSION = 2;
+// v3 (v1.20.0) har også vision, Control Wards, CS pr. minut, objectives og dødstid (klatre-tjekket).
+// v2-gennemgange vises stadig (REVIEW_MIN) og opgraderes af sig selv, hvis klienten stadig har kampen.
+const REVIEW_VERSION = 3;
+const REVIEW_MIN = 2;
+// Dødstid (sek.) efter League Wikis formel (wiki.leagueoflegends.com/en-us/Death): BRW pr. level
+// + BRW x TIF, hvor TIF vokser efter 15 min og har loft på 50 %.
+const BRW = [10, 10, 12, 12, 14, 16, 20, 25, 28, 32.5, 35, 37.5, 40, 42.5, 45, 47.5, 50, 52.5];
+function respawnSeconds(level, tSec) {
+  const brw = BRW[Math.max(1, Math.min(18, level || 1)) - 1];
+  const m = tSec / 60;
+  let tif = 0;
+  if (m >= 45) tif = 21.75 + Math.ceil(2 * (m - 45)) * 1.45;
+  else if (m >= 30) tif = 12.75 + Math.ceil(2 * (m - 30)) * 0.30;
+  else if (m > 15) tif = Math.ceil(2 * (m - 15)) * 0.425;
+  return brw * (1 + Math.min(50, tif) / 100);
+}
+// Objectives i klientens timeline: ELITE_MONSTER_KILL (monsterType) og BUILDING_KILL (teamId = bygningens ejer).
+const OBJECTIVE_NAMES = { DRAGON: 'drage', HORDE: 'voidgrubs', RIFTHERALD: 'Rift Herald', BARON_NASHOR: 'Baron', ATAKHAN: 'Atakhan', TOWER: 'tårn', INHIBITOR: 'inhibitor' };
 const LANE_POSITION = { TOP: 'Top', MID: 'Mid', ADC: 'Bot', SUPPORT: 'Bot', JUNGLE: 'Jungle' };
 // Guld med tusindtalspunktum (1.250), uden at afhænge af Node's sprogdata.
 const gnum = (x) => { const r = Math.round(x); return (r < 0 ? '-' : '') + String(Math.abs(r)).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); };
@@ -1975,8 +1998,38 @@ function buildReview(game, timeline, s) {
   // Din position minut for minut: junglere 1-8 (første clear), lanere 1-14 (laning til tårnpladerne falder).
   const pathTo = jungle ? 8 : 14;
   const span = frames.filter((f, i) => minute(f, i) >= 1 && minute(f, i) <= pathTo);
+  // Dødstid: level fra minuttet før dødsfaldet (participantFrames.level) + wikiens formel.
+  const levelAt = (t) => { const f = [...frames].reverse().find((x, i) => minute(x, frames.length - 1 - i) * 60 <= t); return pf(f, me.id)?.level || 1; };
+  for (const d of deaths) { d.lvl = levelAt(d.t); d.dead = Math.round(respawnSeconds(d.lvl, d.t)); }
+  const deadAt = (t) => deaths.some((d) => t >= d.t && t <= d.t + d.dead);
+  const teamOf = (id) => parts.find((p) => p.id === id)?.team;
+  const objectives = events.filter((e) => e.type === 'ELITE_MONSTER_KILL' || e.type === 'BUILDING_KILL').map((e) => {
+    const t = sec(e);
+    const k = e.type === 'ELITE_MONSTER_KILL' ? e.monsterType : e.buildingType === 'INHIBITOR_BUILDING' ? 'INHIBITOR' : 'TOWER';
+    // Monstre: holdet til den der fik det sidste slag. Bygninger: teamId er ejeren, så det andet hold tog den.
+    const takenBy = e.type === 'ELITE_MONSTER_KILL' ? teamOf(e.killerId) : (e.teamId === 100 ? 200 : e.teamId === 200 ? 100 : null);
+    if (!k || !takenBy) return null;
+    return { t, k, mine: takenBy === me.team, dead: deadAt(t) };
+  }).filter(Boolean);
+  const st = game.participants.find((p) => p.participantId === me.id)?.stats || {};
+  const num = (x) => (typeof x === 'number' ? x : null);
+  const teamKills = (game.participants || []).filter((p) => p.teamId === me.team).reduce((a, p) => a + (p.stats?.kills || 0), 0);
+  // CS (minions + jungle) ved hvert minut - index = minut.
+  const csm = [];
+  frames.forEach((f, i) => { const c = cs(f, me.id); if (c != null) csm[minute(f, i)] = c; });
   return {
     v: REVIEW_VERSION,
+    dur: num(game.gameDuration),
+    start: num(game.gameCreation),
+    queue: num(game.queueId),
+    stats: {
+      vision: num(st.visionScore), wardsPlaced: num(st.wardsPlaced), wardsKilled: num(st.wardsKilled), controlWards: num(st.visionWardsBoughtInGame),
+      kills: num(st.kills), deaths: num(st.deaths), assists: num(st.assists), teamKills,
+      damage: num(st.totalDamageDealtToChampions), turretDamage: num(st.damageDealtToTurrets), objectiveDamage: num(st.damageDealtToObjectives),
+      cs: typeof st.totalMinionsKilled === 'number' ? st.totalMinionsKilled + (st.neutralMinionsKilled || 0) : null,
+    },
+    csm: Array.from(csm, (x) => (x == null ? null : x)),
+    objectives,
     side: me.team === 200 ? 'RED' : 'BLUE',
     win: typeof me.win === 'boolean' ? me.win : null,
     lane: me.lane,
@@ -2093,7 +2146,7 @@ const median = (xs) => {
   return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
 };
 // Gennemgange i det nuværende format (v1 mangler modstander og guld).
-const reviewed = (gs) => gs.filter((g) => g.review?.v >= REVIEW_VERSION);
+const reviewed = (gs) => gs.filter((g) => g.review?.v >= REVIEW_MIN);
 const firstBuys = (g) => (g.buys || []).slice(0, 4).map((b) => ({ id: b.id, t: Math.round(b.t) }));
 
 function reviewView() {
@@ -2101,7 +2154,7 @@ function reviewView() {
   const all = srGames();
   const games = all.slice(0, 15).filter((g) => g.review || (g.deathLog || []).some((d) => d.clip));
   return games.slice(0, 10).map((g) => {
-    const r = g.review?.v >= REVIEW_VERSION ? g.review : null;
+    const r = g.review?.v >= REVIEW_MIN ? g.review : null;
     const item = (id) => ({ id, name: itemName(id), icon: dd.items[id]?.icon });
     // Din median for CS ved 10 min med samme champion og rolle (andre kampe med gennemgang).
     const same = reviewed(all).filter((x) => x !== g && x.championId === g.championId && x.position === g.position && typeof x.review.at?.[10]?.cs === 'number');
@@ -2132,6 +2185,7 @@ function reviewView() {
         ganks: r.ganks.map((x) => ({ ...x, victim: x.victim ? dd.champions[x.victim]?.name || x.victim : null })),
         // Klientens timeline har ingen køb - de første færdige items kommer fra live-API'et under kampen.
         items: firstBuys(g).map((x) => ({ ...item(x.id), t: x.t })),
+        climb: app.cfg.climbCheck ? safeView(() => gameLeaks(g)) : null,
       } : null,
       clips: (g.deathLog || []).filter((d) => d.clip).map((d) => ({ t: d.t, killer: d.killer, file: d.clip, name: path.basename(d.clip) })),
     };
@@ -2312,6 +2366,371 @@ function patternsView() {
   };
 }
 
+// ---------- Klatre-tjek: de kendte low elo-huller, målt i dine egne kampe ----------
+// Hvert punkt bygger på docs/research-low-elo.md (kilder pr. punkt). Skillelinjen er altid din egen median -
+// ingen faste tærskler. "Koster" = forskellen i dine sejre mellem kampe på den gode og den dårlige side af
+// medianen: en sammenhæng i dine kampe med antal, ikke en årsag. Kun Summoner's Rift-kampe med kendt resultat.
+
+const RESEARCH_URL = 'https://github.com/tvg-invest/lol-rune-helper/blob/worktree-build-helper/docs/research-low-elo.md';
+const decs = (x, n = 1) => String(Math.round(x * 10 ** n) / 10 ** n).replace('.', ',');
+const fix = (x, n = 1) => x.toFixed(n).replace('.', ','); // altid n decimaler (kildens tal: 5,0)
+const knownResult = (g) => g.result === 'Sejr' || g.result === 'Nederlag';
+const winsOf = (gs) => gs.filter((g) => g.result === 'Sejr').length;
+const reviewDeaths = (g) => (g.review?.v >= REVIEW_MIN && Array.isArray(g.review.deaths) ? g.review.deaths : null);
+const durOf = (g) => g.review?.dur || g.duration || null;
+const teamGoldAt = (g, m) => g.review?.team?.find((x) => x[0] === m)?.[1];
+// CS/min fra 14 min til 25 min (eller kampens sidste hele minut) - kræver mindst 5 minutter efter 14.
+function csMidOf(g) {
+  const c = g.review?.csm;
+  if (!Array.isArray(c) || typeof c[14] !== 'number') return null;
+  let end = Math.min(25, c.length - 1);
+  while (end > 14 && typeof c[end] !== 'number') end--;
+  return end - 14 >= 5 ? (c[end] - c[14]) / (end - 14) : null;
+}
+const OBJ_PLURAL = { DRAGON: 'drager', HORDE: 'voidgrubs', RIFTHERALD: 'Rift Herald', BARON_NASHOR: 'Baron', ATAKHAN: 'Atakhan', TOWER: 'tårne', INHIBITOR: 'inhibitorer' };
+const objList = (objs) => {
+  const by = new Map();
+  for (const o of objs) by.set(o.k, (by.get(o.k) || 0) + 1);
+  return [...by].map(([k, n]) => `${n} ${n > 1 ? OBJ_PLURAL[k] || k : OBJECTIVE_NAMES[k] || k}`).join(', ');
+};
+
+// De målbare huller. low: true = lavere er bedre. tip = hvad du kan prøve næste kamp (fra kilderne).
+const CLIMB_METRICS = [
+  { key: 'early', label: 'Dødsfald før 14 min', low: true, fmt: (v) => decs(v),
+    get: (g) => { const d = reviewDeaths(g) || g.deathLog; return Array.isArray(d) ? d.filter((x) => x.t < 840).length : null; } },
+  { key: 'multi', label: 'Dødsfald mod 2+ fjender', low: true, fmt: (v) => decs(v),
+    get: (g) => reviewDeaths(g)?.filter((d) => d.n >= 2).length ?? null },
+  { key: 'objDead', label: 'Fjendens objectives mens du var død', low: true, fmt: (v) => decs(v),
+    get: (g) => (Array.isArray(g.review?.objectives) ? g.review.objectives.filter((o) => !o.mine && o.dead).length : null) },
+  { key: 'csMid', label: 'CS/min midt i kampen (14-25 min)', low: false, fmt: (v) => decs(v), get: csMidOf },
+  { key: 'vision', label: 'Vision score pr. min', low: false, fmt: (v) => fix(v, 2),
+    get: (g) => { const v = g.review?.stats?.vision; const d = durOf(g); return typeof v === 'number' && d ? v / (d / 60) : null; } },
+  { key: 'controlWards', label: 'Control Wards købt', low: false, fmt: (v) => decs(v), get: (g) => g.review?.stats?.controlWards ?? null },
+  { key: 'thrown', label: 'Foran i lanen ved 10 min, men holdet bagud ved 20 min', low: true, bool: true,
+    get: (g) => { const a = g.review?.at?.[10]?.gold; const t = teamGoldAt(g, 20); return typeof a === 'number' && a > 0 && typeof t === 'number' ? (t < 0 ? 1 : 0) : null; } },
+];
+// Ét konkret forsøg til næste kamp pr. hul + kilden (docs/research-low-elo.md). Kun efter kampen / før kampen.
+const CLIMB_TIPS = {
+  early: { text: 'Næste kamp: gå efter 0-1 dødsfald før 14 min. Tag kun trades, når du ved hvor fjendens jungler er (set på kortet eller ward i floden).',
+    source: 'amitilted.com (65.569 spiller-kampe, NA, okt. 2026): tabte kampe har 2-3 flere dødsfald end vundne i alle ranks og roller', url: 'https://amitilted.com/stats/deaths' },
+  multi: { text: 'Næste kamp: når 2 eller flere fjender ikke kan ses på kortet, så træk dig mod dit tårn, før du farmer videre eller går ind.',
+    source: 'amitilted.com: dødsfald og guld pr. minut er det der skiller sejre fra nederlag mest (fx Gold MID 5,0 dødsfald i sejre mod 7,8 i nederlag)', url: 'https://amitilted.com/stats/deaths' },
+  objDead: { text: 'Næste kamp: vær i live og tæt på i minuttet før en drage, voidgrubs eller Baron - pres ikke en bølge dybt på fjendens halvdel lige før.',
+    source: 'UCLA-analyse af 9.879 Diamond-kampe: hold med en drage ved 10 min vandt 64,1 % mod 41,9 % uden', url: 'https://astro-wen.github.io/UCLA_C111_LoL/report.html' },
+  csMid: { text: 'Næste kamp: efter lanen, tag den sidebølge der er nærmest dig mellem objectives i stedet for at gå rundt med holdet uden mål.',
+    source: 'amitilted.com: CS/min er højere i vundne end i tabte kampe i alle roller undtagen support (fx Gold MID 6,8 mod 6,4)', url: 'https://amitilted.com/stats/cs-per-minute' },
+  vision: { text: 'Næste kamp: brug dit trinket hver gang det er klar, og placér det på den vej fjendens jungler kommer fra.',
+    source: 'amitilted.com: vision score er højere i vundne kampe i alle roller, men forskellen er lille (fx Gold MID 0,74 mod 0,65 pr. min)', url: 'https://amitilted.com/stats/vision-score' },
+  controlWards: { text: 'Næste kamp: køb en Control Ward ved hvert besøg i base, når du har en ledig plads.',
+    source: 'amitilted.com: Gold jungle køber 1,1 og Gold support 3,1 pr. kamp; top/mid/ADC kun 0,2-0,6 i alle ranks', url: 'https://amitilted.com/stats/control-wards' },
+  thrown: { text: 'Næste kamp: når du er foran efter lanen, så brug føringen med holdet på et tårn eller en drage i stedet for at jagte kills alene.',
+    source: 'Dignitas "Sins of Silver": "Kills alone don\'t close games"; UCLA (9.879 kampe): guldforskel ved 10 min hænger stærkest sammen med sejr (r = 0,51)', url: 'https://dignitas.gg/articles/sins-of-silver-mistakes-low-elo-players-insist-on-making' },
+};
+
+// Referencetal pr. rank og rolle fra amitilted.com (NA ranked solo, patch 25.24-26.20, opdateret okt. 2026;
+// 376-484 kampe pr. rolle i Iron-Gold). Typisk spiller (deaths: snit i sejre / nederlag).
+const REF_TIERS = ['IRON', 'BRONZE', 'SILVER', 'GOLD', 'PLATINUM'];
+const REF = {
+  cs: { TOP: [5.7, 5.8, 6.4, 6.7, 6.9], JUNGLE: [5.7, 5.9, 6.3, 6.5, 6.7], MID: [5.4, 5.7, 6.2, 6.6, 7.0], ADC: [5.5, 5.8, 6.3, 7.0, 7.3] },
+  vision: { TOP: [0.64, 0.69, 0.71, 0.75, 0.76], JUNGLE: [0.70, 0.78, 0.80, 0.85, 0.82], MID: [0.53, 0.63, 0.64, 0.68, 0.68], ADC: [0.61, 0.64, 0.64, 0.59, 0.61], SUPPORT: [1.55, 1.79, 1.95, 2.23, 2.40] },
+  controlWards: { TOP: [0.2, 0.3, 0.3, 0.4, 0.4], JUNGLE: [0.5, 0.7, 0.8, 1.1, 1.1], MID: [0.2, 0.6, 0.6, 0.6, 0.6], ADC: [0.3, 0.3, 0.4, 0.5, 0.5], SUPPORT: [1.3, 1.8, 2.1, 3.1, 3.6] },
+  deaths: {
+    TOP: [[5.1, 7.5], [5.3, 7.8], [5.6, 7.4], [5.3, 7.6], [5.1, 7.4]], JUNGLE: [[5.1, 8.1], [5.3, 8.1], [4.9, 7.5], [4.7, 7.8], [4.4, 7.4]],
+    MID: [[5.2, 7.4], [5.3, 8.0], [5.2, 7.8], [5.0, 7.8], [5.0, 7.3]], ADC: [[6.0, 8.4], [5.9, 8.7], [5.4, 7.7], [5.5, 8.0], [5.4, 7.8]],
+    SUPPORT: [[5.4, 7.3], [5.6, 7.9], [5.2, 8.3], [5.2, 8.2], [5.2, 7.6]],
+  },
+};
+const REF_URL = 'https://amitilted.com/stats';
+// Hvilke ranks der sammenlignes med: din egen (fra klienten) og Gold - eller rangen over, hvis du er Gold/Platinum.
+function refTiers() {
+  const i = REF_TIERS.indexOf(app.rank?.tier);
+  if (i === -1) return [3];
+  return i < 3 ? [i, 3] : i < 4 ? [i, i + 1] : [i];
+}
+const tierName = (i) => TIER_NAME(REF_TIERS[i]);
+// Kampens tal mod kilden (kun roller/tal kilden har).
+function gameRefs(g) {
+  const pos = g.position; const dur = durOf(g); const st = g.review?.stats || {};
+  const tiers = refTiers(); const out = [];
+  const list = (tab, f) => tiers.map((i) => `${tierName(i)} ${f(tab[i])}`).join(', ');
+  if (REF.deaths[pos] && typeof g.deaths === 'number') out.push(`${g.deaths} dødsfald - ${pos} i snit i sejre / nederlag: ${list(REF.deaths[pos], ([w, l]) => `${fix(w)} / ${fix(l)}`)}`);
+  if (REF.cs[pos] && typeof g.csPerMin === 'number') out.push(`${fix(g.csPerMin)} CS/min - typisk ${pos}: ${list(REF.cs[pos], (x) => fix(x))}`);
+  if (REF.vision[pos] && typeof st.vision === 'number' && dur) out.push(`${fix(st.vision / (dur / 60), 2)} vision score/min - typisk ${pos}: ${list(REF.vision[pos], (x) => fix(x, 2))}`);
+  if (REF.controlWards[pos] && typeof st.controlWards === 'number') out.push(`${st.controlWards} Control Wards - typisk ${pos}: ${list(REF.controlWards[pos], (x) => fix(x))}`);
+  return out;
+}
+
+// Champion-erfaring (iTero, 1M+ solo queue-kampe omkring Gold, patch 13.7): win rate krydser 50 % ved ca.
+// 12.000 mastery-point = ca. 20 kampe på championen.
+const MASTERY_CROSS = 12000;
+const MASTERY_URL = 'https://itero.gg/articles/mastery-a-statistical-summary';
+async function fetchPickMastery(championId) {
+  if (!app.cfg.climbCheck || !app.client) return;
+  app.pickMastery = { championId, points: null };
+  try {
+    const list = await lcu(app.client, 'GET', '/lol-champion-mastery/v1/local-player/champion-mastery');
+    const m = (Array.isArray(list) ? list : []).find((x) => x.championId === championId);
+    if (app.pickMastery?.championId === championId) app.pickMastery.points = typeof m?.championPoints === 'number' ? m.championPoints : 0;
+    broadcast();
+  } catch {}
+}
+
+// Din median for et hul og dine sejre på hver side af den. Kræver 10 kampe med tallet og 3 på hver side
+// for at sige noget om sejre.
+function metricSplit(m, games, exclude = null) {
+  const xs = games.filter((g) => g !== exclude && knownResult(g)).map((g) => ({ g, v: m.get(g) })).filter((x) => typeof x.v === 'number' && Number.isFinite(x.v));
+  if (xs.length < PATTERN_MIN_GAMES) return null;
+  const med = m.bool ? 0 : median(xs.map((x) => x.v));
+  const worse = (v) => (m.bool ? v === 1 : m.low ? v > med : v < med);
+  const bad = xs.filter((x) => worse(x.v)).map((x) => x.g);
+  const good = xs.filter((x) => !worse(x.v)).map((x) => x.g);
+  const out = { m, med, n: xs.length, worse, bad: bad.length, badWins: winsOf(bad), good: good.length, goodWins: winsOf(good), cost: null, values: xs };
+  if (bad.length >= 3 && good.length >= 3) out.cost = out.goodWins / out.good - out.badWins / out.bad;
+  return out;
+}
+const splitText = (s) => (s.m.bool
+  ? `${s.m.label}: ${s.badWins} af ${s.bad} sejre - foran ved 10 min uden det: ${s.goodWins} af ${s.good}`
+  : `${s.m.label} (din median ${s.m.fmt(s.med)}): ${s.m.low ? 'flere' : 'færre'} end medianen ${s.badWins} af ${s.bad} sejre - ellers ${s.goodWins} af ${s.good}`);
+
+// Gruppen tallene sammenlignes med: dine kampe i samme rolle (vision og CS afhænger af rollen), eller alle
+// dine kampe, hvis rollen har under 10.
+function climbGroup(position) {
+  const all = srGames().filter(knownResult);
+  const same = position ? all.filter((g) => g.position === position) : [];
+  return same.length >= PATTERN_MIN_GAMES ? { games: same, scope: `dine ${position}-kampe` } : { games: all, scope: 'alle dine kampe' };
+}
+
+// Op til 3 huller i én kamp: tal hvor kampen var værre end din median, sorteret efter hvad de koster dig.
+function gameLeaks(g) {
+  if (!g || !(g.review?.v >= REVIEW_MIN)) return null;
+  const { games, scope } = climbGroup(g.position);
+  const leaks = [];
+  for (const m of CLIMB_METRICS) {
+    const v = m.get(g);
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    const s = metricSplit(m, games, g);
+    if (!s || !s.worse(v)) continue;
+    let text;
+    if (m.key === 'thrown') {
+      text = `Foran i lanen ved 10 min (+${gnum(g.review.at[10].gold)} g), men holdet var ${gnum(-teamGoldAt(g, 20))} g bagud ved 20 min.`;
+    } else {
+      const extra = m.key === 'objDead' ? ` (${objList(g.review.objectives.filter((o) => !o.mine && o.dead))})` : '';
+      text = `${m.label}: ${m.fmt(v)}${extra} - din median er ${m.fmt(s.med)}.`;
+    }
+    const wins = m.bool ? `Samme forløb i ${scope}: ${s.badWins} af ${s.bad} sejre - foran ved 10 min uden det: ${s.goodWins} af ${s.good}.`
+      : `I ${scope}: ${s.m.low ? 'flere' : 'færre'} end medianen ${s.badWins} af ${s.bad} sejre - ellers ${s.goodWins} af ${s.good}.`;
+    leaks.push({ key: m.key, text, wins, cost: s.cost, tip: CLIMB_TIPS[m.key] || null });
+  }
+  leaks.sort((a, b) => (b.cost ?? -2) - (a.cost ?? -2));
+  return { scope, leaks: leaks.slice(0, 3).map(({ cost, ...x }) => x), refs: gameRefs(g), refUrl: REF_URL };
+}
+
+// Kampe "i træk": næste kamp startede senest 45 min efter at den forrige sluttede (kø + champion select).
+const SESSION_GAP_MS = 45 * 60 * 1000;
+const recentSorted = () => [...history.recent].sort((a, b) => a.start - b.start);
+const endOf = (x) => x.start + (x.dur || 0) * 1000;
+// Sejre efter 0, 1, 2 og 3+ tab i træk, kamp nr. i sessionen og tidspunkt på dagen (klientens kamphistorik).
+function streakStats(list = recentSorted()) {
+  if (list.length < PATTERN_MIN_GAMES) return null;
+  const after = [0, 1, 2, 3].map((k) => ({ k, games: 0, wins: 0 }));
+  const nth = { early: { games: 0, wins: 0 }, late: { games: 0, wins: 0 } };
+  let streak = 0; let inSession = 0;
+  list.forEach((x, i) => {
+    const prev = list[i - 1];
+    const chained = prev && x.start - endOf(prev) <= SESSION_GAP_MS;
+    if (!chained) { streak = 0; inSession = 0; }
+    inSession++;
+    const row = after[Math.min(3, streak)];
+    row.games++; if (x.win) row.wins++;
+    const n = inSession <= 2 ? nth.early : nth.late;
+    n.games++; if (x.win) n.wins++;
+    streak = x.win ? 0 : streak + 1;
+  });
+  const hours = list.map((x) => new Date(x.start).getHours());
+  const medHour = Math.round(median(hours));
+  const before = list.filter((x, i) => hours[i] < medHour);
+  const from = list.filter((x, i) => hours[i] >= medHour);
+  const last = list[list.length - 1];
+  // Tab i træk lige nu (kun hvis du stadig er i samme session).
+  let current = 0;
+  if (Date.now() - endOf(last) <= SESSION_GAP_MS) {
+    for (let i = list.length - 1; i >= 0 && !list[i].win; i--) {
+      current++;
+      if (i > 0 && list[i].start - endOf(list[i - 1]) > SESSION_GAP_MS) break;
+    }
+  }
+  return {
+    games: list.length, wins: list.filter((x) => x.win).length, after, nth, current,
+    hour: before.length && from.length ? { medHour, before: { games: before.length, wins: before.filter((x) => x.win).length }, from: { games: from.length, wins: from.filter((x) => x.win).length } } : null,
+  };
+}
+// Tilt-vagten: hvor mange tab i træk før din egen win rate falder (din data: mindst 5 kampe efter k tab i træk
+// og lavere win rate end ellers). Har du for få kampe, bruges kildens tal (TILT_FALLBACK).
+const TILT_FALLBACK = 2;
+const TILT_SOURCE = 'I iTeros analyse af 100.000 kampe var win rate 48,8 % efter 2 tab i træk, og Gold-spillere der køede igen med det samme havde den laveste win rate.';
+const TILT_URL = 'https://www.itero.gg/articles/lol-tilt';
+function tiltThreshold(s) {
+  if (!s) return { k: TILT_FALLBACK, own: false };
+  const base = s.wins / s.games;
+  for (const k of [2, 3]) {
+    const row = s.after[k];
+    if (row.games >= 5 && row.wins / row.games < base) return { k, own: true, row };
+  }
+  return { k: TILT_FALLBACK, own: false };
+}
+function tiltGuard(s = streakStats()) {
+  if (!s || !s.current) return null;
+  const t = tiltThreshold(s);
+  if (s.current < t.k) return null;
+  const row = s.after[Math.min(3, s.current)];
+  const own = row.games >= 5 ? ` I dine egne kampe vandt du ${row.wins} af ${row.games} lige efter ${Math.min(3, s.current)}${s.current >= 3 ? '+' : ''} tab i træk (alle dine kampe: ${s.wins} af ${s.games}).` : '';
+  const src = t.own ? '' : ` ${TILT_SOURCE}`;
+  return { text: `${s.current} tab i træk.${own}${src} En kort pause før næste kø er et godt valg - det er helt dit valg.`, url: t.own ? null : TILT_URL };
+}
+
+// Henter klientens kamphistorik (kun GET, kun når klienten er ledig) til tilt- og tidspunkt-tallene.
+const RECENT_REFRESH_MS = 10 * 60 * 1000;
+async function refreshRecentGames(force = false) {
+  if (!app.client || !app.cfg.climbCheck || app.recentBusy || (!force && Date.now() - (app.recentAt || 0) < RECENT_REFRESH_MS)) return;
+  app.recentBusy = true;
+  app.recentAt = Date.now();
+  try {
+    const j = await lcu(app.client, 'GET', '/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=50');
+    const byId = new Map(history.recent.map((x) => [x.id, x]));
+    let added = 0;
+    for (const x of j?.games?.games || []) {
+      const win = x.participants?.[0]?.stats?.win;
+      if (typeof win !== 'boolean' || typeof x.gameCreation !== 'number' || x.mapId !== 11 || !['CLASSIC', 'SWIFTPLAY'].includes(x.gameMode)) continue;
+      if (x.endOfGameResult && x.endOfGameResult !== 'GameComplete') continue;
+      if (!byId.has(x.gameId)) added++;
+      byId.set(x.gameId, { id: x.gameId, start: x.gameCreation, dur: x.gameDuration || 0, win, queue: x.queueId ?? null, champ: x.participants[0].championId ?? null });
+    }
+    if (added) {
+      history.recent = [...byId.values()].sort((a, b) => b.start - a.start).slice(0, 200);
+      saveHistory();
+    }
+    // Din rank i solo/duo (til referencetallene). Formen er ikke set i en rigtig klient endnu - læses forsigtigt.
+    const ranked = await lcu(app.client, 'GET', '/lol-ranked/v1/current-ranked-stats').catch(() => null);
+    const solo = ranked?.queueMap?.RANKED_SOLO_5x5 || (Array.isArray(ranked?.queues) ? ranked.queues.find((q) => q?.queueType === 'RANKED_SOLO_5x5') : null);
+    const tier = typeof solo?.tier === 'string' ? solo.tier.toUpperCase() : '';
+    app.rank = tier && tier !== 'NONE' ? { tier, division: solo.division || null } : null;
+    broadcast();
+  } catch {} finally { app.recentBusy = false; }
+}
+
+// Dødsfald pr. 10 min i hver fase (tid i fasen tæller med, så korte kampe ikke trækker ned).
+function deathPhases(games) {
+  const rv = games.filter((g) => reviewDeaths(g) && durOf(g));
+  if (rv.length < PATTERN_MIN_GAMES) return null;
+  const rows = PHASES.map(([from, to, label]) => ({ label, deaths: 0, time: 0, from, to }));
+  for (const g of rv) {
+    const dur = durOf(g);
+    for (const r of rows) r.time += Math.max(0, Math.min(dur, r.to * 60) - r.from * 60);
+    for (const d of reviewDeaths(g)) rows.find((r) => d.t >= r.from * 60 && d.t < r.to * 60).deaths++;
+  }
+  return { games: rv.length, rows: rows.filter((r) => r.time > 0).map((r) => ({ label: r.label, deaths: r.deaths, per10: r.deaths / (r.time / 600) })) };
+}
+
+// Føringen i lanen omsat (eller ej): foran ved 10 min -> sejre, og hvor ofte holdet alligevel var bagud ved 20.
+function leadLine(games) {
+  const at = games.filter((g) => g.review?.v >= REVIEW_MIN && typeof g.review.at?.[10]?.gold === 'number' && g.review.at[10].gold !== 0);
+  if (at.length < PATTERN_MIN_GAMES) return null;
+  const ahead = at.filter((g) => g.review.at[10].gold > 0);
+  const lost = ahead.filter((g) => typeof teamGoldAt(g, 20) === 'number' && teamGoldAt(g, 20) < 0);
+  const behind20 = games.filter((g) => typeof teamGoldAt(g, 20) === 'number' && teamGoldAt(g, 20) < 0);
+  return `Foran i lanen ved 10 min i ${ahead.length} af ${at.length} kampe - vandt ${winsOf(ahead)} af de ${ahead.length}.` +
+    (lost.length ? ` I ${lost.length} af dem var holdet bagud ved 20 min (${winsOf(lost)} sejre).` : '') +
+    (behind20.length ? ` Holdet bagud ved 20 min i alt: ${winsOf(behind20)} af ${behind20.length} sejre.` : '');
+}
+
+// Champion-pulje i dine seneste 20 kampe.
+function poolView(games) {
+  const last = games.slice(0, 20);
+  if (last.length < PATTERN_MIN_GAMES) return null;
+  const by = new Map();
+  for (const g of last) {
+    const k = `${g.championId}|${g.position}`;
+    const x = by.get(k) || { key: k, champion: champView(g.championId), position: g.position, games: 0, wins: 0 };
+    x.games++; if (g.result === 'Sejr') x.wins++;
+    by.set(k, x);
+  }
+  const list = [...by.values()].sort((a, b) => b.games - a.games);
+  const top2 = new Set(list.slice(0, 2).map((x) => x.key));
+  const inTop = last.filter((g) => top2.has(`${g.championId}|${g.position}`));
+  const rest = last.filter((g) => !inTop.includes(g));
+  return {
+    games: last.length,
+    champions: new Set(last.map((g) => g.championId)).size,
+    roles: new Set(last.map((g) => g.position)).size,
+    list: list.slice(0, 6).map(({ key, ...x }) => x),
+    topVsRest: rest.length >= 3 ? `Dine 2 mest spillede: ${winsOf(inTop)} af ${inTop.length} sejre - alle andre: ${winsOf(rest)} af ${rest.length}` : null,
+  };
+}
+
+// Udvikling: din median i de sidste 10 kampe mod de 10 før (kræver 15 kampe med tallet).
+function trendRows(games) {
+  const rows = [];
+  for (const m of CLIMB_METRICS) {
+    if (m.bool) continue;
+    const vs = games.map((g) => m.get(g)).filter((v) => typeof v === 'number' && Number.isFinite(v));
+    if (vs.length < 15) continue;
+    const last = median(vs.slice(0, 10)); const before = median(vs.slice(10, 20));
+    rows.push({ label: m.label, last: m.fmt(last), before: m.fmt(before), better: last === before ? null : m.low ? last < before : last > before, n: Math.min(20, vs.length) });
+  }
+  return rows;
+}
+
+// Hovedrollen: den rolle du har spillet mest i dine seneste 20 kampe.
+function mainRole() {
+  const n = new Map();
+  for (const g of srGames().slice(0, 20)) if (g.position) n.set(g.position, (n.get(g.position) || 0) + 1);
+  return [...n].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+}
+
+function climbView() {
+  if (!app.cfg.climbCheck) return null;
+  const role = mainRole();
+  const { games, scope } = climbGroup(role);
+  const splits = CLIMB_METRICS.map((m) => metricSplit(m, games)).filter((s) => s && s.cost != null && s.cost > 0).sort((a, b) => b.cost - a.cost);
+  const allDeaths = games.flatMap((g) => reviewDeaths(g) || []);
+  const st = streakStats();
+  const latest = srGames().find((g) => g.review?.v >= REVIEW_MIN);
+  const last = latest ? gameLeaks(latest) : null;
+  const tilt = tiltThreshold(st);
+  return {
+    scope,
+    games: games.length,
+    minGames: PATTERN_MIN_GAMES,
+    last: last && latest ? { date: latest.date, champion: latest.champion, result: latest.result, ...last } : null,
+    reviewShown: Boolean(app.cfg.matchReview),
+    costs: splits.slice(0, 3).map((s) => ({ text: splitText(s), tip: CLIMB_TIPS[s.m.key] || null })),
+    lead: leadLine(games),
+    phases: deathPhases(games),
+    multi: allDeaths.length >= 20 ? `${allDeaths.filter((d) => d.n >= 2).length} af ${allDeaths.length} dødsfald var mod 2 eller flere fjender` : null,
+    trends: trendRows(games),
+    pool: poolView(srGames()),
+    tilt: st ? { games: st.games, wins: st.wins, after: st.after, nth: st.nth, hour: st.hour, k: tilt.k, own: tilt.own, gapMin: SESSION_GAP_MS / 60000 } : null,
+    guard: tiltGuard(st),
+    sources: RESEARCH_URL,
+  };
+}
+
+// Én linje i champion select: dit største hul i den rolle du skal spille (det der koster flest sejre, helst et
+// du stadig har i dine sidste 5 kampe) + tilt-vagten.
+function climbFocus(position) {
+  if (!app.cfg.climbCheck) return null;
+  const { games, scope } = climbGroup(position);
+  const splits = CLIMB_METRICS.map((m) => metricSplit(m, games)).filter((s) => s && s.cost != null && s.cost > 0).sort((a, b) => b.cost - a.cost);
+  const recentWorse = (s) => {
+    const vs = s.values.slice(0, 5).map((x) => x.v);
+    return vs.length >= 3 && s.worse(s.m.bool ? (vs.filter((v) => v === 1).length > vs.length / 2 ? 1 : 0) : median(vs));
+  };
+  const s = splits.find(recentWorse) || splits[0];
+  const focus = s ? { text: `${splitText(s)} (${scope})`, label: s.m.label, tip: CLIMB_TIPS[s.m.key] || null, recent: recentWorse(s) } : null;
+  const guard = tiltGuard();
+  return focus || guard ? { focus, guard } : null;
+}
+
 // ---------- OBS: video af dine dødsfald (kun med obsClips: true) ----------
 // OBS WebSocket v5 (indbygget i OBS 28+). Node's indbyggede WebSocket-klient (Node 22) - ingen ekstra pakker.
 // Med obsClips slået fra kaldes intet her: ingen forbindelse, ingen beskeder.
@@ -2477,7 +2896,7 @@ function openFile(file) {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.19.0';
+const VERSION = '1.20.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -3409,6 +3828,10 @@ const app = {
   ejFailAt: 0,
   summonerRegion: null, // OP.GG-region fra klienten (til spejder-opslag)
   puuid: null,         // din puuid (til kampgennemgangen)
+  rank: null,          // { tier, division } i solo/duo fra klienten (klatre-tjekkets referencetal)
+  pickMastery: null,   // { championId, points } for den champion du har låst
+  recentAt: 0,         // sidst klientens kamphistorik blev hentet (tilt-tallene)
+  recentBusy: false,
   remote: { enabled: false, token: null, urls: [] },
 };
 
@@ -3638,6 +4061,9 @@ function viewModel() {
     enemyJungle: safeView(enemyJungleView),
     reviews: app.live ? null : safeView(reviewView),
     patterns: app.live ? null : safeView(patternsView),
+    climb: app.live ? null : safeView(climbView),
+    // Tilt-vagten også i champion select før du låser (draften).
+    climbGuard: app.live || !app.cfg.climbCheck ? null : safeView(() => tiltGuard()),
     obsClips: Boolean(app.cfg.obsClips),
     obs: app.cfg.obsClips ? { status: obs.status, ready: obs.ready } : null,
   };
@@ -3645,6 +4071,14 @@ function viewModel() {
   if (app.cfg.patterns) {
     const p = safeView(() => patternsFor(pick.championId, b.position));
     if (p) base.patternsPick = { games: p.games, minGames: PATTERN_MIN_GAMES, lines: p.lines.slice(0, 2).map((l) => l.text) };
+  }
+  if (app.cfg.climbCheck) {
+    const f = safeView(() => climbFocus(b.position));
+    const pm = app.pickMastery?.championId === pick.championId ? app.pickMastery.points : null;
+    const champName = dd.champions[pick.championId]?.name || '';
+    const mastery = typeof pm === 'number' && pm < MASTERY_CROSS
+      ? { text: `${gnum(pm)} mastery-point på ${champName}. I iTeros data (1M+ solo queue-kampe omkring Gold) krydser win rate 50 % ved ca. ${gnum(MASTERY_CROSS)} point (ca. 20 kampe); under 10.000 ligger den omkring 44 %.`, url: MASTERY_URL } : null;
+    if (f || mastery) base.climbPick = { focus: f?.focus || null, guard: f?.guard || null, mastery };
   }
   const champ = dd.champions[pick.championId] || { name: `Champion ${pick.championId}` };
   const stats = roleStats(b);
@@ -4084,6 +4518,7 @@ async function handlePick(pick, pickKey, itemKey) {
     app.plan = null; // gameplanen fra en anden champion/rolle må ikke blive stående
     app.planKey = null;
     const position = app.roleOverride || POSITION_MAP[pick.assignedPosition];
+    if (app.pickMastery?.championId !== pick.championId) fetchPickMastery(pick.championId).catch(() => {});
     try {
       app.build = await getBuild(cfg, pick.championId, position, pick.gameMode, pick.mapId);
     } catch (e) {
@@ -4255,7 +4690,7 @@ async function tick() {
     if (app.draft || app.draftKey || app.draftStatus) { app.draft = null; app.draftKey = null; app.draftStatus = null; }
     // Tilbage i lobbyen uden kamp (fx dodge): vis ikke den gamle champion select.
     if ((app.pick || app.enemyJungle) && ['None', 'Lobby', 'Matchmaking', 'ReadyCheck'].includes(phase)) { clearPick(); broadcast(); }
-    if (['None', 'Lobby', 'EndOfGame'].includes(phase)) upgradeOldReviews(phase);
+    if (['None', 'Lobby', 'EndOfGame'].includes(phase)) { upgradeOldReviews(phase); refreshRecentGames().catch(() => {}); }
     return cfg.pollMs;
   }
   const session = await lcu(app.client, 'GET', '/lol-champ-select/v1/session');
