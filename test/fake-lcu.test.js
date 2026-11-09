@@ -194,7 +194,7 @@ const opggWeb = http.createServer((req, res) => {
 
 // Falsk OBS (WebSocket v5 med adgangskode): tjekker auth-håndtrykket og registrerer forespørgslerne.
 const OBS_PASSWORD = 'hemmelig';
-const obsLog = { connections: 0, identified: false, authOk: null, requests: [], dir: null, lastPath: null, active: false, saves: 0 };
+const obsLog = { connections: 0, identified: false, authOk: null, requests: [], dir: null, recordDir: null, lastPath: null, active: false, saves: 0, hold: false, release: null };
 const obsServer = http.createServer((req, res) => { res.writeHead(426); res.end(); });
 obsServer.on('upgrade', (req, socket) => {
   obsLog.connections++;
@@ -241,13 +241,17 @@ obsServer.on('upgrade', (req, socket) => {
         if (t === 'StartReplayBuffer') obsLog.active = true;
         if (t === 'SaveReplayBuffer') {
           obsLog.saves++;
-          // Filen skrives lidt efter (som i OBS)
-          setTimeout(() => {
-            obsLog.lastPath = path.join(obsLog.dir, `Replay ${obsLog.saves}.mp4`);
+          // Filen skrives lidt efter (som i OBS) - eller først når testen slipper den (obsLog.hold).
+          const n = obsLog.saves;
+          const write = () => {
+            obsLog.lastPath = path.join(obsLog.dir, `Replay ${n}.mp4`);
             fs.writeFileSync(obsLog.lastPath, Buffer.alloc(2048, 7));
-          }, 500);
+          };
+          if (obsLog.hold) obsLog.release = write;
+          else setTimeout(write, 500);
         }
         if (t === 'GetLastReplayBufferReplay') data = { savedReplayPath: obsLog.lastPath };
+        if (t === 'GetRecordDirectory') data = { recordDirectory: obsLog.recordDir || obsLog.dir };
         send({ op: 7, d: { requestType: t, requestId: m.d.requestId, requestStatus: { result: true, code: 100 }, responseData: data } });
       }
     }
@@ -397,6 +401,156 @@ const replayServer = http.createServer((req, res) => {
     send(404, {});
   });
 });
+
+// Klip der ikke blev koblet til kampen (ældre version, genstart midt i kampen, klip færdigt for sent): programmet finder
+// dem i OBS' optagemappe ud fra filens tid og parrer dem med dødsfaldene. Tobias' rigtige kampe og filer: fixtures/obs-clips.js.
+async function clipTest(cmd, args, baseEnv, tmp) {
+  const OC = require('./fixtures/obs-clips');
+  const dir = path.join(tmp, 'cliptest');
+  const videos = path.join(dir, 'Videos'); // standardmappen (kendes uden OBS)
+  const obsDir = path.join(dir, 'OBS-optagelser'); // kendes kun via OBS' GetRecordDirectory
+  fs.mkdirSync(videos, { recursive: true });
+  fs.mkdirSync(obsDir);
+  const touch = (d, name, at) => { const p = path.join(d, name); fs.writeFileSync(p, Buffer.alloc(256, 1)); fs.utimesSync(p, new Date(at), new Date(at)); return p; };
+  // OBS' standardnavn i lokal tid (CET om vinteren), som de rigtige filer.
+  const obsName = (at) => { const d = new Date(at + 3600e3).toISOString(); return `Replay ${d.slice(0, 10)} ${d.slice(11, 19).replace(/:/g, '-')}.mp4`; };
+  const clipAt = (d, start, sec) => { const at = start + sec * 1000; return touch(d, obsName(at), at); };
+  for (const f of OC.files) touch(videos, f.name, Date.parse(f.mtime));
+  const review = (start, dur, deaths) => ({ v: 5, start, dur, gv: '16.22.834.8910', pf: 'EUN1', side: 'BLUE', win: false,
+    deaths: deaths.map((t) => ({ t, x: 7000, y: 7000, killer: '238', by: 'lane', n: 1, zone: 'Mid', own: true, lvl: 9, dead: 20 })),
+    gold: [], team: [], at: {}, path: [], jgPath: [], ganks: [], objectives: [], roams: [] });
+  const game = (o) => ({ championId: 7, champion: 'LeBlanc', gameMode: 'CLASSIC', mapNumber: 11, position: 'MID', result: 'Nederlag', kills: 1, assists: 1,
+    cs: 150, csPerMin: 6, items: [], buys: [], ...o, deaths: o.review.deaths.length });
+  const at = (iso) => Date.parse(iso);
+  // A + B: Tobias' rigtige kampe, gemt (som af v1.21/v1.22.0) uden klip: 10 dødsfald/10 filer og 7/7.
+  const real = (g) => game({ date: g.date, result: g.result, duration: g.duration, deathLog: g.live.map(([t]) => ({ t, killer: 'Malzahar', helpers: 0 })),
+    review: review(g.start, g.dur, g.deaths) });
+  // C: 5 dødsfald, 3 klip + 1 klip uden dødsfald (indlæsning + gemme-forsinkelse = 52,6 sek. efter gameCreation).
+  const C0 = at('2026-11-08T18:00:00Z');
+  const c = [300, 700, 1500].map((t) => clipAt(videos, C0, 52.6 + t));
+  const cStray = clipAt(videos, C0, 52 + 1000);
+  // D: 3 dødsfald, 1 klip - hvilket dødsfald kan ikke afgøres.
+  const D0 = at('2026-11-08T16:00:00Z');
+  const dOnly = clipAt(videos, D0, 60 + 900);
+  // E: genstart midt i kampen. 5:00-klippet blev gemt før genstarten (pendingClips), 10:00 efter (deathLog),
+  // og 15:00-klippet nåede programmet aldrig at få stien på (kun filen findes).
+  const E0 = at('2026-11-08T14:00:00Z');
+  const e300 = clipAt(videos, E0, 45 + 300.2 + 3.5);
+  const e600 = clipAt(videos, E0, 45 + 600.4 + 3.5);
+  const e900 = clipAt(videos, E0, 45 + 900 + 3.6);
+  // F: klippene ligger i en mappe, som kun OBS kender.
+  const F0 = at('2026-11-08T12:00:00Z');
+  const f = [500, 1000].map((t) => clipAt(obsDir, F0, 43 + t));
+  // Filer der ikke må kobles: ikke et replay-klip, og et replay-klip uden for alle kampe.
+  const notClip = touch(videos, 'Min video.mp4', Date.parse(OC.games[0].date) - 600e3);
+  const outside = clipAt(videos, at('2026-11-07T10:00:00Z'), 0);
+  const running = path.join(videos, 'Replay kamp der kører.mp4');
+  fs.writeFileSync(running, 'x');
+  const games = [
+    real(OC.games[1]), real(OC.games[0]),
+    game({ date: new Date(C0 + 1830e3).toISOString(), duration: 1800, deathLog: [], review: review(C0, 1800, [300, 700, 1100, 1500, 1700]) }),
+    game({ date: new Date(D0 + 1530e3).toISOString(), duration: 1500, review: review(D0, 1500, [400, 900, 1300]) }),
+    game({ date: new Date(E0 + 1680e3).toISOString(), duration: 1600, deathLog: [{ t: 600.4, killer: 'Zed', helpers: 0, clip: e600 }], review: review(E0, 1600, [300, 600, 900, 1200]) }),
+    game({ date: new Date(F0 + 1460e3).toISOString(), duration: 1400, review: review(F0, 1400, [500, 1000]) }),
+  ];
+  const pendingClips = [
+    { file: e300, t: 300.2, at: E0 + (45 + 300.2) * 1000, gameId: null, killer: 'Zed' },
+    { file: running, t: 100, at: Date.now() - 60e3, gameId: null, killer: 'Zed' }, // kampen kører stadig - bliver stående
+  ];
+  fs.writeFileSync(path.join(dir, 'history.json'), JSON.stringify({ games, recent: [], pendingClips }));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ obsClips: true, obsPassword: OBS_PASSWORD }));
+  const env = { ...baseEnv, LOL_HELPER_HISTORY: path.join(dir, 'history.json'), LOL_HELPER_CONFIG: path.join(dir, 'config.json'),
+    LOL_HELPER_SHAPES: path.join(dir, 'lcu-shapes.json'), LOL_HELPER_LCU: 'http:9:ingen', LOL_HELPER_LIVE: 'http:9', LOL_HELPER_REMOTE: '',
+    LOL_HELPER_CLIP_DIR: videos };
+  const hist = () => JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8'));
+  const names = (rv) => rv.review.deaths.map((d) => (d.clip ? d.clip.name : null));
+  const start = () => {
+    const child = spawn(cmd, args, { env });
+    const p = { child, out: '' };
+    child.stdout.on('data', (d) => (p.out += d));
+    child.stderr.on('data', (d) => (p.out += d));
+    p.base = () => /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(p.out)[1];
+    p.st = async () => (await fetch(p.base() + '/state')).json();
+    return p;
+  };
+  const connBefore = obsLog.connections;
+  let p = start();
+  try {
+    await waitFor(() => /Data Dragon .* hentet/.test(p.out), 30000, 'klip-kopien starter');
+    let s;
+    for (let i = 0; i < 30 && !((s = await p.st()).reviews?.length === 6); i++) await wait(200);
+    const rv = (iso) => s.reviews.find((r) => r.date === iso);
+    // A og B: hvert klip ved det dødsfald, programmet selv koblede det til under kampen (facit), 1:1 i tidsorden.
+    for (const g of OC.games) {
+      assert.deepStrictEqual(names(rv(g.date)), g.live.map(([, n]) => n), `rigtig kamp ${g.date}: klip ved dødsfaldene`);
+      assert.deepStrictEqual(rv(g.date).clips, [], 'ingen løse klip');
+    }
+    assert.strictEqual(s.reviews.filter((r) => r.review.deaths.some((d) => d.clip)).length, 4, 'A, B, C og E har klip');
+    // C: 3 klip ved deres dødsfald (forskydningen fundet i data), klippet uden dødsfald står for sig med anslået tid.
+    const C = s.reviews.find((r) => r.review.start === C0) || rv(new Date(C0 + 1830e3).toISOString());
+    assert.deepStrictEqual(names(C), [path.basename(c[0]), path.basename(c[1]), null, path.basename(c[2]), null], 'C: klip ved 5:00, 11:40 og 25:00');
+    assert.deepStrictEqual(C.clips.map((x) => [x.t, x.name]), [[null, path.basename(cStray)]], 'C: andre klip fra kampen');
+    assert(Math.abs(C.clips[0].est - 1000) <= 2, `C: anslået kamptid ${C.clips[0].est}`);
+    // D: 1 klip og 3 dødsfald - der gættes ikke.
+    const D = rv(new Date(D0 + 1530e3).toISOString());
+    assert.deepStrictEqual(names(D), [null, null, null], 'D: intet dødsfald gættet');
+    assert.deepStrictEqual(D.clips.map((x) => [x.t, x.est, x.name]), [[null, null, path.basename(dOnly)]], 'D: klippet vises som andet klip');
+    // E: genstart midt i kampen - klippet fra før genstarten (pendingClips) og filen uden sti kobles.
+    const E = rv(new Date(E0 + 1680e3).toISOString());
+    assert.deepStrictEqual(names(E), [path.basename(e300), path.basename(e600), path.basename(e900), null], 'E: klip efter genstart');
+    let h = hist();
+    const hE = h.games.find((g) => g.date === E.date);
+    assert.deepStrictEqual(hE.clipLog.map((x) => [x.t, path.basename(x.file), x.how]), [[300.2, path.basename(e300), 'live'], [900, path.basename(e900), 'anchor']], 'E gemt i history.json');
+    assert.deepStrictEqual(h.games.find((g) => g.date === OC.games[0].date).clipLog.map((x) => x.how), Array(10).fill('order'), 'A gemt i history.json');
+    assert.deepStrictEqual(h.pendingClips.map((x) => x.file), [running], 'klip fra en kamp der ikke er gemt endnu, bliver stående');
+    // F: mappen kendes ikke uden OBS.
+    const F = rv(new Date(F0 + 1460e3).toISOString());
+    assert.deepStrictEqual(names(F), [null, null], 'F: OBS-mappen er ikke gennemgået endnu');
+    assert.strictEqual(obsLog.connections, connBefore, 'ingen OBS-forbindelse uden for kampen ved start');
+    // Kun klip der hører til en kamp kan afspilles.
+    const play = async (file) => (await fetch(`${p.base()}/clip?f=${encodeURIComponent(file)}`)).status;
+    assert.strictEqual(await play(path.join(videos, OC.games[0].live[0][1])), 200, 'fundet klip kan afspilles');
+    assert.strictEqual(await play(dOnly), 200, 'andet klip fra kampen kan afspilles');
+    assert.strictEqual(await play(notClip), 403, 'andre videoer i mappen afvises');
+    assert.strictEqual(await play(outside), 403, 'replay-klip uden for dine kampe afvises');
+    assert.strictEqual(await play(running), 403, 'klip fra en kamp der ikke er gemt, afvises');
+
+    // "Find klip til mine kampe": OBS fortæller optagemappen (GetRecordDirectory) - uden at starte replay bufferen.
+    obsLog.recordDir = obsDir;
+    const reqBefore = obsLog.requests.length;
+    const res = await fetch(p.base() + '/api/find-clips', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const body = await res.json();
+    assert.strictEqual(res.status, 200, JSON.stringify(body));
+    assert.strictEqual(body.obsDir, obsDir);
+    assert.deepStrictEqual(body.games.map((x) => [x.date, x.files, x.paired, x.other, x.how]), [[new Date(F0 + 1460e3).toISOString(), 2, 2, 0, 'order']], JSON.stringify(body.games));
+    const after = obsLog.requests.slice(reqBefore);
+    assert(after.includes('GetRecordDirectory'), `GetRecordDirectory: ${after}`);
+    assert(!after.includes('StartReplayBuffer') && !after.includes('GetReplayBufferStatus'), `replay bufferen røres ikke: ${after}`);
+    assert(!p.out.includes(OBS_PASSWORD), 'adgangskoden logges aldrig');
+    s = await p.st();
+    assert.deepStrictEqual(names(rv(new Date(F0 + 1460e3).toISOString())), f.map((x) => path.basename(x)), 'F: klip fra OBS-mappen');
+    assert.strictEqual(hist().clipDir, obsDir, 'OBS-mappen huskes');
+    assert(/Klip fundet til LeBlanc .*: 10 af 10 koblet til et dødsfald \(samme antal klip og dødsfald - parret i tidsorden\)/.test(p.out), 'loggen siger hvordan');
+
+    // Genstart: intet kobles to gange, og alt står der stadig.
+    h = hist();
+    p.child.kill();
+    await wait(500);
+    p = start();
+    await waitFor(() => /Data Dragon .* hentet/.test(p.out), 30000, 'klip-kopien starter igen');
+    for (let i = 0; i < 30 && !((s = await p.st()).reviews?.length === 6); i++) await wait(200);
+    assert.deepStrictEqual(hist().games.map((g) => (g.clipLog || []).length), h.games.map((g) => (g.clipLog || []).length), 'intet koblet to gange efter genstart');
+    assert.deepStrictEqual(names(rv(OC.games[0].date)), OC.games[0].live.map(([, n]) => n), 'A efter genstart');
+    assert(!/Klip fundet/.test(p.out), 'intet nyt at finde efter genstart');
+    console.log(`Klip: A ${OC.games[0].live.length}/${OC.games[0].deaths.length}, B ${OC.games[1].live.length}/${OC.games[1].deaths.length}, C 3+1, D 0+1, E genstart, F via OBS - OK`);
+  } catch (e) {
+    console.log(p.out);
+    throw e;
+  } finally {
+    p.child.kill();
+    obsLog.recordDir = null;
+  }
+}
 
 async function replayTest(cmd, args, baseEnv, tmp) {
   const dir = path.join(tmp, 'replay');
@@ -989,6 +1143,7 @@ server.listen(0, '127.0.0.1', async () => {
     LOL_HELPER_PORT: '0',
     LOL_HELPER_NO_WINDOW: '1',
     LOL_HELPER_REMOTE: process.env.NO_REMOTE ? '' : '1',
+    LOL_HELPER_CLIP_DIR: path.join(tmp, 'Videos'),
   };
   // config.json med BOM (som Notesblok/PowerShell kan gemme) skal kunne læses. remoteLan: telefon-testen bruger wifi-adressen.
   fs.writeFileSync(env.LOL_HELPER_CONFIG, `\uFEFF{ "remoteLan": true, "obsPassword": "${OBS_PASSWORD}" }\n`);
@@ -997,6 +1152,7 @@ server.listen(0, '127.0.0.1', async () => {
   obsLog.lastPath = path.join(obsLog.dir, 'Replay gammel.mp4'); // et klip fra før - må ikke kunne hentes via vinduet
   fs.writeFileSync(obsLog.lastPath, 'gammel');
   const oldClip = obsLog.lastPath;
+  fs.utimesSync(oldClip, new Date(Date.now() - 2 * 86400e3), new Date(Date.now() - 2 * 86400e3));
   const child = spawn(cmd, args, { env });
   const tokenFile = path.join(process.env.HELPER_BIN ? path.dirname(cmd) : path.join(__dirname, '..'), 'remote-token.txt');
   const hadToken = fs.existsSync(tokenFile);
@@ -1432,6 +1588,11 @@ server.listen(0, '127.0.0.1', async () => {
     assert(Date.now() - diedAt >= 2500, 'venter ca. 3 sek. efter dødsfaldet');
     await waitFor(() => out.includes('OBS: klip af dødsfaldet 20:34 gemt (Replay 1.mp4)'), 15000, 'klip gemt');
     assert.strictEqual(obsLog.saves, 1, 'ét klip pr. dødsfald');
+    {
+      const pend = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).pendingClips || [];
+      assert.deepStrictEqual(pend.map((p) => [p.t, path.basename(p.file), p.killer]), [[1234, 'Replay 1.mp4', 'Darius']], `klip gemt under kampen: ${JSON.stringify(pend)}`);
+      assert(Math.abs(pend[0].at - diedAt) < 3000, 'væg-tiden for dødsfaldet gemt');
+    }
     assert(!out.includes(OBS_PASSWORD), 'adgangskoden logges aldrig');
     assert.strictEqual(obsLog.connections, 1, 'én forbindelse');
     // Lanes lige nu: alle 5 lanes med styrkeforhold
@@ -1662,9 +1823,25 @@ server.listen(0, '127.0.0.1', async () => {
       assert(msgs.size <= 1, `vinduet fik ${msgs.size} forskellige beskeder uden ændringer`);
     }
 
+    // 8) Du dør lige før kampen slutter, og OBS skriver først klippet, efter at kampen er gemt.
+    obsLog.hold = true;
+    live.data.events.Events.push({ EventID: 25, EventName: 'ChampionKill', EventTime: 1250, KillerName: 'Tank', VictimName: 'Mig', Assisters: [] });
+    await waitFor(() => obsLog.saves === 2, 10000, 'SaveReplayBuffer for det sidste dødsfald');
     // 8) Kampen slutter
     live.data = null;
     await waitFor(() => out.includes('Kampen er slut.'), 15000, 'kamp slut');
+    {
+      const h = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8'));
+      assert.deepStrictEqual(h.games[0].deathLog.map((d) => [d.t, d.clip ? path.basename(d.clip) : null]), [[1230, null], [1234, 'Replay 1.mp4'], [1250, null]], 'kampen gemt før klippet er færdigt');
+      assert.deepStrictEqual(h.pendingClips, [], 'klip der står i kampen, er ikke længere midlertidige');
+    }
+    obsLog.hold = false;
+    obsLog.release();
+    await waitFor(() => out.includes('OBS: klip af dødsfaldet 20:50 gemt (Replay 2.mp4)'), 15000, 'sent klip gemt');
+    {
+      const h = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8'));
+      assert.deepStrictEqual(h.games[0].deathLog.map((d) => [d.t, d.clip ? path.basename(d.clip) : null]), [[1230, null], [1234, 'Replay 1.mp4'], [1250, 'Replay 2.mp4']], 'sent klip gemt i history.json');
+    }
     const after = (await gui('GET', '/state')).body;
     assert.strictEqual(after.live, null);
     // Kampoversigt gemt i historikken
@@ -1683,7 +1860,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert(out.includes('Kampoversigt: Ahri'), 'log med kampoversigt');
     assert.deepStrictEqual(g.duels?.map((d) => d.won), [false, true], `dueller i historikken: ${JSON.stringify(g.duels)}`);
     assert.strictEqual(g.balanceEnd, 'Fordel Zed', 'styrkeforhold ved slut');
-    assert.deepStrictEqual(g.deathLog?.map((d) => [d.t, d.killer, d.helpers]), [[1230, 'Zed', 0], [1234, 'Darius', 0]], `dødsfald: ${JSON.stringify(g.deathLog)}`);
+    assert.deepStrictEqual(g.deathLog?.map((d) => [d.t, d.killer, d.helpers]), [[1230, 'Zed', 0], [1234, 'Darius', 0], [1250, 'Darius', 0]], `dødsfald: ${JSON.stringify(g.deathLog)}`);
     assert(/^level 11 mod 13/.test(g.deathLog[0].context), g.deathLog[0].context);
     assert(g.lessons?.[0]?.startsWith('Sammenligning med dine egne kampe kommer efter 3 kampe med Ahri'), JSON.stringify(g.lessons));
     assert(out.includes('dueller mod Zed: 1-1'), 'dueller i kampoversigten');
@@ -1707,7 +1884,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(hist.gameId, 4242, 'kampens id gemt');
     assert(!JSON.stringify(hist).includes('participantFrames') && JSON.stringify(hist.review).length < 4000, 'kun et kort uddrag i history.json');
     // Video af dødsfaldet: liste i gennemgangen + afspilning kun af programmets egne klip
-    assert.deepStrictEqual(rv.clips.map((c) => [c.t, c.killer, c.name]), [[1234, 'Darius', 'Replay 1.mp4']], `klip: ${JSON.stringify(rv.clips)}`);
+    assert.deepStrictEqual(rv.clips.map((c) => [c.t, c.killer, c.name]), [[1234, 'Darius', 'Replay 1.mp4'], [1250, 'Darius', 'Replay 2.mp4']], `klip: ${JSON.stringify(rv.clips)}`);
     const base8 = /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
     const clipRes = await fetch(`${base8}/clip?f=${encodeURIComponent(rv.clips[0].file)}`);
     assert.strictEqual(clipRes.status, 200, 'klip kan afspilles');
@@ -1737,6 +1914,9 @@ server.listen(0, '127.0.0.1', async () => {
 
     // 8r) "Se det i replayet", klip ved rådene og champion-puljen (endnu en kopi, falsk Replay API)
     await replayTest(cmd, args, env, tmp);
+
+    // 8s) Klip der ikke blev koblet til kampen: Tobias' rigtige filer (10/10 og 7/7), skæve tilfælde og genstart midt i kampen
+    await clipTest(cmd, args, env, tmp);
 
     // 9) Telefon-adgang: kræver nøgle udefra, POST kun som JSON
     if (process.env.NO_REMOTE) throw new Error('SKIP_REMOTE');

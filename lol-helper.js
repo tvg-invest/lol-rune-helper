@@ -1652,15 +1652,19 @@ const HISTORY_FILE = process.env.LOL_HELPER_HISTORY || path.join(APP_DIR, 'histo
 const srGames = () => history.games.filter((g) => !g.gameMode || ['CLASSIC', 'SWIFTPLAY'].includes(g.gameMode));
 const history = (() => {
   try {
-    const { games, recent } = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+    const { games, recent, pendingClips, clipDir } = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8').replace(/^﻿/, ''));
     // Spring ødelagte/håndredigerede poster over i stedet for at fejle senere.
     return {
       games: Array.isArray(games) ? games.filter((g) => g && typeof g === 'object' && g.champion) : [],
       // Klientens kamphistorik (alle dine Summoner's Rift-kampe, også uden programmet): id, start, længde, sejr.
       recent: Array.isArray(recent) ? recent.filter((x) => x && typeof x.start === 'number' && typeof x.win === 'boolean') : [],
+      // OBS-klip fra en kamp der kører (gemt med det samme, så en genstart midt i kampen ikke mister dem).
+      pendingClips: Array.isArray(pendingClips) ? pendingClips.filter((p) => p && typeof p.file === 'string' && typeof p.t === 'number' && typeof p.at === 'number') : [],
+      // OBS' optagemappe (GetRecordDirectory), husket til at finde klip efter en genstart.
+      clipDir: typeof clipDir === 'string' && clipDir ? clipDir : null,
     };
   } catch {
-    return { games: [], recent: [] };
+    return { games: [], recent: [], pendingClips: [], clipDir: null };
   }
 })();
 
@@ -1679,7 +1683,7 @@ function trackGame(data, L) {
     if (e.VictimName !== L.me.key && e.VictimName !== L.me.name) continue;
     const killer = L.enemies.find((p) => e.KillerName && (p.key === e.KillerName || p.name === e.KillerName));
     const what = killer ? killer.champ?.name || killer.name : /turret/i.test(e.KillerName || '') ? 'tårn' : /minion/i.test(e.KillerName || '') ? 'minions' : 'andet';
-    const death = { t: e.EventTime, killer: what, helpers: (e.Assisters || []).length, context: killer ? duelContext(L.me, killer) : null };
+    const death = { t: e.EventTime, at: Date.now(), killer: what, helpers: (e.Assisters || []).length, context: killer ? duelContext(L.me, killer) : null };
     g.deaths.push(death);
     obsClipDeath(g, death); // gør intet med obsClips slået fra
   }
@@ -1806,6 +1810,8 @@ function finishGame() {
     summary.balanceEnd = balanceOf(L.me, opp, plan.opponent).label;
   }
   summary.deathLog = g.deaths; // samme objekter: et OBS-klip der bliver færdigt efter kampen, havner også her
+  // Klippene står nu i kampen selv - de midlertidige poster (gemt under kampen) er ikke længere nødvendige.
+  history.pendingClips = history.pendingClips.filter((p) => !g.deaths.some((d) => d.clip === p.file));
   summary.lessons = lessonsFor(summary, srGames().filter((x) => x.championId === summary.championId).slice(0, 10));
   // Til kampgennemgangen (kun id'er - selve timelinen gemmes ikke).
   if (g.gameId) summary.gameId = g.gameId;
@@ -2136,6 +2142,8 @@ async function fetchReview(summary, attempts) {
       // Resultatet mangler, når kampen sluttede uden GameEnd-event i live-API'et: klienten ved det.
       if (!summary.result && review.win != null) summary.result = review.win ? 'Sejr' : 'Nederlag';
       saveHistory();
+      // Nu kendes alle kampens dødsfald (og kampens starttid): OBS-klip der ikke nåede at blive koblet, kobles her.
+      try { recoverClips(); } catch (e) { log(`Klip: kunne ikke gennemgå optagemappen (${e.message}).`); }
       log(`Kampgennemgang klar: ${summary.champion} (${review.deaths.length} dødsfald, ` +
         `${review.opp ? `mod ${dd.champions[review.opp]?.name || review.opp}` : 'ingen lane-modstander fundet'}, ${review.team.length} minutter guld).`);
       broadcast();
@@ -2204,7 +2212,7 @@ const firstBuys = (g) => (g.buys || []).slice(0, 4).map((b) => ({ id: b.id, t: M
 function reviewView() {
   if (!app.cfg.matchReview) return null;
   const all = srGames();
-  const games = all.slice(0, 15).filter((g) => g.review || (g.deathLog || []).some((d) => d.clip));
+  const games = all.slice(0, 15).filter((g) => g.review || gameClips(g).length);
   return games.slice(0, 10).map((g) => {
     const r = g.review?.v >= REVIEW_MIN ? g.review : null;
     const item = (id) => ({ id, name: itemName(id), icon: dd.items[id]?.icon });
@@ -2241,8 +2249,9 @@ function reviewView() {
         coach: app.cfg.coach ? safeView(() => coachGame(g)) : null,
       } : null,
       // Klip der ikke hører til et dødsfald i gennemgangen (eller kampe uden gennemgang) - de andre står ved dødsfaldet.
-      clips: (g.deathLog || []).filter((d) => d.clip && !(r && r.deaths.some((x) => Math.abs(x.t - d.t) <= CLIP_MATCH_SEC)))
-        .map((d) => ({ t: d.t, killer: d.killer, file: d.clip, name: path.basename(d.clip) })),
+      // Klip uden kendt dødsfald (t = null, est = anslået kamptid) står her som "Andre klip fra kampen".
+      clips: gameClips(g).filter((c) => !(r && c.t != null && r.deaths.some((x) => Math.abs(x.t - c.t) <= CLIP_MATCH_SEC)))
+        .map((c) => ({ t: c.t, est: c.est ?? null, killer: c.killer, file: c.file, name: path.basename(c.file) })),
       gameId: g.gameId || null,
       replay: replayFor(g),
     };
@@ -3049,7 +3058,7 @@ function coachPick(position, championId) {
 // Med obsClips slået fra kaldes intet her: ingen forbindelse, ingen beskeder.
 
 const OBS_CLIP_DELAY = 3000; // vent 3 sek. efter dødsfaldet, så selve dødsfaldet er med i klippet
-const obs = { ws: null, ready: false, status: null, nextTry: 0, pending: new Map(), seq: 0, lastPath: null, closeTimer: null };
+const obs = { ws: null, ready: false, prepared: false, status: null, nextTry: 0, pending: new Map(), seq: 0, lastPath: null, closeTimer: null };
 const obsUrl = () => process.env.LOL_HELPER_OBS || `ws://127.0.0.1:${Number(app.cfg.obsPort) || 4455}`;
 
 function setObsStatus(text) {
@@ -3072,6 +3081,7 @@ function obsConnect() {
     const was = obs.ready;
     obs.ws = null;
     obs.ready = false;
+    obs.prepared = false;
     for (const p of obs.pending.values()) p.reject(new Error('OBS-forbindelsen lukkede'));
     obs.pending.clear();
     if (!app.cfg.obsClips) return;
@@ -3094,7 +3104,8 @@ function obsConnect() {
       ws.send(JSON.stringify({ op: 1, d: identify }));
     } else if (m.op === 2) { // Identified
       obs.ready = true;
-      obsPrepare().catch(() => {});
+      // Replay bufferen startes kun til en kamp - ikke når forbindelsen kun skal bruges til at finde optagemappen.
+      if (app.live) obsPrepare().catch(() => {});
     } else if (m.op === 7) { // RequestResponse
       const p = obs.pending.get(m.d?.requestId);
       if (!p) return;
@@ -3118,6 +3129,7 @@ function obsRequest(requestType, requestData) {
 
 // Start replay bufferen hvis den ikke kører, og husk det sidst gemte klip (så et nyt kan kendes).
 async function obsPrepare() {
+  obs.prepared = true;
   try {
     const st = await obsRequest('GetReplayBufferStatus');
     if (!st.outputActive) {
@@ -3129,29 +3141,39 @@ async function obsPrepare() {
     return;
   }
   try { obs.lastPath = (await obsRequest('GetLastReplayBufferReplay')).savedReplayPath || null; } catch {}
+  await obsRememberDir().catch(() => {});
   setObsStatus('OBS forbundet - dine dødsfald gemmes som klip.');
 }
 
 function obsClipDeath(g, death) {
   if (!app.cfg.obsClips) return;
   setTimeout(async () => {
-    if (!obs.ready) return;
+    if (!obs.ready) {
+      log(`OBS: dødsfaldet ${mmss(death.t)} kunne ikke klippes - OBS er ikke forbundet.`);
+      return;
+    }
     try {
       await obsRequest('SaveReplayBuffer');
-      // Filen skrives lidt efter: vent på at "sidste klip" skifter.
-      for (let i = 0; i < 8; i++) {
+      // Filen skrives lidt efter: vent på at "sidste klip" skifter (op til 20 sek. - også efter kampen er gemt).
+      for (let i = 0; i < 20; i++) {
         await sleep(1000);
         const r = await obsRequest('GetLastReplayBufferReplay').catch(() => null);
         const p = r?.savedReplayPath;
         if (p && p !== obs.lastPath) {
           obs.lastPath = p;
           death.clip = p;
+          // Nåede "Find klip" at finde filen først, står den nu kun ved dødsfaldet (programmets egen tid er mest præcis).
+          for (const x of history.games) if (Array.isArray(x.clipLog)) x.clipLog = x.clipLog.filter((c) => c.file !== p);
           log(`OBS: klip af dødsfaldet ${mmss(death.t)} gemt (${path.basename(p)}).`);
-          if (app.game !== g) saveHistory(); // kampen er allerede gemt
+          // Gem med det samme: er kampen allerede gemt, står klippet i den (samme objekt). Ellers i pendingClips,
+          // så en genstart midt i kampen ikke mister det (kobles til kampen, når den er gemt - se recoverClips).
+          if (app.game === g) history.pendingClips.push({ file: p, t: death.t, at: death.at || Date.now(), gameId: g.gameId || null, killer: death.killer || null });
+          saveHistory();
           broadcast();
           return;
         }
       }
+      log(`OBS: klippet af dødsfaldet ${mmss(death.t)} blev ikke færdigt i tide - "Find klip til mine kampe" kobler det bagefter.`);
     } catch (e) {
       log(`OBS: klippet kunne ikke gemmes (${e.message}).`);
     }
@@ -3164,6 +3186,7 @@ function obsClose() {
   if (obs.ws) { try { obs.ws.close(); } catch {} }
   obs.ws = null;
   obs.ready = false;
+  obs.prepared = false;
 }
 // Efter kampen: luk forbindelsen, når de sidste klip er gemt.
 function obsCloseSoon() {
@@ -3173,15 +3196,235 @@ function obsCloseSoon() {
   obs.closeTimer.unref?.();
 }
 
-// Kun klip som programmet selv har gemt (fra history.json) og kun fra deres egen mappe.
+// Kun klip der hører til en af dine kampe i history.json (gemt af programmet eller fundet i OBS' optagemappe og koblet
+// til kampen) og kun fra deres egen mappe.
 function allowedClip(p) {
   if (typeof p !== 'string' || !p) return null;
-  const clips = srGames().flatMap((g) => (g.deathLog || []).map((d) => d.clip)).filter(Boolean);
+  const clips = history.games.flatMap((g) => gameClips(g).map((c) => c.file));
   const dirs = new Set(clips.map((c) => path.resolve(path.dirname(c))));
   const want = path.resolve(p);
   if (!clips.some((c) => path.resolve(c) === want) || !dirs.has(path.dirname(want))) return null;
   if (!/\.(mp4|mkv|mov|flv|webm|ts|m3u8)$/i.test(want)) return null;
   return want;
+}
+
+// ---------- Klip der ikke blev koblet til en kamp ----------
+// OBS' replay buffer gemmer fx "Replay 2026-11-09 14-28-57.mp4" (standardnavnet, lokal tid) i optagemappen. Klip der
+// ikke står ved en kamp (fx efter en genstart midt i kampen) findes ud fra filens ændringstid (mtime): den skal ligge
+// mellem kampens start (klientens gameCreation) og slut. Parring med dødsfaldene:
+// - samme antal klip og dødsfald uden klip: 1:1 i tidsorden.
+// - ellers med forskydningen mellem kamptid og væg-tid (indlæsning + OBS' gemme-forsinkelse), målt på programmets egne
+//   klip i kampen eller fundet i data (mindst 2 klip skal pege på samme forskydning) - og kun inden for 4 sek.
+// - kan forskydningen ikke afgøres, gættes der ikke: klippene vises som "Andre klip fra kampen".
+// I Tobias' rigtige kampe (9/11-2026) var forskydningen 37 og 104 sek. fra gameCreation, med højst 1,5 sek. spredning
+// inden for samme kamp.
+const CLIP_FILE_RE = /^Replay[ _-].*\.(mp4|mkv|mov|flv|webm|ts)$/i;
+const CLIP_PAIR_TOL_SEC = 4;
+const CLIP_LOAD_MAX_SEC = 400; // gameCreation -> kamptid 0:00 (indlæsning) + gemme-forsinkelse
+const CLIP_END_MARGIN_MS = 90 * 1000;
+const PENDING_CLIP_MAX_MS = 3 * 24 * 3600 * 1000;
+const normPath = (p) => { const r = path.resolve(p); return process.platform === 'win32' ? r.toLowerCase() : r; };
+const defaultClipDir = () => process.env.LOL_HELPER_CLIP_DIR || path.join(os.homedir(), process.platform === 'darwin' ? 'Movies' : 'Videos');
+
+// Alle klip i en kamp: gemt under kampen (deathLog[].clip) og fundet bagefter (clipLog). t = kamptid, null = intet dødsfald.
+function gameClips(g) {
+  const out = [];
+  for (const d of Array.isArray(g.deathLog) ? g.deathLog : []) {
+    if (d && typeof d.clip === 'string' && d.clip) out.push({ t: typeof d.t === 'number' ? d.t : null, file: d.clip, killer: d.killer || null });
+  }
+  for (const c of Array.isArray(g.clipLog) ? g.clipLog : []) {
+    // Samme fil to steder (fundet i mappen, lige før programmets eget klip blev færdigt): programmets eget vinder.
+    if (c && typeof c.file === 'string' && c.file && !out.some((x) => x.file === c.file)) out.push({ t: typeof c.t === 'number' ? c.t : null, est: typeof c.est === 'number' ? c.est : null, file: c.file, killer: c.killer || null, how: c.how || null });
+  }
+  return out;
+}
+
+// Kampens tidsrum i væg-tid (ms). start = klientens gameCreation (fra gennemgangen), ellers slut minus længde minus 5 min.
+function gameWindow(g) {
+  const end = Date.parse(g.date);
+  if (!Number.isFinite(end)) return null;
+  const dur = (Number(g.review?.dur) || Number(g.duration) || 0) * 1000;
+  const exact = Number(g.review?.start) > 0;
+  const start = exact ? Number(g.review.start) : end - dur - 5 * 60000;
+  return { start, end: Math.max(end, start + dur) + CLIP_END_MARGIN_MS, exact };
+}
+
+// Par klip (filer med væg-tid i ms) med dødsfald (kamptid i sek.). Ren funktion - se reglerne ovenfor.
+// anchors: kendte klip i kampen ({ t, at }). start: gameCreation (ms) hvis kendt, til at afvise umulige forskydninger.
+function pairClips(deaths, files, { anchors = [], start = null } = {}) {
+  const ds = deaths.filter((t) => typeof t === 'number').sort((a, b) => a - b);
+  const fsorted = files.filter((f) => f && Number.isFinite(f.at)).sort((a, b) => a.at - b.at);
+  const out = { how: 'none', offset: null, pairs: [], other: [] };
+  if (!fsorted.length) return out;
+  if (ds.length && fsorted.length === ds.length) {
+    out.how = 'order';
+    out.pairs = fsorted.map((f, i) => ({ file: f.file, at: f.at, t: ds[i] }));
+    return out;
+  }
+  const match = (o) => {
+    const used = new Set();
+    const pairs = [];
+    for (const f of fsorted) {
+      let best = -1;
+      for (let j = 0; j < ds.length; j++) {
+        if (used.has(j)) continue;
+        const r = Math.abs(f.at / 1000 - o - ds[j]);
+        if (r <= CLIP_PAIR_TOL_SEC && (best < 0 || r < Math.abs(f.at / 1000 - o - ds[best]))) best = j;
+      }
+      if (best >= 0) { used.add(best); pairs.push({ file: f.file, at: f.at, t: ds[best] }); }
+    }
+    return pairs;
+  };
+  const plausible = (o) => start == null || (o - start / 1000 >= 0 && o - start / 1000 <= CLIP_LOAD_MAX_SEC);
+  let off = null;
+  const anc = anchors.map((a) => a.at / 1000 - a.t).filter(Number.isFinite);
+  if (anc.length) {
+    off = median(anc);
+    out.how = 'anchor';
+  } else if (ds.length) {
+    let best = null;
+    let tie = false;
+    for (const f of fsorted) {
+      for (const d of ds) {
+        const o = f.at / 1000 - d;
+        if (!plausible(o)) continue;
+        const n = match(o).length;
+        if (!best || n > best.n) { best = { o, n }; tie = false; } else if (n === best.n && Math.abs(o - best.o) > 2 * CLIP_PAIR_TOL_SEC) tie = true;
+      }
+    }
+    if (best && best.n >= 2 && !tie) {
+      // Midt i de parrede klips forskydning (ikke kun det ene par, kandidaten kom fra).
+      off = median(match(best.o).map((p) => p.at / 1000 - p.t));
+      out.how = 'offset';
+    }
+  }
+  if (off != null) {
+    out.offset = off;
+    out.pairs = match(off);
+  }
+  const paired = new Set(out.pairs.map((p) => p.file));
+  out.other = fsorted.filter((f) => !paired.has(f.file)).map((f) => ({ file: f.file, at: f.at, est: off != null ? Math.max(0, Math.round(f.at / 1000 - off)) : null }));
+  return out;
+}
+
+function clipDirs(extra = []) {
+  const dirs = new Map();
+  const add = (d) => { if (typeof d === 'string' && d) dirs.set(normPath(d), path.resolve(d)); };
+  for (const d of extra) add(d);
+  add(history.clipDir);
+  for (const g of history.games) for (const c of gameClips(g)) add(path.dirname(c.file));
+  for (const p of history.pendingClips) add(path.dirname(p.file));
+  add(defaultClipDir());
+  return [...dirs.values()];
+}
+
+function listClipFiles(dirs) {
+  const out = [];
+  for (const dir of dirs) {
+    let names;
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      if (!CLIP_FILE_RE.test(name)) continue;
+      const file = path.join(dir, name);
+      try {
+        const st = fs.statSync(file);
+        if (st.isFile() && st.size > 0) out.push({ file, at: st.mtimeMs });
+      } catch {}
+    }
+  }
+  return out;
+}
+
+const CLIP_HOW = {
+  live: 'gemt under kampen',
+  order: 'samme antal klip og dødsfald - parret i tidsorden',
+  anchor: 'ud fra programmets egne klip i samme kamp',
+  offset: 'ud fra tidsforskellen mellem klippene og dødsfaldene',
+  none: 'kunne ikke afgøre hvilke dødsfald - vist som andre klip',
+};
+
+// Kobl klip uden kamp til dine kampe og gem det i history.json med det samme. Synkron (ingen netværk).
+function recoverClips(extraDirs = []) {
+  const res = { found: 0, pending: 0, games: [], dirs: [] };
+  const known = new Set(history.games.flatMap((g) => gameClips(g).map((c) => normPath(c.file))));
+  let changed = false;
+  const windows = history.games.map((g) => ({ g, w: gameWindow(g) })).filter((x) => x.w);
+  // Den seneste kamp, der var startet, da filen blev skrevet (kampe overlapper ikke).
+  const gameAt = (at) => windows.filter((x) => at >= x.w.start && at <= x.w.end).sort((a, b) => b.w.start - a.w.start)[0]?.g || null;
+  const killerName = (k) => (k == null ? null : dd.champions?.[k]?.name || String(k));
+  const add = (g, entry) => {
+    if (!Array.isArray(g.clipLog)) g.clipLog = [];
+    g.clipLog.push(entry);
+    known.add(normPath(entry.file));
+    changed = true;
+  };
+
+  // 1) Klip gemt under en kamp, der ikke nåede at blive gemt med kampen (genstart midt i kampen): kamptiden er kendt.
+  const keep = [];
+  for (const p of history.pendingClips) {
+    if (known.has(normPath(p.file))) { changed = true; continue; }
+    const g = (p.gameId && history.games.find((x) => x.gameId === p.gameId)) || gameAt(p.at);
+    if (g) {
+      add(g, { t: p.t, file: p.file, how: 'live', killer: p.killer || null });
+      res.pending++;
+      res.found++;
+      res.games.push({ date: g.date, champion: g.champion, gameId: g.gameId || null, files: 1, paired: 1, other: 0, how: 'live' });
+    } else if (Date.now() - p.at < PENDING_CLIP_MAX_MS) keep.push(p);
+    else changed = true;
+  }
+  history.pendingClips = keep;
+
+  // 2) Replay-filer i optagemappen, som ingen kamp har endnu.
+  res.dirs = clipDirs(extraDirs);
+  const byGame = new Map();
+  for (const f of listClipFiles(res.dirs)) {
+    if (known.has(normPath(f.file))) continue;
+    const g = gameAt(f.at);
+    if (!g) continue;
+    if (!byGame.has(g)) byGame.set(g, []);
+    byGame.get(g).push(f);
+  }
+  for (const [g, files] of byGame) {
+    const w = gameWindow(g);
+    const all = (Array.isArray(g.review?.deaths) ? g.review.deaths : Array.isArray(g.deathLog) ? g.deathLog : []).filter((d) => d && typeof d.t === 'number');
+    const open = all.filter((d) => !clipAt(g, d.t));
+    const anchors = gameClips(g).filter((c) => c.t != null).map((c) => {
+      try { return { t: c.t, at: fs.statSync(c.file).mtimeMs }; } catch { return null; }
+    }).filter(Boolean);
+    const r = pairClips(open.map((d) => d.t), files, { anchors, start: w.exact ? w.start : null });
+    for (const p of r.pairs) add(g, { t: p.t, file: p.file, how: r.how, killer: killerName(open.find((d) => d.t === p.t)?.killer) });
+    for (const o of r.other) add(g, { t: null, est: o.est, file: o.file, how: 'other' });
+    res.found += files.length;
+    res.games.push({ date: g.date, champion: g.champion, gameId: g.gameId || null, deaths: all.length, files: files.length, paired: r.pairs.length, other: r.other.length, how: r.how });
+  }
+  if (changed) saveHistory();
+  for (const x of res.games) {
+    log(`Klip fundet til ${x.champion} (${new Date(x.date).toLocaleString('da-DK')}): ${x.paired} af ${x.files} koblet til et dødsfald` +
+      ` (${CLIP_HOW[x.how] || x.how})${x.other ? `, ${x.other} vist som andre klip fra kampen` : ''}.`);
+  }
+  return res;
+}
+
+// OBS' optagemappe (hvor replay bufferen gemmer), husket i history.json.
+async function obsRememberDir() {
+  if (!obs.ready) return null;
+  const d = (await obsRequest('GetRecordDirectory')).recordDirectory;
+  if (typeof d !== 'string' || !d) return null;
+  if (history.clipDir !== d) { history.clipDir = d; saveHistory(); }
+  return d;
+}
+
+// "Find klip til mine kampe": spørg OBS om optagemappen (forbinder kort, hvis OBS-klip er slået til), og kobl klippene.
+async function findClipsForGames() {
+  let dir = null;
+  if (app.cfg.obsClips && typeof WebSocket === 'function') {
+    const opened = !obs.ws;
+    if (opened) { obs.nextTry = 0; obsConnect(); }
+    for (let i = 0; i < 30 && obs.ws && !obs.ready; i++) await sleep(200);
+    try { dir = await obsRememberDir(); } catch {} finally { if (opened && !app.live) obsCloseSoon(); }
+  }
+  const r = recoverClips(dir ? [dir] : []);
+  return { ok: true, obsDir: dir, ...r };
 }
 
 const CLIP_TYPES = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.flv': 'video/x-flv', '.ts': 'video/mp2t' };
@@ -3515,9 +3758,9 @@ async function replayRunning() {
 // (laveste dødstid, League Wiki: https://wiki.leagueoflegends.com/en-us/Death), så 5 sek. kan ikke ramme et andet dødsfald.
 const CLIP_MATCH_SEC = 5;
 function clipAt(g, t) {
-  const d = (g.deathLog || []).filter((x) => x.clip && typeof x.t === 'number' && Math.abs(x.t - t) <= CLIP_MATCH_SEC)
+  const d = gameClips(g).filter((x) => x.t != null && Math.abs(x.t - t) <= CLIP_MATCH_SEC)
     .sort((a, b) => Math.abs(a.t - t) - Math.abs(b.t - t))[0];
-  return d ? { file: d.clip, name: path.basename(d.clip) } : null;
+  return d ? { file: d.file, name: path.basename(d.file) } : null;
 }
 const capFirst = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 // Øjeblikkene i en kamp, som et råd handler om (med tid): dødsfaldene for dødsråd, de store monstre du ikke var ved osv.
@@ -3660,7 +3903,7 @@ function poolPick(championId, position) {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.22.0';
+const VERSION = '1.22.1';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -4505,7 +4748,10 @@ async function updateLive(data) {
     for (const fn of [ensureScout, updateEnemyJungleLive]) {
       try { fn(app.live); } catch {}
     }
-    if (app.cfg.obsClips) obsConnect();
+    if (app.cfg.obsClips) {
+      obsConnect();
+      if (obs.ready && !obs.prepared) obsPrepare().catch(() => {}); // forbindelsen fandtes allerede (fx fra "Find klip")
+    }
   }
   if (first && app.live) log(`Live: ${champ.name} - forslag og scoreboard vises i vinduet.`);
   broadcast();
@@ -5099,7 +5345,8 @@ async function handleRequest(req, res, html) {
   // POST kun som JSON: en fremmed hjemmeside kan ikke sende det uden CORS-forespørgsel, som vi ikke besvarer.
   if (req.method === 'POST' && req.headers['content-type'] !== 'application/json') return json(415, { error: 'Kun JSON' });
   if (req.method === 'GET' && req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    // no-store: efter en opdatering skal vinduet altid hente den nye side (se pageVersion i gui.html).
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     return res.end(html);
   }
   if (req.method === 'GET' && req.url === '/state') return json(200, viewModel());
@@ -5207,6 +5454,13 @@ async function handleRequest(req, res, html) {
     const r = await reviewOlderGames();
     broadcast();
     return json(r.ok ? 200 : 409, r);
+  }
+  // "Find klip til mine kampe": kobl OBS-klip i optagemappen til kampene (kun fra computeren selv).
+  if (req.method === 'POST' && req.url === '/api/find-clips') {
+    if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
+    const r = await findClipsForGames();
+    broadcast();
+    return json(200, r);
   }
   // Video af dine dødsfald: kun fra computeren selv og kun filer programmet selv har gemt (se allowedClip).
   if ((req.method === 'GET' && req.url.startsWith('/clip?')) || (req.method === 'POST' && req.url === '/api/open-clip')) {
@@ -5655,6 +5909,8 @@ async function main() {
     setTimeout(rmOld, 60000).unref();
   }
   log(`Data Dragon ${ddVersion} hentet. Builds fra OP.GG (${app.cfg.region}, ${app.cfg.buildChoice}).`);
+  // OBS-klip der ikke står ved en kamp (fx efter en genstart midt i kampen) kobles til kampene - kun filer, intet netværk.
+  try { recoverClips(); broadcast(); } catch (e) { log(`Klip: kunne ikke gennemgå optagemappen (${e.message}).`); }
   setInterval(refreshStaticData, 15 * 60 * 1000); // ny patch / tilbage fra offline
   if (app.cfg.liveAdvice) liveLoop();
   pruneCache();

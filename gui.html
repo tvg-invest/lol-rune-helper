@@ -530,7 +530,30 @@ function reviewCard(s) {
     g.clips.length ? [el('div', { class: 'plan-sub' }, r ? 'Andre klip fra kampen (video)' : 'Dine dødsfald (video)'),
       el('div', { class: 'clips' }, g.clips.map((c) => clipRow(c)))] : null,
     replayJumpBox(s),
+    findClipsBox(s),
     olderButton());
+}
+
+// "Find klip til mine kampe": kobler OBS-klip i optagemappen til dine kampe (kun på computeren selv).
+let findClipsMsg = null;
+function findClipsBox(s) {
+  if (!isLocal() || !s.obsClips) return null;
+  const run = async () => {
+    findClipsMsg = 'Leder efter klip...';
+    render(lastState);
+    try {
+      const res = await fetch('/api/find-clips', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const r = await res.json();
+      if (!res.ok) findClipsMsg = r.error || 'Noget gik galt';
+      else if (!r.games.length) findClipsMsg = `Ingen nye klip fundet (kigget i ${r.dirs.join(', ') || 'ingen mapper'}).`;
+      else findClipsMsg = r.games.map((x) => `${new Date(x.date).toLocaleDateString('da-DK')} ${x.champion}: ${x.paired} af ${x.files} klip ved et dødsfald` +
+        (x.other ? `, ${x.other} andre klip` : '')).join(' · ');
+    } catch (e) { findClipsMsg = 'Programmet svarede ikke.'; }
+    render(lastState);
+  };
+  return el('div', { class: 'muted', style: 'font-size:12px;margin-top:10px' },
+    el('button', { class: 'rbtn', onclick: run, title: "Kobler OBS' replay-klip i optagemappen til dine kampe ud fra tidspunktet (også klip fra før en genstart)" }, 'Find klip til mine kampe'),
+    findClipsMsg ? el('span', { style: 'margin-left:8px' }, findClipsMsg) : null);
 }
 
 const openClips = new Set();
@@ -586,7 +609,8 @@ function clipRow(c) {
   const local = ['127.0.0.1', 'localhost'].includes(location.hostname);
   const src = '/clip?f=' + encodeURIComponent(c.file);
   return el('div', {},
-    el('div', { class: 'clip' }, el('b', {}, clock(c.t)), `død til ${c.killer || '?'}`, el('span', { class: 'muted' }, c.name),
+    el('div', { class: 'clip' }, el('b', {}, c.t != null ? clock(c.t) : c.est != null ? `ca. ${clock(c.est)}` : 'Klip'),
+      c.t != null ? `død til ${c.killer || '?'}` : null, el('span', { class: 'muted' }, c.name),
       local ? el('button', { onclick: () => { openClips.has(c.file) ? openClips.delete(c.file) : openClips.add(c.file); render(lastState); } }, openClips.has(c.file) ? 'Skjul' : 'Afspil') : null,
       local ? el('button', { onclick: () => post('/api/open-clip', { file: c.file }) }, 'Åbn fil') : null),
     local && openClips.has(c.file) ? el('video', { src, controls: 'controls', preload: 'metadata' }) : null);
@@ -1338,13 +1362,22 @@ function toolbar(s) {
 
 let lastJson = '';
 let failures = 0; // mislykkede forbindelser i træk
+// Programmets version, da siden blev hentet. Efter en opdatering genforbinder siden selv - men med den GAMLE side,
+// som ikke kender den nye versions felter (v1.22.0: klippene stod ved dødsfaldene, den gamle side viste dem ikke).
+// Skifter versionen, hentes siden derfor igen.
+let pageVersion = null;
 function connect() {
   const es = new EventSource('/events');
   es.onmessage = (e) => {
     failures = 0;
     if (e.data === lastJson) return;
     lastJson = e.data;
-    lastState = JSON.parse(e.data);
+    const next = JSON.parse(e.data);
+    if (next.version) {
+      if (pageVersion && next.version !== pageVersion) { es.close(); location.reload(); return; }
+      pageVersion = next.version;
+    }
+    lastState = next;
     trackAffordable(lastState);
     render(lastState);
     renderOverlay(lastState);

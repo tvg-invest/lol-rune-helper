@@ -255,6 +255,15 @@ Har du OBS-klip slået til, står klippet nu ved selve dødsfaldet ("Se klip"), 
 coach-råd har "Se N klip" med netop de dødsfald rådet handler om (fx "Dø ikke lige før et
 objective" eller "1 mod 2"). Uden klip: replay-knapper i stedet.
 
+KLIP DER IKKE KOM MED (RETTET I 1.22.1)
+Efter opdateringen til 1.22.0 viste vinduet ingen klip, selv om de var gemt: vinduet
+kørte videre med den gamle side. Nu henter vinduet sig selv igen efter en opdatering.
+Er dine klip ikke ved dødsfaldene, så klik "Find klip til mine kampe" i kampgennemgangen:
+programmet kigger i OBS' optagemappe (og i Videoer) og kobler "Replay ...mp4"-filerne til
+dine kampe ud fra tidspunktet. Er der lige mange klip og dødsfald, parres de i rækkefølge;
+ellers kun hvor tiden passer. Klip der ikke kan kobles til et bestemt dødsfald, står under
+"Andre klip fra kampen". Det sker også af sig selv, når programmet starter.
+
 DIN CHAMPION-PULJE (NYT I 1.22)
 Pr. rolle: sejre af kampe, form (dine sidste 5 kampe) og mastery for hver champion, de
 2-3 du vinder mest med, og hvor mange forskellige champions du har spillet i dine sidste
