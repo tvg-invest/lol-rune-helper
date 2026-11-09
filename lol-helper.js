@@ -36,6 +36,13 @@ const DEFAULT_CONFIG = {
   // Notifikationer om modstanderne: stemme/overlay når lane-modstanderen køber et item eller når level 6, "X er fed",
   // "har ult" og FED-mærket. OBS: Overwolfs regler for Riot-spil forbyder notifikationer om modstanderes power spikes.
   enemyAlerts: true,
+  scouting: true,         // lane-modstanderen (og fjendens jungler) på OP.GG: kampe og win rate på championen denne sæson + rank
+  enemyJungle: true,      // fjendens junglers mest spillede første clear (OP.GG) i champion select og de første 4 min
+  matchReview: true,      // kampgennemgang efter kampen fra klientens timeline (kort, guldkurve, rute, items)
+  patterns: true,         // dine mønstre på tværs af kampe (kun med mindst 10 kampe på champion + rolle)
+  obsClips: false,        // video af dine dødsfald via OBS' replay buffer (OBS 28+ med WebSocket slået til)
+  obsPassword: '',        // OBS WebSocket-adgangskode (logges aldrig)
+  obsPort: 4455,
   openWindow: true,       // åbn vinduet i browseren ved start
   remoteAccess: false,    // true = vinduet kan åbnes fra telefonen via Tailscale med en hemmelig nøgle
   remoteLan: false,       // true = også via wifi/LAN (ukrypteret HTTP - nøglen kan aflyttes på delte netværk)
@@ -553,6 +560,10 @@ async function laneOpponent(cfg, position, enemyIds) {
 // kan ændre sig uden varsel, så en fejl giver bare intet rutekort.
 const OPGG_WEB = process.env.LOL_HELPER_OPGG_WEB || 'https://op.gg';
 const CAMP_NAMES = { BLUE: 'Blue', RED: 'Red', GROMP: 'Gromp', WOLVES: 'Wolves', RAPTORS: 'Raptors', KRUG: 'Krugs' };
+const ALL_CAMPS = Object.keys(CAMP_NAMES);
+// Summoner's Rift: blå side (base nederst til venstre) har Blue/Gromp/Wolves på top-siden og Red/Raptors/Krugs på bot-siden.
+// Rød side (base øverst til højre) er spejlet: Red/Raptors/Krugs på top-siden, Blue/Gromp/Wolves på bot-siden.
+const TOP_SIDE_CAMPS = { BLUE: new Set(['BLUE', 'GROMP', 'WOLVES']), RED: new Set(['RED', 'RAPTORS', 'KRUG']) };
 
 function parseJungleRoutes(html) {
   const text = html.replace(/\\"/g, '"');
@@ -569,6 +580,19 @@ function parseJungleRoutes(html) {
     while ((m = re.exec(text))) routes.push({ route: JSON.parse(`[${m[1]}]`), play: Number(m[2]) });
     const total = routes.reduce((s, r) => s + r.play, 0) || 1;
     if (routes.length) out[side] = routes.slice(0, 3).map((r) => ({ ...r, share: r.play / total }));
+    // Hvilken side af kortet første clear starter og slutter på - over ALLE ruter der er en fuld clear af egen jungle
+    // (alle 6 camps én gang). Ren kort-geometri, se TOP_SIDE_CAMPS.
+    const full = routes.filter((r) => r.route.length === 6 && ALL_CAMPS.every((c) => r.route.includes(c)));
+    const fullGames = full.reduce((s, r) => s + r.play, 0);
+    if (fullGames > 0) {
+      const top = TOP_SIDE_CAMPS[side];
+      out.sides = out.sides || {};
+      out.sides[side] = {
+        games: fullGames,
+        startTop: full.filter((r) => top.has(r.route[0])).reduce((s, r) => s + r.play, 0) / fullGames,
+        endTop: full.filter((r) => top.has(r.route[5])).reduce((s, r) => s + r.play, 0) / fullGames,
+      };
+    }
   }
   // Hvor de starter (procent pr. side): "rate":{"team_key":"BLUE","blue":52,"red":17,"raptors":29}
   const rate = {};
@@ -582,7 +606,7 @@ function parseJungleRoutes(html) {
 function fetchJungleRoutes(championKey) {
   const champ = dd.champions[championKey];
   if (!champ) return Promise.resolve(null);
-  return cachedJson(`jungle_${championKey}`, async () => {
+  return cachedJson(`jungle2_${championKey}`, async () => { // 2: med start/slut-side (v1.18)
     const res = await fetch(`${OPGG_WEB}/lol/champions/${champ.id.toLowerCase()}/jungle-paths/jungle`, {
       headers: { 'User-Agent': 'Mozilla/5.0 lol-rune-helper' },
       signal: AbortSignal.timeout(20000),
@@ -618,6 +642,288 @@ function ensureJungleRoutes(championKey, position) {
       if (app.jungleKey === championKey) app.jungleKey = null;
       app.jungleRetry = { key: championKey, at: Date.now() + (err.empty ? 600000 : 60000) };
     });
+}
+
+// ---------- Fjendens jungler: første clear (OP.GG jungle-paths) ----------
+// Kun det OP.GG's ruter siger (start- og slutside, top 3 ruter med andel) - ingen gættede tidspunkter.
+// Champion select: jungleren gættes ud fra rollefordelingen (som lane-modstanderen), siden fra myTeam[].team
+// (1 = blå, 2 = rød; fjenden er den anden). I kampen: position JUNGLE eller den eneste med Smite.
+
+// Samme opslag laves ikke igen; fejlede det, prøves igen efter 1 min (stille - ingen fejltekst).
+const ejDone = (key) => app.ejKey === key && !(app.ejFailAt && Date.now() - app.ejFailAt > 60000);
+
+function setEnemyJungle(champKey, side, guessed, key) {
+  app.ejKey = key;
+  app.ejFailAt = 0;
+  fetchJungleRoutes(champKey)
+    .then((routes) => {
+      if (app.ejKey !== key) return;
+      app.enemyJungle = { key: String(champKey), side, guessed, routes };
+      broadcast();
+    })
+    .catch(() => { if (app.ejKey === key) app.ejFailAt = Date.now(); });
+}
+
+function updateEnemyJungleSelect(session, me) {
+  if (!app.cfg.enemyJungle) return;
+  const enemyIds = (session.theirTeam || []).map((m) => m.championId).filter((id) => id > 0).sort((a, b) => a - b);
+  const enemySide = me?.team === 1 ? 'RED' : me?.team === 2 ? 'BLUE' : null;
+  const key = `select|${enemyIds.join(',')}|${enemySide}`;
+  if (ejDone(key)) return;
+  app.ejKey = key;
+  app.ejFailAt = 0;
+  if (!enemyIds.length) { if (app.enemyJungle) { app.enemyJungle = null; broadcast(); } return; }
+  laneOpponent(app.cfg, 'JUNGLE', enemyIds)
+    .then((jg) => {
+      if (app.ejKey !== key) return;
+      if (!jg) { if (app.enemyJungle) { app.enemyJungle = null; broadcast(); } return; }
+      setEnemyJungle(String(jg), enemySide, true, key);
+    })
+    .catch(() => { if (app.ejKey === key) app.ejFailAt = Date.now(); });
+}
+
+function updateEnemyJungleLive(L) {
+  if (!app.cfg.enemyJungle || L.gameTime >= 240) return;
+  const smiters = L.enemies.filter((p) => p.hasSmite);
+  const jg = L.enemies.find((p) => p.position === 'JUNGLE') || (smiters.length === 1 ? smiters[0] : null);
+  const side = L.me.team === 'ORDER' ? 'RED' : 'BLUE';
+  if (!jg?.champ) return;
+  const key = `live|${jg.champ.key}|${side}`;
+  if (ejDone(key)) return;
+  // Samme champion som i champion select: behold kortet, men nu med sikker side og jungler.
+  if (app.enemyJungle?.key === String(jg.champ.key)) {
+    app.ejKey = key;
+    app.enemyJungle = { ...app.enemyJungle, side, guessed: false };
+    return;
+  }
+  setEnemyJungle(String(jg.champ.key), side, false, key);
+}
+
+const pct0 = (x) => `${Math.round(x * 100)}%`;
+function enemyJungleView() {
+  const ej = app.enemyJungle;
+  if (!ej?.routes) return null;
+  const champ = champView(ej.key);
+  const sideName = { BLUE: 'blå side', RED: 'rød side' };
+  const sides = ej.side ? [ej.side] : ['BLUE', 'RED'].filter((s) => ej.routes[s]);
+  const perSide = sides.map((side) => {
+    const st = ej.routes.sides?.[side];
+    let text = null;
+    if (st) {
+      const start = st.startTop >= 0.5 ? `starter på top-siden i ${pct0(st.startTop)}` : `starter på bot-siden i ${pct0(1 - st.startTop)}`;
+      const end = st.endTop >= 0.5 ? `første clear ender på top-siden i ${pct0(st.endTop)}` : `første clear ender på bot-siden i ${pct0(1 - st.endTop)}`;
+      text = `${champ.name} (${sideName[side]}): ${start} af kampene, ${end}`;
+    }
+    return {
+      side,
+      text,
+      games: st?.games ?? null,
+      routes: (ej.routes[side] || []).map((r) => ({ camps: r.route.map((c) => CAMP_NAMES[c] || c), share: r.share, games: r.play })),
+    };
+  }).filter((x) => x.text || x.routes.length);
+  return perSide.length ? { champion: champ, guessed: ej.guessed, sides: perSide } : null;
+}
+
+// ---------- Spejder: lane-modstanderen og fjendens jungler på OP.GG ----------
+// OP.GG's offentlige MCP-tjeneste (lol_get_summoner_profile): ranked-kampe pr. champion denne sæson + rank.
+// Svaret er OP.GG's kompakte "class"-format (ikke JSON) - parseOpggText læser det. Fejler noget, vises intet.
+
+// "class Summoner: game_name,tagline\n\nLolGetSummonerProfile(Data(Summoner(\"x\",\"y\")))" -> { data: { summoner: { game_name, tagline } } }
+function parseOpggText(text) {
+  const t = String(text || '').trim();
+  if (t.startsWith('{')) return JSON.parse(t);
+  const classes = {};
+  const lines = t.split('\n');
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const m = /^class (\w+):\s*(.*)$/.exec(lines[i]);
+    if (!m) { if (lines[i].trim()) break; continue; }
+    classes[m[1]] = m[2].split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  const src = lines.slice(i).join('\n');
+  let p = 0;
+  const fail = () => { throw new Error('OP.GG: uventet svarformat'); };
+  const ws = () => { while (p < src.length && /\s/.test(src[p])) p++; };
+  const list = (end) => {
+    const out = [];
+    ws();
+    if (src[p] === end) { p++; return out; }
+    for (;;) {
+      out.push(value());
+      ws();
+      if (src[p] === ',') { p++; continue; }
+      if (src[p] === end) { p++; return out; }
+      fail();
+    }
+  };
+  const value = () => {
+    ws();
+    const c = src[p];
+    if (c === '"') {
+      const s = p;
+      for (p++; p < src.length && src[p] !== '"'; p++) if (src[p] === '\\') p++;
+      p++;
+      try { return JSON.parse(src.slice(s, p)); } catch { return src.slice(s + 1, p - 1); }
+    }
+    if (c === '[') { p++; return list(']'); }
+    const m = /^(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|[A-Za-z_]\w*)/.exec(src.slice(p, p + 80));
+    if (!m) fail();
+    p += m[1].length;
+    if (/^-?\d/.test(m[1])) return Number(m[1]);
+    if (m[1] === 'null') return null;
+    if (m[1] === 'true') return true;
+    if (m[1] === 'false') return false;
+    ws();
+    if (src[p] !== '(') fail();
+    p++;
+    const args = list(')');
+    const fields = classes[m[1]] || [];
+    return Object.fromEntries(args.map((a, k) => [fields[k] || String(k), a]));
+  };
+  const root = value();
+  // Yderste klasse (fx LolGetSummonerProfile) har ét felt: data.
+  return root;
+}
+
+// Klientens region -> OP.GG-region. Kun regioner OP.GG har; GLOBAL kan ikke slå spillere op.
+const OPGG_REGIONS = new Set(['NA', 'EUW', 'EUNE', 'KR', 'JP', 'BR', 'LAN', 'LAS', 'OCE', 'TR', 'RU', 'ME', 'SG', 'TW', 'VN', 'PH', 'TH']);
+const PLATFORM_REGION = { NA1: 'NA', EUW1: 'EUW', EUN1: 'EUNE', JP1: 'JP', BR1: 'BR', LA1: 'LAN', LA2: 'LAS', OC1: 'OCE', TR1: 'TR', ME1: 'ME', SG2: 'SG', TW2: 'TW', VN2: 'VN', PH2: 'PH', TH2: 'TH' };
+const toOpggRegion = (r) => {
+  const v = String(r || '').toUpperCase();
+  return OPGG_REGIONS.has(v) ? v : PLATFORM_REGION[v] || null;
+};
+
+// Region til opslag af spillere: klientens region (/riotclient/region-locale), ellers config.region hvis det er en rigtig region.
+async function summonerRegion() {
+  if (app.summonerRegion) return app.summonerRegion;
+  if (app.client) {
+    try {
+      const r = await lcu(app.client, 'GET', '/riotclient/region-locale');
+      const reg = toOpggRegion(r?.region) || toOpggRegion(r?.webRegion);
+      if (reg) { app.summonerRegion = reg; return reg; }
+    } catch {}
+  }
+  return toOpggRegion(app.cfg.region);
+}
+
+const SCOUT_FIELDS = [
+  'data.summoner.ranked_most_champions.my_champion_stats[].{id,play,win}',
+  'data.summoner.ranked_most_champions.{game_type,play,season_id,win}',
+  'data.summoner.league_stats[].tier_info.{division,lp,tier}',
+  'data.summoner.league_stats[].{game_type,lose,win}',
+  'data.summoner.{updated_at}',
+];
+
+async function mcpCall(name, args, timeout = 20000) {
+  const res = await fetch(MCP_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'User-Agent': 'lol-rune-helper' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
+    signal: AbortSignal.timeout(timeout),
+  });
+  const j = await res.json();
+  if (j.error || j.result?.isError) throw new Error(`OP.GG (${name}): ${String(j.error?.message || j.result?.content?.[0]?.text || 'fejl').slice(0, 120)}`);
+  return parseOpggText(j.result?.content?.[0]?.text);
+}
+
+function fetchSummonerScout(region, gameName, tagLine) {
+  // Spillernavne ikke i filnavnet: kort hash.
+  const id = createHash('sha1').update(`${region}|${gameName}#${tagLine}`.toLowerCase()).digest('hex').slice(0, 16);
+  return cachedJson(`scout_${id}`, async () => {
+    const d = await mcpCall('lol_get_summoner_profile', { game_name: gameName, tag_line: tagLine, region, desired_output_fields: SCOUT_FIELDS });
+    const s = d?.data?.summoner;
+    if (!s || typeof s !== 'object') throw new Error('OP.GG: ingen spiller i svaret');
+    const r = s.ranked_most_champions;
+    return {
+      updatedAt: s.updated_at || null,
+      tiers: (Array.isArray(s.league_stats) ? s.league_stats : []).map((x) => ({
+        type: x.game_type, tier: x.tier_info?.tier || null, division: x.tier_info?.division ?? null, lp: x.tier_info?.lp ?? null, win: x.win ?? null, lose: x.lose ?? null,
+      })),
+      ranked: r && typeof r === 'object' ? {
+        play: Number(r.play) || 0,
+        win: Number(r.win) || 0,
+        champs: (Array.isArray(r.my_champion_stats) ? r.my_champion_stats : []).map((c) => ({ id: String(c.id), play: Number(c.play) || 0, win: Number(c.win) || 0 })),
+      } : null,
+    };
+  });
+}
+
+const TIER_NAME = (t) => String(t).charAt(0) + String(t).slice(1).toLowerCase();
+function rankText(tiers) {
+  const solo = (tiers || []).find((t) => t.type === 'SOLORANKED' && t.tier);
+  if (!solo) return null;
+  const apex = ['MASTER', 'GRANDMASTER', 'CHALLENGER'].includes(solo.tier);
+  return apex ? `${TIER_NAME(solo.tier)} ${solo.lp ?? '?'} LP` : `${TIER_NAME(solo.tier)} ${solo.division ?? ''}`.trim();
+}
+
+// Tekst kun ud fra OP.GG's tal. Listen over mest spillede er afkortet (fx 10), så "ingen kampe på X" siges kun,
+// når listens kampe tilsammen er alle spillerens ranked-kampe.
+function scoutLines(s, champKey) {
+  const name = dd.champions[champKey]?.name || '?';
+  const r = s.ranked;
+  const c = r?.champs.find((x) => x.id === String(champKey));
+  let text;
+  let voice = null;
+  if (c && c.play > 0) {
+    text = `${name}: ${c.play.toLocaleString('da-DK')} ranked-kampe, ${pct0(c.win / c.play)} WR denne sæson` + (r.play ? ` (${pct0(c.play / r.play)} af spillerens ranked-kampe)` : '');
+    voice = `${name}: ${c.play} kampe, ${Math.round((c.win / c.play) * 100)} procent win rate`;
+  } else if (r && r.play > 0) {
+    const listed = r.champs.reduce((sum, x) => sum + x.play, 0);
+    if (listed === r.play) {
+      text = `Ingen ranked-kampe på ${name} denne sæson (${r.play.toLocaleString('da-DK')} ranked-kampe på andre champions)`;
+      voice = `Ingen ranked-kampe på ${name} denne sæson`;
+    } else {
+      text = `${name} er ikke blandt spillerens ${r.champs.length} mest spillede i ranked denne sæson (${r.play.toLocaleString('da-DK')} ranked-kampe i alt)`;
+    }
+  } else {
+    text = `Ingen ranked-kampe denne sæson ifølge OP.GG`;
+  }
+  const rank = rankText(s.tiers);
+  let age = null;
+  const at = Date.parse(s.updatedAt || '');
+  if (at && Date.now() - at > 48 * 3600 * 1000) age = `OP.GG opdateret ${new Date(at).toLocaleDateString('da-DK')}`;
+  return { text, voice, rank, age };
+}
+
+// Én gang pr. spiller pr. kamp: lane-modstanderen og (hvis det er en anden) fjendens jungler.
+function ensureScout(L) {
+  const g = app.game;
+  if (!app.cfg.scouting || !g || !L) return;
+  if (!g.scout) g.scout = new Map();
+  const smiters = L.enemies.filter((p) => p.hasSmite);
+  const jg = L.enemies.find((p) => p.position === 'JUNGLE') || (smiters.length === 1 ? smiters[0] : null);
+  const targets = [];
+  if (L.matchup?.player) targets.push({ p: L.matchup.player, role: 'lane' });
+  if (jg && jg !== L.matchup?.player) targets.push({ p: jg, role: 'jungle' });
+  for (const { p, role } of targets) {
+    if (!p.champ || !p.riot?.gameName || !p.riot?.tagLine || p.isBot || g.scout.has(p.key)) continue;
+    const entry = { role, champKey: String(p.champ.key), status: 'loading', result: null };
+    g.scout.set(p.key, entry);
+    (async () => {
+      const region = await summonerRegion();
+      if (!region) { entry.status = 'none'; return; }
+      const s = await fetchSummonerScout(region, p.riot.gameName, p.riot.tagLine);
+      entry.result = scoutLines(s, entry.champKey);
+      entry.status = 'ok';
+      if (app.game === g) {
+        log(`Spejder: ${entry.result.text}${entry.result.rank ? ` · ${entry.result.rank}` : ''}`);
+        if (entry.result.voice && L.gameTime < 300 && role === 'lane') speak('scout', entry.result.voice);
+        broadcast();
+      }
+    })().catch(() => { entry.status = 'none'; }); // stille: intet vises
+  }
+}
+
+function scoutView() {
+  const g = app.game;
+  if (!app.cfg.scouting || !g?.scout) return [];
+  return [...g.scout.values()].filter((e) => e.status === 'ok' && e.result).map((e) => ({
+    role: e.role,
+    champion: champView(e.champKey),
+    text: e.result.text,
+    rank: e.result.rank,
+    age: e.result.age,
+  }));
 }
 
 // ---------- Gameplan mod din lane-modstander ----------
@@ -1362,7 +1668,9 @@ function trackGame(data, L) {
     if (e.VictimName !== L.me.key && e.VictimName !== L.me.name) continue;
     const killer = L.enemies.find((p) => e.KillerName && (p.key === e.KillerName || p.name === e.KillerName));
     const what = killer ? killer.champ?.name || killer.name : /turret/i.test(e.KillerName || '') ? 'tårn' : /minion/i.test(e.KillerName || '') ? 'minions' : 'andet';
-    g.deaths.push({ t: e.EventTime, killer: what, helpers: (e.Assisters || []).length, context: killer ? duelContext(L.me, killer) : null });
+    const death = { t: e.EventTime, killer: what, helpers: (e.Assisters || []).length, context: killer ? duelContext(L.me, killer) : null };
+    g.deaths.push(death);
+    obsClipDeath(g, death); // gør intet med obsClips slået fra
   }
   for (const a of L.advice) {
     if (!g.seen.has(a.id)) g.seen.set(a.id, t);
@@ -1375,6 +1683,18 @@ function trackGame(data, L) {
     if (isCompleted(dd.items[id])) g.buys.push({ id, t, suggested: g.seen.has(id), adapted: g.adapted.has(id) });
   }
   g.lastItems = [...L.me.itemIds];
+  // Til kampgennemgangen: kampens id (fra klienten) og hvem der var lane-modstander/fjendens jungler.
+  if (g.gameId === undefined && app.client && app.cfg.matchReview) {
+    g.gameId = null;
+    lcu(app.client, 'GET', '/lol-gameflow/v1/session')
+      .then((flow) => { const id = Number(flow?.gameData?.gameId); if (id > 0) g.gameId = id; })
+      .catch(() => {});
+  }
+  if (L.matchup?.player?.champ) g.oppKey = String(L.matchup.player.champ.key);
+  const smiters = L.enemies.filter((p) => p.hasSmite);
+  const ejg = L.enemies.find((p) => p.position === 'JUNGLE') || (smiters.length === 1 ? smiters[0] : null);
+  if (ejg?.champ) g.jgKey = String(ejg.champ.key);
+  g.team = L.me.team === 'CHAOS' ? 'RED' : 'BLUE';
   g.gameMode = data.gameData?.gameMode || g.gameMode || null;
   g.mapNumber = data.gameData?.mapNumber || g.mapNumber || null;
   // GameEnd-eventet har (efter Riots eksempler) et Result-felt; findes det ikke, er resultatet ukendt.
@@ -1392,6 +1712,8 @@ function clearPick() {
   app.planKey = null;
   app.jungle = null;
   app.jungleKey = null;
+  app.enemyJungle = null;
+  app.ejKey = null;
 }
 
 const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
@@ -1432,11 +1754,16 @@ function lessonsFor(s, prev) {
   return out;
 }
 
+function saveHistory() {
+  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 1)); } catch (e) { log(`Kunne ikke gemme historik: ${e.message}`); }
+}
+
 function finishGame() {
   const g = app.game;
   const plan = app.plan;
   app.game = null;
   clearPick();
+  obsCloseSoon();
   if (!g?.last || g.last.gameTime < 300) return; // remakes og afbrudte kampe tæller ikke
   if (['PRACTICETOOL', 'TUTORIAL'].includes(g.gameMode)) return log('Træningskamp - gemmes ikke i historikken.');
   const L = g.last;
@@ -1467,14 +1794,468 @@ function finishGame() {
     summary.duels = plan.duels.map((d) => ({ t: d.t, won: d.won, solo: d.solo, context: d.context }));
     summary.balanceEnd = balanceOf(L.me, opp, plan.opponent).label;
   }
-  summary.deathLog = g.deaths;
+  summary.deathLog = g.deaths; // samme objekter: et OBS-klip der bliver færdigt efter kampen, havner også her
   summary.lessons = lessonsFor(summary, srGames().filter((x) => x.championId === summary.championId).slice(0, 10));
+  // Til kampgennemgangen (kun id'er - selve timelinen gemmes ikke).
+  if (g.gameId) summary.gameId = g.gameId;
+  summary.team = g.team || null;
+  if (g.oppKey) summary.oppChampionId = Number(g.oppKey);
+  if (g.jgKey) summary.enemyJunglerId = Number(g.jgKey);
+  g.summary = summary;
   history.games.unshift(summary);
   history.games.length = Math.min(history.games.length, 100);
-  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 1)); } catch (e) { log(`Kunne ikke gemme historik: ${e.message}`); }
+  saveHistory();
+  if (app.cfg.matchReview) fetchReview(summary, REVIEW_ATTEMPTS).catch(() => {});
   log(`Kampoversigt: ${summary.champion} ${summary.kills}/${summary.deaths}/${summary.assists}, ${String(summary.csPerMin).replace('.', ',')} CS/min` +
     (summary.followed != null ? `, ${pct(summary.followed)} af dine køb var blandt forslagene` : '') +
     (summary.duels?.length ? `, dueller mod ${summary.matchup.champion}: ${summary.duels.filter((d) => d.won).length}-${summary.duels.filter((d) => !d.won).length}` : ''));
+}
+
+// ---------- Kampgennemgang (timeline fra League-klienten) ----------
+// /lol-match-history/v1/games/{id} (deltagere: participantId, teamId, championId, spells) og
+// /lol-match-history/v1/game-timelines/{id} (frames pr. minut med participantFrames + events).
+// Der gemmes kun et kort uddrag i history.json - aldrig selve timelinen.
+
+const REVIEW_ATTEMPTS = 10;
+const REVIEW_RETRY_MS = Number(process.env.LOL_HELPER_REVIEW_RETRY_MS) || 30000; // kampen dukker op i historikken lidt efter slut
+const MAP_SIZE = 14870; // Summoner's Rift-koordinater 0-14870 på begge akser (0,0 = blå base nederst til venstre)
+// Lanes (omtrentlig) ud fra tårnenes placering: top langs venstre og øverste kant, bot langs nederste og højre kant,
+// mid på diagonalen. Inden for 1.300 enheder af linjen = i lanen.
+const LANE_LINES = {
+  Top: [[1300, 3000], [1300, 13600], [12000, 13600]],
+  Mid: [[3200, 3200], [11700, 11700]],
+  Bot: [[3000, 1300], [13600, 1300], [13600, 12000]],
+};
+function laneAt(x, y) {
+  const segDist = ([ax, ay], [bx, by]) => {
+    const dx = bx - ax; const dy = by - ay;
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)));
+    return Math.hypot(x - (ax + t * dx), y - (ay + t * dy));
+  };
+  let best = null;
+  for (const [lane, pts] of Object.entries(LANE_LINES)) {
+    for (let i = 1; i < pts.length; i++) {
+      const d = segDist(pts[i - 1], pts[i]);
+      if (d <= 1300 && (!best || d < best.d)) best = { lane, d };
+    }
+  }
+  return best?.lane || null;
+}
+// Top-siden = over mid-diagonalen (y > x), bot-siden = under.
+const mapSide = (x, y) => (y > x ? 'top' : 'bot');
+
+function participantFrame(frame, id) {
+  const pf = frame?.participantFrames;
+  if (!pf) return null;
+  if (Array.isArray(pf)) return pf.find((x) => x?.participantId === id) || null;
+  return pf[id] || pf[String(id)] || null;
+}
+
+function buildReview(game, timeline, s) {
+  const ids = new Map((game?.participantIdentities || []).map((pi) => [pi.participantId, pi.player || {}]));
+  const parts = (game?.participants || []).map((p) => ({
+    id: p.participantId, team: p.teamId, champ: String(p.championId), spells: [p.spell1Id, p.spell2Id], puuid: ids.get(p.participantId)?.puuid,
+  }));
+  const me = (s.puuid && parts.find((p) => p.puuid && p.puuid === s.puuid)) || parts.find((p) => p.champ === String(s.championId));
+  if (!me) return null;
+  const enemies = parts.filter((p) => p.team !== me.team);
+  const opp = s.oppChampionId ? enemies.find((p) => p.champ === String(s.oppChampionId)) : null;
+  const smiters = enemies.filter((p) => p.spells.includes(11));
+  const jg = (s.enemyJunglerId && enemies.find((p) => p.champ === String(s.enemyJunglerId))) || (smiters.length === 1 ? smiters[0] : null);
+  const frames = Array.isArray(timeline?.frames) ? timeline.frames : [];
+  if (!frames.length) return null;
+  const champOf = (id) => parts.find((p) => p.id === id)?.champ || null;
+  const minute = (f, i) => (typeof f.timestamp === 'number' ? Math.round(f.timestamp / 60000) : i);
+  const pos = (f, id) => { const p = participantFrame(f, id)?.position; return p && typeof p.x === 'number' ? [Math.round(p.x), Math.round(p.y)] : null; };
+  // Guldforskel mod lane-modstanderen pr. minut (totalGold i timelinen).
+  const gold = opp ? frames.map((f, i) => {
+    const a = participantFrame(f, me.id)?.totalGold; const b = participantFrame(f, opp.id)?.totalGold;
+    return typeof a === 'number' && typeof b === 'number' ? [minute(f, i), a - b] : null;
+  }).filter(Boolean) : [];
+  const early = frames.filter((f, i) => minute(f, i) >= 1 && minute(f, i) <= 8);
+  const jungle = s.position === 'JUNGLE';
+  const events = frames.flatMap((f) => (Array.isArray(f.events) ? f.events : []));
+  const sec = (e) => Math.round((e.timestamp || 0) / 1000);
+  const kills = events.filter((e) => e.type === 'CHAMPION_KILL');
+  const deaths = kills.filter((e) => e.victimId === me.id).map((e) => ({
+    t: sec(e), x: e.position?.x ?? null, y: e.position?.y ?? null, killer: champOf(e.killerId),
+    by: opp && e.killerId === opp.id ? 'lane' : jg && e.killerId === jg.id ? 'jungle' : 'other',
+  }));
+  const ganks = jungle ? kills.filter((e) => sec(e) < 600 && e.position && (e.killerId === me.id || (e.assistingParticipantIds || []).includes(me.id)))
+    .map((e) => ({ t: sec(e), x: e.position.x, y: e.position.y, lane: laneAt(e.position.x, e.position.y), kill: e.killerId === me.id, victim: champOf(e.victimId) }))
+    .filter((x) => x.lane) : [];
+  // Første færdige items (ITEM_UNDO fortryder et køb).
+  const bought = [];
+  for (const e of events) {
+    if (e.participantId !== me.id) continue;
+    if (e.type === 'ITEM_PURCHASED') bought.push({ id: String(e.itemId), t: sec(e) });
+    else if (e.type === 'ITEM_UNDO') {
+      const i = bought.map((b) => b.id).lastIndexOf(String(e.beforeId));
+      if (i !== -1) bought.splice(i, 1);
+    }
+  }
+  const items = bought.filter((b) => isCompleted(dd.items[b.id])).slice(0, 4);
+  return {
+    v: 1,
+    side: me.team === 200 ? 'RED' : 'BLUE',
+    opp: opp?.champ || null,
+    jg: jg?.champ || null,
+    deaths,
+    gold,
+    path: jungle ? early.map((f) => pos(f, me.id)).filter(Boolean) : [],
+    jgPath: jungle && jg ? early.map((f) => pos(f, jg.id)).filter(Boolean) : [],
+    ganks,
+    items,
+  };
+}
+
+// Gem formen (felter og typer, ingen navne) af klientens kamp + timeline én gang, så antagelserne kan tjekkes.
+function logMatchShapes(game, timeline) {
+  const file = path.join(path.dirname(SHAPES_FILE), 'match-shapes.json');
+  if (app.matchShapesLogged || (process.env.LOL_HELPER_LCU && !process.env.LOL_HELPER_SHAPES) || fs.existsSync(file)) return;
+  app.matchShapesLogged = true;
+  const frames = timeline?.frames || [];
+  const sample = { game, timeline: { ...timeline, frames: frames.slice(0, 3) } };
+  try { fs.writeFileSync(file, JSON.stringify({ date: new Date().toISOString(), version: VERSION, ...shapeOf(sample) }, null, 1)); } catch {}
+}
+
+// Henter kampen fra klienten (prøver igen et stykke tid - kampen kommer først i historikken lidt efter slut).
+async function fetchReview(summary, attempts) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    if (i) await sleep(REVIEW_RETRY_MS);
+    if (!app.client) continue;
+    try {
+      if (!summary.gameId) {
+        const eog = await lcu(app.client, 'GET', '/lol-end-of-game/v1/eog-stats-block').catch(() => null);
+        if (Number(eog?.gameId) > 0 && (!eog.gameLength || Math.abs(eog.gameLength - summary.duration) < 120)) summary.gameId = Number(eog.gameId);
+        if (!summary.gameId) continue;
+      }
+      if (!summary.puuid && !app.puuid) {
+        const me = await lcu(app.client, 'GET', '/lol-summoner/v1/current-summoner').catch(() => null);
+        if (me?.puuid) app.puuid = me.puuid;
+      }
+      const [game, timeline] = await Promise.all([
+        lcu(app.client, 'GET', `/lol-match-history/v1/games/${summary.gameId}`),
+        lcu(app.client, 'GET', `/lol-match-history/v1/game-timelines/${summary.gameId}`),
+      ]);
+      logMatchShapes(game, timeline);
+      const review = buildReview(game, timeline, { ...summary, puuid: app.puuid });
+      if (!review) { lastErr = new Error('kampen kunne ikke læses'); continue; }
+      summary.review = review;
+      saveHistory();
+      log(`Kampgennemgang klar: ${summary.champion} (${review.deaths.length} dødsfald, ${review.gold.length} minutter guld).`);
+      broadcast();
+      return true;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  log(`Kampgennemgang: kampen kunne ikke hentes fra klienten${lastErr ? ` (${String(lastErr.message).slice(0, 120)})` : ''}.`);
+  return false;
+}
+
+// Ældre kampe (fra før v1.18 eller hvor hentningen fejlede): find kampens id i klientens kamphistorik
+// (samme champion, sluttede inden for 10 min af det gemte tidspunkt) og hent gennemgangen, hvis klienten stadig har den.
+async function reviewOlderGames() {
+  if (!app.client) return { ok: false, error: 'League-klienten kører ikke' };
+  const phase = await lcu(app.client, 'GET', '/lol-gameflow/v1/gameflow-phase').catch(() => null);
+  if (['ChampSelect', 'InProgress', 'GameStart', 'Reconnect'].includes(phase)) return { ok: false, error: 'Ikke under champion select eller kamp' };
+  const missing = srGames().slice(0, 20).filter((g) => !g.review);
+  if (!missing.length) return { ok: true, found: 0, tried: 0 };
+  let list = [];
+  try {
+    const j = await lcu(app.client, 'GET', '/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=20');
+    list = j?.games?.games || [];
+  } catch {}
+  let found = 0;
+  for (const g of missing) {
+    if (!g.gameId) {
+      const end = Date.parse(g.date);
+      const m = list.find((x) => x.participants?.[0]?.championId === g.championId && typeof x.gameCreation === 'number'
+        && Math.abs(x.gameCreation + (x.gameDuration || 0) * 1000 - end) < 10 * 60 * 1000);
+      if (!m) continue;
+      g.gameId = m.gameId;
+    }
+    if (await fetchReview(g, 1)) found++;
+  }
+  saveHistory();
+  return { ok: true, found, tried: missing.length };
+}
+
+function reviewView() {
+  if (!app.cfg.matchReview) return null;
+  const games = srGames().slice(0, 15).filter((g) => g.review || (g.deathLog || []).some((d) => d.clip));
+  return games.slice(0, 10).map((g) => {
+    const r = g.review;
+    const item = (id) => ({ id, name: itemName(id), icon: dd.items[id]?.icon });
+    return {
+      date: g.date,
+      champion: g.champion,
+      icon: dd.champions[g.championId]?.icon,
+      result: g.result,
+      position: g.position,
+      jungle: g.position === 'JUNGLE',
+      review: r ? {
+        side: r.side,
+        opp: r.opp ? champView(r.opp) : null,
+        jg: r.jg ? champView(r.jg) : null,
+        deaths: r.deaths.map((d) => ({ ...d, killer: d.killer ? dd.champions[d.killer]?.name || d.killer : null })),
+        gold: r.gold,
+        path: r.path,
+        jgPath: r.jgPath,
+        ganks: r.ganks.map((x) => ({ ...x, victim: x.victim ? dd.champions[x.victim]?.name || x.victim : null })),
+        items: r.items.map((x) => ({ ...item(x.id), t: x.t })),
+      } : null,
+      clips: (g.deathLog || []).filter((d) => d.clip).map((d) => ({ t: d.t, killer: d.killer, file: d.clip, name: path.basename(d.clip) })),
+    };
+  });
+}
+
+// ---------- Dine mønstre (på tværs af kampe) ----------
+// Kun sammenhænge med tal ("7 af 9"), aldrig årsager. Kræver mindst 10 kampe på samme champion og rolle,
+// og hver linje kræver selv mindst 10 kampe med de data den bygger på. Skillelinjer kommer fra dine egne data (median).
+
+const PATTERN_MIN_GAMES = 10;
+function patternsFor(championId, position) {
+  const games = srGames().filter((g) => g.championId === Number(championId) && (!position || g.position === position));
+  if (games.length < PATTERN_MIN_GAMES) return { games: games.length, lines: [] };
+  const known = games.filter((g) => g.result === 'Sejr' || g.result === 'Nederlag');
+  const wins = (gs) => gs.filter((g) => g.result === 'Sejr').length;
+  const split = (label, a, b, la, lb) => (a.length && b.length
+    ? `${label}: ${la} ${wins(a)} af ${a.length} sejre - ${lb} ${wins(b)} af ${b.length}` : null);
+  const lines = [];
+  // 1) Første færdige item før/efter din median.
+  const withItem = known.map((g) => ({ g, t: firstItemTime(g) })).filter((x) => x.t != null);
+  if (withItem.length >= PATTERN_MIN_GAMES) {
+    const ts = withItem.map((x) => x.t).sort((a, b) => a - b);
+    const med = ts.length % 2 ? ts[(ts.length - 1) / 2] : (ts[ts.length / 2 - 1] + ts[ts.length / 2]) / 2;
+    const counts = new Map();
+    for (const { g } of withItem) { const id = (g.buys || []).find((b) => !isBoots(dd.items[b.id]))?.id; if (id) counts.set(id, (counts.get(id) || 0) + 1); }
+    const [topId, topN] = [...counts].sort((a, b) => b[1] - a[1])[0] || [];
+    const line = split(`Første færdige item (din median ${mmss(med)})`, withItem.filter((x) => x.t < med).map((x) => x.g), withItem.filter((x) => x.t >= med).map((x) => x.g), 'før:', 'senere:');
+    if (line) lines.push({ key: 'item', text: line + (topId ? ` (oftest ${itemName(topId)}, ${topN} af ${withItem.length} kampe)` : '') });
+  }
+  // 2) Dødsfald før 14 min (kill-feedet).
+  const withDeaths = known.filter((g) => Array.isArray(g.deathLog));
+  if (withDeaths.length >= PATTERN_MIN_GAMES) {
+    const early = (g) => g.deathLog.some((d) => d.t < 840);
+    const line = split('Dødsfald før 14 min', withDeaths.filter((g) => !early(g)), withDeaths.filter(early), 'ingen:', 'mindst ét:');
+    if (line) lines.push({ key: 'deaths', text: line });
+  }
+  // 3-4) Hvor og til hvem (kampgennemgangen).
+  const reviewed = games.filter((g) => g.review?.deaths);
+  if (reviewed.length >= PATTERN_MIN_GAMES) {
+    const early = reviewed.flatMap((g) => g.review.deaths.filter((d) => d.t < 840 && typeof d.x === 'number'));
+    if (early.length) {
+      const top = early.filter((d) => mapSide(d.x, d.y) === 'top').length;
+      const [n, side] = top >= early.length - top ? [top, 'top-siden'] : [early.length - top, 'bot-siden'];
+      lines.push({ key: 'side', text: `${n} af dine ${early.length} dødsfald før 14 min var på ${side} (${reviewed.length} kampe med kampgennemgang)` });
+      const by = (k) => early.filter((d) => d.by === k).length;
+      lines.push({ key: 'killer', text: `Dødsfald før 14 min: ${by('lane')} til lane-modstanderen, ${by('jungle')} til fjendens jungler, ${by('other')} til andre` });
+    }
+    const at10 = reviewed.filter((g) => known.includes(g)).map((g) => ({ g, d: g.review.gold.find((x) => x[0] === 10)?.[1] })).filter((x) => typeof x.d === 'number' && x.d !== 0);
+    if (at10.length >= PATTERN_MIN_GAMES) {
+      const line = split('Guld mod lane-modstanderen ved 10 min', at10.filter((x) => x.d > 0).map((x) => x.g), at10.filter((x) => x.d < 0).map((x) => x.g), 'foran:', 'bagud:');
+      if (line) lines.push({ key: 'gold10', text: line });
+    }
+  }
+  // 5) Dueller mod lane-modstanderen.
+  const withDuels = known.filter((g) => (g.duels || []).length);
+  if (withDuels.length >= PATTERN_MIN_GAMES) {
+    const net = (g) => g.duels.filter((d) => d.won).length - g.duels.filter((d) => !d.won).length;
+    const line = split('Dueller mod lane-modstanderen', withDuels.filter((g) => net(g) > 0), withDuels.filter((g) => net(g) < 0), 'vandt flest:', 'tabte flest:');
+    if (line) lines.push({ key: 'duels', text: line });
+  }
+  return { games: games.length, lines };
+}
+
+// Kortet "Dine mønstre": dine mest spillede champion + rolle-kombinationer.
+function patternsView() {
+  if (!app.cfg.patterns) return null;
+  const combos = new Map();
+  for (const g of srGames()) {
+    if (!g.championId || !g.position) continue;
+    const k = `${g.championId}|${g.position}`;
+    combos.set(k, (combos.get(k) || 0) + 1);
+  }
+  const sorted = [...combos].sort((a, b) => b[1] - a[1]);
+  const out = [];
+  for (const [k] of sorted) {
+    const [id, pos] = k.split('|');
+    const p = patternsFor(id, pos);
+    if (p.lines.length) out.push({ champion: champView(id), position: pos, games: p.games, lines: p.lines.map((l) => l.text) });
+    if (out.length >= 3) break;
+  }
+  const best = sorted[0];
+  return {
+    groups: out,
+    minGames: PATTERN_MIN_GAMES,
+    waiting: !out.length && best ? { champion: champView(best[0].split('|')[0]), position: best[0].split('|')[1], games: best[1] } : null,
+  };
+}
+
+// ---------- OBS: video af dine dødsfald (kun med obsClips: true) ----------
+// OBS WebSocket v5 (indbygget i OBS 28+). Node's indbyggede WebSocket-klient (Node 22) - ingen ekstra pakker.
+// Med obsClips slået fra kaldes intet her: ingen forbindelse, ingen beskeder.
+
+const OBS_CLIP_DELAY = 3000; // vent 3 sek. efter dødsfaldet, så selve dødsfaldet er med i klippet
+const obs = { ws: null, ready: false, status: null, nextTry: 0, pending: new Map(), seq: 0, lastPath: null, closeTimer: null };
+const obsUrl = () => process.env.LOL_HELPER_OBS || `ws://127.0.0.1:${Number(app.cfg.obsPort) || 4455}`;
+
+function setObsStatus(text) {
+  if (obs.status === text) return;
+  obs.status = text;
+  log(text);
+}
+
+function obsConnect() {
+  if (!app.cfg.obsClips || obs.ws || Date.now() < obs.nextTry) return;
+  clearTimeout(obs.closeTimer);
+  obs.nextTry = Date.now() + 60000; // højst ét forsøg i minuttet, og kun én statuslinje
+  if (typeof WebSocket !== 'function') { setObsStatus('OBS-klip: denne version af programmet mangler WebSocket.'); return; }
+  let ws;
+  try { ws = new WebSocket(obsUrl()); } catch { setObsStatus(`OBS svarer ikke (${obsUrl()}).`); return; }
+  obs.ws = ws;
+  obs.ready = false;
+  ws.onerror = () => {};
+  ws.onclose = (e) => {
+    const was = obs.ready;
+    obs.ws = null;
+    obs.ready = false;
+    for (const p of obs.pending.values()) p.reject(new Error('OBS-forbindelsen lukkede'));
+    obs.pending.clear();
+    if (!app.cfg.obsClips) return;
+    if (e?.code === 4009) setObsStatus('OBS afviste adgangskoden - tjek "obsPassword" i config.json.');
+    else if (!was) setObsStatus(`OBS svarer ikke (${obsUrl()}) - start OBS og slå WebSocket-serveren til. Prøver igen om lidt.`);
+    else setObsStatus('Forbindelsen til OBS blev afbrudt - prøver igen om lidt.');
+  };
+  ws.onmessage = (ev) => {
+    let m;
+    try { m = JSON.parse(String(ev.data)); } catch { return; }
+    if (m.op === 0) { // Hello
+      const auth = m.d?.authentication;
+      const identify = { rpcVersion: 1, eventSubscriptions: 0 };
+      if (auth) {
+        const pw = String(app.cfg.obsPassword || '');
+        if (!pw) { setObsStatus('OBS kræver en adgangskode - skriv den i config.json som "obsPassword".'); ws.close(); return; }
+        const b64 = (s) => createHash('sha256').update(s).digest('base64');
+        identify.authentication = b64(b64(pw + auth.salt) + auth.challenge);
+      }
+      ws.send(JSON.stringify({ op: 1, d: identify }));
+    } else if (m.op === 2) { // Identified
+      obs.ready = true;
+      obsPrepare().catch(() => {});
+    } else if (m.op === 7) { // RequestResponse
+      const p = obs.pending.get(m.d?.requestId);
+      if (!p) return;
+      obs.pending.delete(m.d.requestId);
+      clearTimeout(p.timer);
+      if (m.d.requestStatus?.result) p.resolve(m.d.responseData || {});
+      else p.reject(Object.assign(new Error(m.d.requestStatus?.comment || `kode ${m.d.requestStatus?.code}`), { code: m.d.requestStatus?.code }));
+    }
+  };
+}
+
+function obsRequest(requestType, requestData) {
+  return new Promise((resolve, reject) => {
+    if (!obs.ws || !obs.ready) return reject(new Error('OBS er ikke forbundet'));
+    const requestId = `lrh-${++obs.seq}`;
+    const timer = setTimeout(() => { obs.pending.delete(requestId); reject(new Error('OBS svarede ikke')); }, 10000);
+    obs.pending.set(requestId, { resolve, reject, timer });
+    obs.ws.send(JSON.stringify({ op: 6, d: { requestType, requestId, ...(requestData ? { requestData } : {}) } }));
+  });
+}
+
+// Start replay bufferen hvis den ikke kører, og husk det sidst gemte klip (så et nyt kan kendes).
+async function obsPrepare() {
+  try {
+    const st = await obsRequest('GetReplayBufferStatus');
+    if (!st.outputActive) {
+      await obsRequest('StartReplayBuffer');
+      log('OBS: replay buffer startet.');
+    }
+  } catch (e) {
+    setObsStatus(`OBS: replay bufferen kunne ikke startes (${e.message}) - slå den til i OBS: Indstillinger -> Output -> Replay Buffer.`);
+    return;
+  }
+  try { obs.lastPath = (await obsRequest('GetLastReplayBufferReplay')).savedReplayPath || null; } catch {}
+  setObsStatus('OBS forbundet - dine dødsfald gemmes som klip.');
+}
+
+function obsClipDeath(g, death) {
+  if (!app.cfg.obsClips) return;
+  setTimeout(async () => {
+    if (!obs.ready) return;
+    try {
+      await obsRequest('SaveReplayBuffer');
+      // Filen skrives lidt efter: vent på at "sidste klip" skifter.
+      for (let i = 0; i < 8; i++) {
+        await sleep(1000);
+        const r = await obsRequest('GetLastReplayBufferReplay').catch(() => null);
+        const p = r?.savedReplayPath;
+        if (p && p !== obs.lastPath) {
+          obs.lastPath = p;
+          death.clip = p;
+          log(`OBS: klip af dødsfaldet ${mmss(death.t)} gemt (${path.basename(p)}).`);
+          if (app.game !== g) saveHistory(); // kampen er allerede gemt
+          broadcast();
+          return;
+        }
+      }
+    } catch (e) {
+      log(`OBS: klippet kunne ikke gemmes (${e.message}).`);
+    }
+  }, OBS_CLIP_DELAY);
+}
+
+function obsClose() {
+  clearTimeout(obs.closeTimer);
+  obs.nextTry = 0;
+  if (obs.ws) { try { obs.ws.close(); } catch {} }
+  obs.ws = null;
+  obs.ready = false;
+}
+// Efter kampen: luk forbindelsen, når de sidste klip er gemt.
+function obsCloseSoon() {
+  if (!obs.ws) return;
+  clearTimeout(obs.closeTimer);
+  obs.closeTimer = setTimeout(() => { if (!app.live) { obsClose(); obs.status = null; } }, 20000);
+  obs.closeTimer.unref?.();
+}
+
+// Kun klip som programmet selv har gemt (fra history.json) og kun fra deres egen mappe.
+function allowedClip(p) {
+  if (typeof p !== 'string' || !p) return null;
+  const clips = srGames().flatMap((g) => (g.deathLog || []).map((d) => d.clip)).filter(Boolean);
+  const dirs = new Set(clips.map((c) => path.resolve(path.dirname(c))));
+  const want = path.resolve(p);
+  if (!clips.some((c) => path.resolve(c) === want) || !dirs.has(path.dirname(want))) return null;
+  if (!/\.(mp4|mkv|mov|flv|webm|ts|m3u8)$/i.test(want)) return null;
+  return want;
+}
+
+const CLIP_TYPES = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.flv': 'video/x-flv', '.ts': 'video/mp2t' };
+function serveClip(req, res, file) {
+  let size;
+  try { size = fs.statSync(file).size; } catch { res.writeHead(404); return res.end(); }
+  const type = CLIP_TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream';
+  const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  if (m && size) {
+    const start = m[1] ? Number(m[1]) : Math.max(0, size - Number(m[2]));
+    const end = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
+    if (start > end || start >= size) { res.writeHead(416, { 'Content-Range': `bytes */${size}` }); return res.end(); }
+    res.writeHead(206, { 'Content-Type': type, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1 });
+    return fs.createReadStream(file, { start, end }).pipe(res);
+  }
+  res.writeHead(200, { 'Content-Type': type, 'Content-Length': size, 'Accept-Ranges': 'bytes' });
+  fs.createReadStream(file).pipe(res);
+}
+
+function openFile(file) {
+  if (process.platform === 'win32') execFile('explorer.exe', [file], { windowsHide: true }, () => {});
+  else if (process.platform === 'darwin') execFile('open', [file], () => {});
+  else execFile('xdg-open', [file], () => {});
 }
 
 // ---------- Opdateringer ----------
@@ -1706,6 +2487,9 @@ function livePlayer(p) {
   return {
     key: playerName(p),
     name: shortName(p),
+    // Riot ID til spejder-opslaget (gameName#tagLine).
+    riot: { gameName: p.riotIdGameName || playerName(p).split('#')[0] || null, tagLine: p.riotIdTagLine || playerName(p).split('#')[1] || null },
+    isBot: Boolean(p.isBot),
     champ,
     team: p.team,
     position: p.position || '',
@@ -2317,6 +3101,11 @@ async function updateLive(data) {
     ensureJungleRoutes(champ.key, LIVE_POSITION[meRaw.position] || app.build?.position);
     trackOpponent(app.live, data.events?.Events);
     announce(app.live);
+    // Nye funktioner fejler stille - de må aldrig stoppe live-løkken.
+    for (const fn of [ensureScout, updateEnemyJungleLive]) {
+      try { fn(app.live); } catch {}
+    }
+    if (app.cfg.obsClips) obsConnect();
   }
   if (first && app.live) log(`Live: ${champ.name} - forslag og scoreboard vises i vinduet.`);
   broadcast();
@@ -2398,6 +3187,11 @@ const app = {
   server: null,
   live: null,          // analyse af den igangværende kamp
   liveBuild: null,     // { championKey, build }
+  enemyJungle: null,   // { key, side, guessed, routes } - fjendens junglers første clear
+  ejKey: null,
+  ejFailAt: 0,
+  summonerRegion: null, // OP.GG-region fra klienten (til spejder-opslag)
+  puuid: null,         // din puuid (til kampgennemgangen)
   remote: { enabled: false, token: null, urls: [] },
 };
 
@@ -2449,6 +3243,7 @@ function liveView() {
       games: L.matchup.stats?.games ?? null,
     },
     me: player(L.me),
+    scout: safeView(scoutView) || [],
     side: L.me.team === 'CHAOS' ? 'RED' : 'BLUE', // ORDER = blå side
     vision: visionView(L),
     lanes: laneView(L),
@@ -2589,6 +3384,11 @@ function historyView() {
   };
 }
 
+// En fejl i en af de nye visninger må ikke tage resten af vinduet med sig.
+function safeView(fn) {
+  try { return fn(); } catch (e) { console.error(`Visning fejlede: ${e.message}`); return null; }
+}
+
 function viewModel() {
   const { pick, build: b, rec } = app;
   const base = {
@@ -2618,8 +3418,17 @@ function viewModel() {
       rate: app.jungle.rate || null, // hvor de starter (procent) pr. side
     },
     history: historyView(),
+    enemyJungle: safeView(enemyJungleView),
+    reviews: app.live ? null : safeView(reviewView),
+    patterns: app.live ? null : safeView(patternsView),
+    obsClips: Boolean(app.cfg.obsClips),
+    obs: app.cfg.obsClips ? { status: obs.status, ready: obs.ready } : null,
   };
   if (!pick || !b || !rec) return base;
+  if (app.cfg.patterns) {
+    const p = safeView(() => patternsFor(pick.championId, b.position));
+    if (p) base.patternsPick = { games: p.games, minGames: PATTERN_MIN_GAMES, lines: p.lines.slice(0, 2).map((l) => l.text) };
+  }
   const champ = dd.champions[pick.championId] || { name: `Champion ${pick.championId}` };
   const stats = roleStats(b);
   const rune = (id) => ({ name: runeName(id), icon: dd.runes[id]?.icon || null });
@@ -2926,6 +3735,40 @@ async function handleRequest(req, res, html) {
     if (app.cfg.voice) { lastSpoken.clear(); speak('test', 'Stemmen er slået til'); }
     return json(200, { ok: true, enabled: app.cfg.voice });
   }
+  if (req.method === 'POST' && req.url === '/api/obs') {
+    if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
+    const { enabled } = await readBody(req);
+    app.cfg.obsClips = Boolean(enabled);
+    saveConfigValue('obsClips', app.cfg.obsClips);
+    if (app.cfg.obsClips) {
+      log('OBS-klip slået til - forbinder til OBS når en kamp kører.');
+      obs.nextTry = 0;
+      if (app.live) obsConnect();
+    } else {
+      obsClose();
+      obs.status = null;
+      log('OBS-klip slået fra.');
+    }
+    broadcast();
+    return json(200, { ok: true, enabled: app.cfg.obsClips });
+  }
+  if (req.method === 'POST' && req.url === '/api/review-old') {
+    if (!app.cfg.matchReview) return json(400, { error: 'Kampgennemgang er slået fra (matchReview)' });
+    const r = await reviewOlderGames();
+    broadcast();
+    return json(r.ok ? 200 : 409, r);
+  }
+  // Video af dine dødsfald: kun fra computeren selv og kun filer programmet selv har gemt (se allowedClip).
+  if ((req.method === 'GET' && req.url.startsWith('/clip?')) || (req.method === 'POST' && req.url === '/api/open-clip')) {
+    if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
+    const wanted = req.method === 'GET' ? new URL(req.url, 'http://x').searchParams.get('f') : (await readBody(req)).file;
+    const file = allowedClip(wanted);
+    if (!file) return json(403, { error: 'Ikke et klip fra programmet' });
+    if (req.method === 'GET') return serveClip(req, res, file);
+    if (!fs.existsSync(file)) return json(404, { error: 'Filen findes ikke længere' });
+    openFile(file);
+    return json(200, { ok: true });
+  }
   if (req.method === 'POST' && req.url === '/api/autostart') {
     if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
     if (!autostartSupported()) return json(400, { error: 'Ikke understøttet her' });
@@ -3139,7 +3982,7 @@ async function findMatchup(pick, b = app.build) {
 const SHAPES_FILE = process.env.LOL_HELPER_SHAPES || path.join(APP_DIR, 'lcu-shapes.json');
 const SHAPE_VALUES = new Set(['type', 'assignedPosition', 'gameMode', 'phase', 'position', 'cellId', 'actorCellId', 'localPlayerCellId',
   'championId', 'championPickIntent', 'spell1Id', 'spell2Id', 'ownedPageCount', 'mapId', 'id', 'isDeletable', 'current',
-  'completed', 'isInProgress', 'isEditable', 'isActive', 'isValid']);
+  'completed', 'isInProgress', 'isEditable', 'isActive', 'isValid', 'team', 'teamId', 'participantId', 'type', 'frameInterval']);
 function shapeOf(v, key, depth = 0) {
   if (Array.isArray(v)) {
     const seen = new Map();
@@ -3194,13 +4037,14 @@ async function tick() {
     app.prefetched = null;
     if (app.draft || app.draftKey || app.draftStatus) { app.draft = null; app.draftKey = null; app.draftStatus = null; }
     // Tilbage i lobbyen uden kamp (fx dodge): vis ikke den gamle champion select.
-    if (app.pick && ['None', 'Lobby', 'Matchmaking', 'ReadyCheck'].includes(phase)) { clearPick(); broadcast(); }
+    if ((app.pick || app.enemyJungle) && ['None', 'Lobby', 'Matchmaking', 'ReadyCheck'].includes(phase)) { clearPick(); broadcast(); }
     return cfg.pollMs;
   }
   const session = await lcu(app.client, 'GET', '/lol-champ-select/v1/session');
   const me = session.myTeam?.find((m) => m.cellId === session.localPlayerCellId);
   const pickPending = (session.actions || []).flat()
     .some((a) => a.actorCellId === session.localPlayerCellId && a.type === 'pick' && !a.completed);
+  try { updateEnemyJungleSelect(session, me); } catch {}
   if (!(me?.championId > 0) || pickPending) {
     setStatus('Champion select - venter på at du låser en champion.');
     if (me) updateDraft(session, me);
@@ -3363,6 +4207,8 @@ async function main() {
     } catch (e) {
       if (['ECONNREFUSED', 'ECONNRESET', 'EPIPE'].includes(e.code)) {
         app.client = null;
+        app.summonerRegion = null;
+        app.puuid = null;
         setStatus('Mistede forbindelsen til klienten - leder igen...');
       } else {
         log(`Fejl: ${e.message}`);

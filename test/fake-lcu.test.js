@@ -27,11 +27,11 @@ const state = {
 const session = () => ({
   localPlayerCellId: 2,
   myTeam: [
-    { cellId: 2, championId: state.championId, championPickIntent: state.myIntent || 0, assignedPosition: 'middle', spell1Id: 14, spell2Id: 4 },
+    { cellId: 2, championId: state.championId, championPickIntent: state.myIntent || 0, assignedPosition: 'middle', spell1Id: 14, spell2Id: 4, team: 1 },
     // Robusthed: en holdkammerat der har erklæret sit pick (championPickIntent)
     ...(state.mateIntent ? [{ cellId: 1, championId: 0, championPickIntent: state.mateIntent, assignedPosition: 'top', spell1Id: 4, spell2Id: 12 }] : []),
   ],
-  theirTeam: state.enemies.map((championId, i) => ({ cellId: 5 + i, championId })),
+  theirTeam: state.enemies.map((championId, i) => ({ cellId: 5 + i, championId, team: 2 })),
   actions: [
     [{ actorCellId: 2, type: 'ban', completed: state.banDone, isInProgress: !state.banDone, championId: state.banDone ? 157 : 0 }],
     [{ actorCellId: 2, type: 'pick', completed: state.pickCompleted, championId: state.championId }],
@@ -45,17 +45,67 @@ const MASTERY = [
   { championId: 134, championPoints: 200000 }, { championId: 64, championPoints: 150000 },
 ];
 
+// Falske kampe i klientens kamphistorik: 4242 = live-kampen (Ahri mid mod Zed), 5555 = en ældre Evelynn jungle-kamp.
+const frame = (min, pf, events = []) => ({ timestamp: min * 60000, participantFrames: pf, events });
+const pfOf = (list) => Object.fromEntries(list.map((p) => [String(p.participantId), p]));
+const MATCHES = {
+  4242: {
+    game: {
+      gameId: 4242, platformId: 'EUN1',
+      participantIdentities: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((id) => ({ participantId: id, player: { puuid: id === 1 ? 'me-puuid' : `p${id}` } })),
+      participants: [[1, 103, 100], [2, 86, 100], [3, 254, 100], [4, 222, 100], [5, 89, 100], [6, 238, 200], [7, 122, 200], [8, 104, 200], [9, 202, 200], [10, 16, 200]]
+        .map(([participantId, championId, teamId]) => ({ participantId, championId, teamId, spell1Id: 4, spell2Id: participantId === 8 || participantId === 3 ? 11 : 14 })),
+    },
+    timeline: {
+      frameInterval: 60000,
+      frames: Array.from({ length: 13 }, (_, m) => frame(m, pfOf([
+        { participantId: 1, totalGold: 500 + m * 400, position: { x: 7000 + m, y: 7400 } },
+        { participantId: 6, totalGold: 500 + m * 450, position: { x: 7600, y: 7600 } },
+      ]), m === 5 ? [{ type: 'CHAMPION_KILL', timestamp: 300000, killerId: 6, victimId: 1, assistingParticipantIds: [], position: { x: 7000, y: 7400 } }]
+        : m === 6 ? [{ type: 'ITEM_PURCHASED', timestamp: 400000, participantId: 1, itemId: 3020 }]
+        : m === 11 ? [{ type: 'ITEM_PURCHASED', timestamp: 800000, participantId: 1, itemId: 3157 }, { type: 'ITEM_UNDO', timestamp: 801000, participantId: 1, beforeId: 3157, afterId: 0 },
+          { type: 'ITEM_PURCHASED', timestamp: 900000, participantId: 1, itemId: 6655 }]
+        : [])),
+    },
+  },
+  5555: {
+    game: {
+      gameId: 5555,
+      participantIdentities: [1, 6, 7].map((id) => ({ participantId: id, player: { puuid: id === 1 ? 'me-puuid' : `p${id}` } })),
+      participants: [[1, 28, 100, 11], [6, 122, 200, 12], [7, 64, 200, 11]].map(([participantId, championId, teamId, s2]) => ({ participantId, championId, teamId, spell1Id: 4, spell2Id: s2 })),
+    },
+    timeline: {
+      frames: Array.from({ length: 11 }, (_, m) => frame(m, pfOf([
+        { participantId: 1, totalGold: 500 + m * 300, position: { x: 3000 + m * 300, y: 8000 } },
+        { participantId: 6, totalGold: 500 + m * 300, position: { x: 1300, y: 12000 } },
+        { participantId: 7, totalGold: 500 + m * 300, position: { x: 11000, y: 6000 + m * 200 } },
+      ]), m === 4 ? [{ type: 'CHAMPION_KILL', timestamp: 240000, killerId: 1, victimId: 6, assistingParticipantIds: [], position: { x: 1500, y: 11000 } }]
+        : m === 8 ? [{ type: 'CHAMPION_KILL', timestamp: 500000, killerId: 2, victimId: 7, assistingParticipantIds: [1], position: { x: 5000, y: 9000 } }]
+        : [])),
+    },
+  },
+};
+
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
     const auth = Buffer.from(`riot:${PASSWORD}`).toString('base64');
-    if (req.headers.authorization !== `Basic ${auth}`) { res.writeHead(401); return res.end(); }
+    // Anden kopi af programmet (mønster-testen) logger ind med sin egen adgangskode og har sin egen fase.
+    const second = req.headers.authorization === `Basic ${Buffer.from('riot:testpw2').toString('base64')}`;
+    if (req.headers.authorization !== `Basic ${auth}` && !second) { res.writeHead(401); return res.end(); }
+    if (second && req.url === '/lol-gameflow/v1/gameflow-phase') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(state.phase2)); }
     calls.push({ method: req.method, url: req.url, body: body ? JSON.parse(body) : undefined });
     const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(obj === undefined ? '' : JSON.stringify(obj)); };
     const key = `${req.method} ${req.url}`;
     if (key === 'GET /lol-gameflow/v1/gameflow-phase') return send(200, state.phase);
-    if (key === 'GET /lol-gameflow/v1/session') return send(200, { gameData: { queue: { gameMode: 'CLASSIC' } } });
+    if (key === 'GET /lol-gameflow/v1/session') return send(200, { gameData: { gameId: 4242, queue: { gameMode: 'CLASSIC' } } });
+    if (key === 'GET /riotclient/region-locale') return send(200, { locale: 'da_DK', region: 'EUNE', webLanguage: 'da', webRegion: 'eune' });
+    // Kamphistorik og timeline (kampgennemgang) - formen som klientens match-history (participants + participantIdentities, frames pr. minut)
+    const mh = /^GET \/lol-match-history\/v1\/(games|game-timelines)\/(\d+)$/.exec(key);
+    if (mh && MATCHES[mh[2]]) return send(200, MATCHES[mh[2]][mh[1] === 'games' ? 'game' : 'timeline']);
+    if (mh) return send(404, { message: 'no game' });
+    if (key.startsWith('GET /lol-match-history/v1/products/lol/current-summoner/matches')) return send(200, { games: { games: state.matchList || [] } });
     if (key === 'GET /lol-champ-select/v1/session') return send(200, session());
     if (key === 'PATCH /lol-champ-select/v1/session/my-selection') return send(204);
     if (key === 'GET /lol-perks/v1/pages') return send(200, state.pages);
@@ -74,7 +124,7 @@ const server = http.createServer((req, res) => {
       state.pages.push(page);
       return send(200, page);
     }
-    if (key === 'GET /lol-summoner/v1/current-summoner') return send(200, { summonerId: 55, accountId: 77 });
+    if (key === 'GET /lol-summoner/v1/current-summoner') return send(200, { summonerId: 55, accountId: 77, puuid: 'me-puuid' });
     if (key === 'GET /lol-item-sets/v1/item-sets/55/sets') return send(200, state.itemSets);
     if (key === 'PUT /lol-item-sets/v1/item-sets/55/sets') { state.itemSets = JSON.parse(body); return send(201, state.itemSets); }
     send(404, { message: 'unknown ' + key });
@@ -83,12 +133,28 @@ const server = http.createServer((req, res) => {
 
 // Falsk OP.GG matchup-guide (MCP, JSON-RPC) - registrerer hvad programmet spørger om.
 const mcpCalls = [];
+const scoutCalls = [];
 const mcpServer = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
     const rpc = JSON.parse(body);
     const a = rpc.params.arguments;
+    if (rpc.params.name === 'lol_get_summoner_profile') {
+      // OP.GG's kompakte "class"-format (som den rigtige tjeneste svarer med desired_output_fields)
+      scoutCalls.push(a);
+      const head = 'class LolGetSummonerProfile: data\nclass Data: summoner\nclass Summoner: updated_at,league_stats,ranked_most_champions\n' +
+        'class LeagueStat: game_type,tier_info,win,lose\nclass TierInfo: tier,division,lp\nclass RankedMostChampions: game_type,season_id,play,win,my_champion_stats\nclass MyChampionStat: id,play,win\n\n';
+      const now = new Date().toISOString();
+      const body2 = a.game_name === 'Fedzed'
+        ? `LolGetSummonerProfile(Data(Summoner("${now}",[LeagueStat("SOLORANKED",TierInfo("GOLD",2,40),300,280),LeagueStat("FLEXRANKED",TierInfo(null,null,null),null,null)],RankedMostChampions("RANKED",33,500,290,[MyChampionStat(238,340,207),MyChampionStat(91,160,83)]))))`
+        : a.game_name === 'Jg'
+          ? `LolGetSummonerProfile(Data(Summoner("${now}",[LeagueStat("SOLORANKED",TierInfo("MASTER",1,120),90,80)],RankedMostChampions("RANKED",33,170,90,[MyChampionStat(64,120,60),MyChampionStat(121,50,30)]))))`
+          : null;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(body2 ? { jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: head + body2 }] } }
+        : { jsonrpc: '2.0', id: rpc.id, error: { code: -32600, message: 'Summoner not found' } }));
+    }
     mcpCalls.push(a);
     const data = {
       opponent_champion_tip: `Testtip: sådan slår ${a.my_champion} ${a.opponent_champion}`,
@@ -113,6 +179,69 @@ const opggWeb = http.createServer((req, res) => {
   const body = `<script>self.__next_f.push([1,"4e:[{\\"teamName\\":\\"BLUE\\",\\"data\\":{\\"team_key\\":\\"BLUE\\",\\"routes\\":[${blue.join(',')}],\\"play\\":1000},\\"rate\\":{\\"team_key\\":\\"BLUE\\",\\"blue\\":52,\\"red\\":17,\\"raptors\\":29}},{\\"data\\":{\\"team_key\\":\\"RED\\",\\"routes\\":[${red.join(',')}],\\"play\\":500}}]"])</script>`;
   res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(body);
+});
+
+// Falsk OBS (WebSocket v5 med adgangskode): tjekker auth-håndtrykket og registrerer forespørgslerne.
+const OBS_PASSWORD = 'hemmelig';
+const obsLog = { connections: 0, identified: false, authOk: null, requests: [], dir: null, lastPath: null, active: false, saves: 0 };
+const obsServer = http.createServer((req, res) => { res.writeHead(426); res.end(); });
+obsServer.on('upgrade', (req, socket) => {
+  obsLog.connections++;
+  const accept = require('crypto').createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  const send = (obj) => {
+    const data = Buffer.from(JSON.stringify(obj));
+    const head = data.length < 126 ? Buffer.from([0x81, data.length]) : Buffer.from([0x81, 126, data.length >> 8, data.length & 255]);
+    socket.write(Buffer.concat([head, data]));
+  };
+  const salt = 'saltsalt';
+  const challenge = 'udfordring';
+  const sha = (x) => require('crypto').createHash('sha256').update(x).digest('base64');
+  send({ op: 0, d: { obsWebSocketVersion: '5.5.0', rpcVersion: 1, authentication: { challenge, salt } } });
+  let buf = Buffer.alloc(0);
+  socket.on('data', (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    for (;;) {
+      if (buf.length < 2) return;
+      const opcode = buf[0] & 15;
+      let len = buf[1] & 127;
+      let off = 2;
+      if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); off = 4; }
+      const masked = buf[1] & 128;
+      if (buf.length < off + (masked ? 4 : 0) + len) return;
+      const mask = masked ? buf.slice(off, off + 4) : null;
+      off += masked ? 4 : 0;
+      const payload = Buffer.from(buf.slice(off, off + len));
+      if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+      buf = buf.slice(off + len);
+      if (opcode === 8) { socket.end(); return; }
+      if (opcode !== 1) continue;
+      const m = JSON.parse(payload.toString());
+      if (m.op === 1) {
+        obsLog.authOk = m.d.authentication === sha(sha(OBS_PASSWORD + salt) + challenge);
+        if (!obsLog.authOk) { socket.end(); return; }
+        obsLog.identified = true;
+        send({ op: 2, d: { negotiatedRpcVersion: 1 } });
+      } else if (m.op === 6) {
+        const t = m.d.requestType;
+        obsLog.requests.push(t);
+        let data = {};
+        if (t === 'GetReplayBufferStatus') data = { outputActive: obsLog.active };
+        if (t === 'StartReplayBuffer') obsLog.active = true;
+        if (t === 'SaveReplayBuffer') {
+          obsLog.saves++;
+          // Filen skrives lidt efter (som i OBS)
+          setTimeout(() => {
+            obsLog.lastPath = path.join(obsLog.dir, `Replay ${obsLog.saves}.mp4`);
+            fs.writeFileSync(obsLog.lastPath, Buffer.alloc(2048, 7));
+          }, 500);
+        }
+        if (t === 'GetLastReplayBufferReplay') data = { savedReplayPath: obsLog.lastPath };
+        send({ op: 7, d: { requestType: t, requestId: m.d.requestId, requestStatus: { result: true, code: 100 }, responseData: data } });
+      }
+    }
+  });
+  socket.on('error', () => {});
 });
 
 // Falsk Live Client Data API (spillets port 2999). Felter som i Riots dokumentation/eksempel.
@@ -199,9 +328,95 @@ async function sseUntil(base, pred, ms) {
   return found;
 }
 
+// "Dine mønstre" fra en syntetisk historik (12 LeBlanc mid-kampe) + gennemgang af en ældre kamp fra klientens kamphistorik.
+// Kører som en ekstra kopi af programmet (egen config og historik, egen fase i den falske klient).
+async function patternsTest(cmd, args, baseEnv, tmp) {
+  const dir = path.join(tmp, 'mønstre');
+  fs.mkdirSync(dir);
+  const games = [];
+  const start = Date.parse('2026-11-01T18:00:00Z');
+  for (let i = 0; i < 12; i++) {
+    const early = i % 2 === 1; // dødsfald før 14 min i de ulige kampe
+    games.push({
+      date: new Date(start - i * 3600 * 1000).toISOString(), championId: 7, champion: 'LeBlanc', gameMode: 'CLASSIC', mapNumber: 11, position: 'MID',
+      result: i < 7 ? 'Sejr' : 'Nederlag', duration: 1800, kills: 5, deaths: early ? 3 : 1, assists: 4, cs: 200, csPerMin: 6.7, items: ['6655'],
+      buys: [{ id: '3020', t: 300, suggested: true, adapted: false }, { id: '6655', t: 600 + i * 30, suggested: true, adapted: false }],
+      deathLog: early ? [{ t: 300, killer: 'Lee Sin', helpers: 0, context: null }, { t: 1000, killer: 'Zed', helpers: 0, context: null }] : [{ t: 1000, killer: 'Zed', helpers: 0, context: null }],
+      review: {
+        v: 1, side: 'BLUE', opp: '238', jg: '64', path: [], jgPath: [], ganks: [], items: [{ id: '6655', t: 600 + i * 30 }],
+        deaths: (early ? [{ t: 300, x: 2000, y: 9000, killer: '64', by: 'jungle' }] : []).concat([{ t: 1000, x: 9000, y: 2000, killer: '238', by: 'lane' }]),
+        gold: [[10, i < 7 ? 300 : -300]],
+      },
+    });
+  }
+  // En ældre Evelynn jungle-kamp uden kampens id og uden gennemgang (fra før v1.18)
+  const evDate = Date.parse('2026-11-02T20:00:00Z');
+  games.unshift({ date: new Date(evDate).toISOString(), championId: 28, champion: 'Evelynn', gameMode: 'CLASSIC', mapNumber: 11, position: 'JUNGLE',
+    result: 'Sejr', duration: 1800, kills: 8, deaths: 2, assists: 6, cs: 150, csPerMin: 5, items: [], buys: [] });
+  state.matchList = [{ gameId: 5555, gameCreation: evDate - 1800 * 1000, gameDuration: 1800, participants: [{ championId: 28 }] }];
+  fs.writeFileSync(path.join(dir, 'history.json'), JSON.stringify({ games }));
+  fs.writeFileSync(path.join(dir, 'config.json'), '{}');
+  state.phase2 = 'Lobby';
+  const env = { ...baseEnv, LOL_HELPER_HISTORY: path.join(dir, 'history.json'), LOL_HELPER_CONFIG: path.join(dir, 'config.json'),
+    LOL_HELPER_SHAPES: path.join(dir, 'lcu-shapes.json'), LOL_HELPER_LCU: baseEnv.LOL_HELPER_LCU.replace(/:[^:]+$/, ':testpw2'), LOL_HELPER_REMOTE: '' };
+  const child = spawn(cmd, args, { env });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  try {
+    await waitFor(() => out.includes('venter på champion select'), 30000, 'mønster-kopien starter');
+    const base = /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
+    const st = async () => (await fetch(base + '/state')).json();
+    const p = (await st()).patterns;
+    assert(p && p.groups.length === 1, `mønstre: ${JSON.stringify(p)}`);
+    const g = p.groups[0];
+    assert.strictEqual(g.champion.name, 'LeBlanc');
+    assert.strictEqual(g.position, 'MID');
+    assert.strictEqual(g.games, 12);
+    const has = (prefix) => g.lines.find((l) => l.startsWith(prefix));
+    assert(has('Første færdige item (din median 12:45): før: 6 af 6 sejre - senere: 1 af 6 (oftest '), JSON.stringify(g.lines));
+    assert(has('Dødsfald før 14 min: ingen: 4 af 6 sejre - mindst ét: 3 af 6'), JSON.stringify(g.lines));
+    assert(has('6 af dine 6 dødsfald før 14 min var på top-siden (12 kampe med kampgennemgang)'), JSON.stringify(g.lines));
+    assert(has('Dødsfald før 14 min: 0 til lane-modstanderen, 6 til fjendens jungler, 0 til andre'), JSON.stringify(g.lines));
+    assert(has('Guld mod lane-modstanderen ved 10 min: foran: 7 af 7 sejre - bagud: 0 af 5'), JSON.stringify(g.lines));
+    assert(!g.lines.some((l) => l.startsWith('Dueller')), 'ingen duel-linje uden dueller');
+    console.log('Mønstre:', g.lines.join(' | '));
+
+    // Ældre kamp: kampens id findes i klientens kamphistorik (samme champion + sluttidspunkt), gennemgangen hentes
+    const r = await (await fetch(base + '/api/review-old', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
+    assert.strictEqual(r.found, 1, `ældre kampe: ${JSON.stringify(r)}`);
+    const ev = (await st()).reviews.find((x) => x.champion === 'Evelynn');
+    assert(ev?.review, 'gennemgang af den ældre kamp');
+    assert.strictEqual(ev.review.path.length, 8, 'din rute minut 1-8');
+    assert.deepStrictEqual(ev.review.path[0], [3300, 8000]);
+    assert.strictEqual(ev.review.jg?.name, 'Lee Sin', 'fjendens jungler = den eneste med Smite');
+    assert.strictEqual(ev.review.jgPath.length, 8, 'fjendens junglers rute');
+    assert.deepStrictEqual(ev.review.ganks.map((x) => [x.t, x.lane, x.kill, x.victim]), [[240, 'Top', true, 'Darius']], 'ganks i lanes før 10 min (ikke kills i junglen)');
+    assert.strictEqual(JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games[0].gameId, 5555, 'id gemt');
+
+    // Champion select: du låser LeBlanc mid -> 1-2 linjer om dine mønstre
+    state.championId = 7;
+    state.pickCompleted = true;
+    state.enemies = [];
+    state.phase2 = 'ChampSelect';
+    let pick = null;
+    for (let i = 0; i < 60 && !(pick = (await st()).patternsPick); i++) await wait(500);
+    assert(pick && pick.games === 12 && pick.lines.length === 2, `mønstre i champion select: ${JSON.stringify(pick)}`);
+    console.log('Mønstre i champion select:', pick.lines.join(' | '));
+    assert(!/Fejl/.test(out), `ingen fejl i mønster-kopien: ${out}`);
+  } catch (e) {
+    console.log(out);
+    throw e;
+  } finally {
+    state.phase2 = 'Lobby';
+    child.kill();
+  }
+}
+
 liveServer.listen(0, '127.0.0.1');
 mcpServer.listen(0, '127.0.0.1');
 opggWeb.listen(0, '127.0.0.1');
+obsServer.listen(0, '127.0.0.1');
 server.listen(0, '127.0.0.1', async () => {
   const port = server.address().port;
   const livePort = liveServer.address().port;
@@ -220,6 +435,8 @@ server.listen(0, '127.0.0.1', async () => {
     LOL_HELPER_MCP: `http://127.0.0.1:${mcpServer.address().port}/mcp`,
     LOL_HELPER_OPGG_WEB: `http://127.0.0.1:${opggWeb.address().port}`,
     LOL_HELPER_SAY_CMD: sayCmd,
+    LOL_HELPER_OBS: `ws://127.0.0.1:${obsServer.address().port}`,
+    LOL_HELPER_REVIEW_RETRY_MS: '500',
     LOL_HELPER_CONFIG: path.join(tmp, 'config.json'),
     ...process.env,
     HOME: tmp,
@@ -234,7 +451,12 @@ server.listen(0, '127.0.0.1', async () => {
     LOL_HELPER_REMOTE: process.env.NO_REMOTE ? '' : '1',
   };
   // config.json med BOM (som Notesblok/PowerShell kan gemme) skal kunne læses. remoteLan: telefon-testen bruger wifi-adressen.
-  fs.writeFileSync(env.LOL_HELPER_CONFIG, '\uFEFF{ "remoteLan": true }\n');
+  fs.writeFileSync(env.LOL_HELPER_CONFIG, `\uFEFF{ "remoteLan": true, "obsPassword": "${OBS_PASSWORD}" }\n`);
+  obsLog.dir = path.join(tmp, 'replays');
+  fs.mkdirSync(obsLog.dir);
+  obsLog.lastPath = path.join(obsLog.dir, 'Replay gammel.mp4'); // et klip fra før - må ikke kunne hentes via vinduet
+  fs.writeFileSync(obsLog.lastPath, 'gammel');
+  const oldClip = obsLog.lastPath;
   const child = spawn(cmd, args, { env });
   const tokenFile = path.join(process.env.HELPER_BIN ? path.dirname(cmd) : path.join(__dirname, '..'), 'remote-token.txt');
   const hadToken = fs.existsSync(tokenFile);
@@ -387,6 +609,18 @@ server.listen(0, '127.0.0.1', async () => {
     console.log('Faser:', plan.phases.map((x) => `${x.title}: ${x.lines.join(' / ')}`).join(' || '));
     console.log('Gameplan:', JSON.stringify({ lane: plan.laneAdvantage, solo: plan.soloKill, stil: plan.playStyle, skalering: plan.scaling, han: plan.oppCore.map((i) => i.name) }));
 
+    // Fjendens jungler i champion select: gættet ud fra holdet (Graves), side fra myTeam[].team (1 = blå -> fjenden er rød)
+    let ej;
+    for (let i = 0; i < 40 && !(ej = (await gui('GET', '/state')).body.enemyJungle); i++) await wait(500);
+    assert.strictEqual(ej?.champion?.name, 'Graves', `fjendens jungler: ${JSON.stringify(ej)}`);
+    assert.strictEqual(ej.guessed, true);
+    assert(jungleRequests.includes('/lol/champions/graves/jungle-paths/jungle'), `URL: ${jungleRequests}`);
+    assert.deepStrictEqual(ej.sides.map((x) => x.side), ['RED'], 'kun fjendens side');
+    assert.strictEqual(ej.sides[0].text, 'Graves (rød side): starter på top-siden i 100% af kampene, første clear ender på bot-siden i 100%');
+    assert.strictEqual(ej.sides[0].games, 500);
+    assert.deepStrictEqual(ej.sides[0].routes[0].camps, ['Red', 'Krugs', 'Raptors', 'Wolves', 'Blue', 'Gromp']);
+    console.log('Fjendens jungler:', ej.sides[0].text);
+
     const titles = autoSet().blocks.map((b) => b.type);
     assert(titles.includes('Mod deres hold'), `counter-blok mangler: ${titles}`);
     const boots = autoSet().blocks.find((b) => b.type === 'Støvler');
@@ -529,6 +763,23 @@ server.listen(0, '127.0.0.1', async () => {
     // Startitems siges når gameplanen mod lane-modstanderen er klar (højst 5 sek. efter kampstart).
     await waitFor(() => /^Start: /m.test(said()), 10000, 'stemme ved kampstart');
     console.log('Startitems:', starter.items.map((i) => `${i.count}x ${i.name}`).join(', '), `(${starter.cost} g)`, starter.vs ? `mod ${starter.vs}` : '(generelle)');
+    // Spejder: Zed (lane) og Graves (jungler) slås op på OP.GG med klientens region (EUNE fra /riotclient/region-locale)
+    let sc = [];
+    for (let i = 0; i < 40 && (sc = (await gui('GET', '/state')).body.live?.scout || []).length < 2; i++) await wait(500);
+    const zedScout = sc.find((x) => x.champion.name === 'Zed');
+    assert.strictEqual(zedScout?.text, 'Zed: 340 ranked-kampe, 61% WR denne sæson (68% af spillerens ranked-kampe)', JSON.stringify(sc));
+    assert.strictEqual(zedScout.rank, 'Gold 2');
+    assert.strictEqual(zedScout.role, 'lane');
+    const jgScout = sc.find((x) => x.champion.name === 'Graves');
+    assert.strictEqual(jgScout?.text, 'Ingen ranked-kampe på Graves denne sæson (170 ranked-kampe på andre champions)', JSON.stringify(sc));
+    assert.strictEqual(jgScout.rank, 'Master 120 LP');
+    assert.strictEqual(jgScout.role, 'jungle');
+    assert(scoutCalls.some((c) => c.game_name === 'Fedzed' && c.tag_line === 'EUW' && c.region === 'EUNE'), JSON.stringify(scoutCalls));
+    assert(!scoutCalls.some((c) => ['Topper', 'Mig', 'Jungle', 'Bot', 'Tank'].includes(c.game_name)), 'kun lane-modstander og jungler');
+    await waitFor(() => said().includes('Zed: 340 kampe, 61 procent win rate'), 10000, 'spejder-stemme');
+    const ejLive = (await gui('GET', '/state')).body.enemyJungle;
+    assert(ejLive && ejLive.guessed === false && ejLive.sides[0].side === 'RED' && ejLive.champion.name === 'Graves', `fjendens jungler live: ${JSON.stringify(ejLive)}`);
+    console.log('Spejder:', sc.map((x) => `${x.text} · ${x.rank}`).join(' | '));
     if (process.env.HOLD_START) {
       console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
       await wait(Number(process.env.HOLD_START));
@@ -557,7 +808,7 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(Lspent.skill.unspent, 0);
     assert.strictEqual(Lspent.skill.next, null, 'intet forslag uden ubrugte points');
     // Ved kampstart siges kun startitems (ikke alt det andet der allerede gælder)
-    assert.strictEqual(said().split('\n').filter((l) => l && !l.startsWith('Start: ')).join('|'), '', `kun startitems siges ved kampstart: ${said()}`);
+    assert.strictEqual(said().split('\n').filter((l) => l && !l.startsWith('Start: ') && !l.startsWith('Zed: 340 kampe')).join('|'), '', `kun startitems (og spejderen) siges ved kampstart: ${said()}`);
     live.data.activePlayer.abilities.W.abilityLevel = 2; // nyt level -> ubrugt point igen
     await wait(2500);
     assert(said().includes('Level op: W'), `stemme ved level op: ${said()}`);
@@ -622,6 +873,27 @@ server.listen(0, '127.0.0.1', async () => {
     assert(/^level 11 mod 13, [\d.]+ g bagud i items$/.test(lp.duels[0].context), lp.duels[0].context);
     assert(lp.log.some((l) => l.text.startsWith('Du døde til Zed - level 11 mod 13')), `duel i loggen: ${JSON.stringify(lp.log)}`);
     assert(lp.log.some((l) => l.text.startsWith('Du dræbte Zed (med hjælp)')), 'kill i loggen');
+
+    // OBS-klip (obsClips, standard fra): ingen forbindelse og ingen beskeder - heller ikke ved dit dødsfald (1230)
+    await wait(3500);
+    assert.strictEqual(obsLog.connections, 0, 'OBS slået fra: ingen forbindelsesforsøg');
+    assert(!/OBS/.test(out), 'OBS slået fra: ingen beskeder');
+    assert.strictEqual((await gui('GET', '/state')).body.obs, null, 'ingen OBS-status når slået fra');
+    // Slå til i vinduet -> forbinder med adgangskode (sha256-håndtryk), starter replay bufferen
+    assert.strictEqual((await gui('POST', '/api/obs', { enabled: true })).body.enabled, true);
+    await waitFor(() => obsLog.requests.includes('StartReplayBuffer'), 10000, 'OBS replay buffer startet');
+    assert.strictEqual(obsLog.authOk, true, 'auth-håndtryk godkendt');
+    assert.strictEqual(JSON.parse(fs.readFileSync(env.LOL_HELPER_CONFIG, 'utf8')).obsClips, true, 'obsClips gemt i config.json');
+    await waitFor(() => out.includes('OBS forbundet'), 5000, 'OBS-status');
+    // Du dør (til Darius) -> efter ca. 3 sek. SaveReplayBuffer, og klippets sti hentes
+    const diedAt = Date.now();
+    live.data.events.Events.push({ EventID: 24, EventName: 'ChampionKill', EventTime: 1234, KillerName: 'Tank', VictimName: 'Mig', Assisters: [] });
+    await waitFor(() => obsLog.requests.includes('SaveReplayBuffer'), 10000, 'SaveReplayBuffer');
+    assert(Date.now() - diedAt >= 2500, 'venter ca. 3 sek. efter dødsfaldet');
+    await waitFor(() => out.includes('OBS: klip af dødsfaldet 20:34 gemt (Replay 1.mp4)'), 15000, 'klip gemt');
+    assert.strictEqual(obsLog.saves, 1, 'ét klip pr. dødsfald');
+    assert(!out.includes(OBS_PASSWORD), 'adgangskoden logges aldrig');
+    assert.strictEqual(obsLog.connections, 1, 'én forbindelse');
     // Lanes lige nu: alle 5 lanes med styrkeforhold
     const lanes = (await gui('GET', '/state')).body.live.lanes;
     assert.deepStrictEqual(lanes?.rows.map((r) => r.lane), ['Top', 'Jungle', 'Mid', 'Bot', 'Support'], JSON.stringify(lanes));
@@ -869,10 +1141,39 @@ server.listen(0, '127.0.0.1', async () => {
     assert(out.includes('Kampoversigt: Ahri'), 'log med kampoversigt');
     assert.deepStrictEqual(g.duels?.map((d) => d.won), [false, true], `dueller i historikken: ${JSON.stringify(g.duels)}`);
     assert.strictEqual(g.balanceEnd, 'Fordel Zed', 'styrkeforhold ved slut');
-    assert.deepStrictEqual(g.deathLog?.map((d) => [d.t, d.killer, d.helpers]), [[1230, 'Zed', 0]], `dødsfald: ${JSON.stringify(g.deathLog)}`);
+    assert.deepStrictEqual(g.deathLog?.map((d) => [d.t, d.killer, d.helpers]), [[1230, 'Zed', 0], [1234, 'Darius', 0]], `dødsfald: ${JSON.stringify(g.deathLog)}`);
     assert(/^level 11 mod 13/.test(g.deathLog[0].context), g.deathLog[0].context);
     assert(g.lessons?.[0]?.startsWith('Sammenligning med dine egne kampe kommer efter 3 kampe med Ahri'), JSON.stringify(g.lessons));
     assert(out.includes('dueller mod Zed: 1-1'), 'dueller i kampoversigten');
+
+    // Kampgennemgang: kampens id fra klienten (gameflow-session), kamp + timeline hentet efter kampen
+    let rv;
+    for (let i = 0; i < 40 && !((rv = (await gui('GET', '/state')).body.reviews?.[0])?.review); i++) await wait(500);
+    assert(rv?.review, `kampgennemgang: ${JSON.stringify(rv)}`);
+    assert.strictEqual(rv.champion, 'Ahri');
+    assert.deepStrictEqual(rv.review.deaths.map((d) => [d.t, d.killer, d.by, d.x, d.y]), [[300, 'Zed', 'lane', 7000, 7400]], JSON.stringify(rv.review.deaths));
+    assert.strictEqual(rv.review.opp?.name, 'Zed');
+    assert.strictEqual(rv.review.jg?.name, 'Graves');
+    assert.strictEqual(rv.review.gold.length, 13);
+    assert.deepStrictEqual(rv.review.gold[10], [10, -500], 'guldforskel ved 10 min');
+    assert.deepStrictEqual(rv.review.items.map((i) => [i.id, i.t]), [['3020', 400], ['6655', 900]], 'første items (ITEM_UNDO fortryder et køb)');
+    assert.deepStrictEqual(rv.review.path, [], 'ingen jungle-rute for mid');
+    const hist = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games[0];
+    assert.strictEqual(hist.gameId, 4242, 'kampens id gemt');
+    assert(!JSON.stringify(hist).includes('participantFrames') && JSON.stringify(hist.review).length < 2000, 'kun et kort uddrag i history.json');
+    // Video af dødsfaldet: liste i gennemgangen + afspilning kun af programmets egne klip
+    assert.deepStrictEqual(rv.clips.map((c) => [c.t, c.killer, c.name]), [[1234, 'Darius', 'Replay 1.mp4']], JSON.stringify(rv.clips));
+    const base8 = /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
+    const clipRes = await fetch(`${base8}/clip?f=${encodeURIComponent(rv.clips[0].file)}`);
+    assert.strictEqual(clipRes.status, 200, 'klip kan afspilles');
+    assert.strictEqual((await clipRes.arrayBuffer()).byteLength, 2048);
+    const ranged = await fetch(`${base8}/clip?f=${encodeURIComponent(rv.clips[0].file)}`, { headers: { Range: 'bytes=0-99' } });
+    assert.strictEqual(ranged.status, 206, 'spoling (Range)');
+    assert.strictEqual((await ranged.arrayBuffer()).byteLength, 100);
+    assert.strictEqual((await fetch(`${base8}/clip?f=${encodeURIComponent(oldClip)}`)).status, 403, 'andre filer i replay-mappen afvises');
+    assert.strictEqual((await fetch(`${base8}/clip?f=${encodeURIComponent(env.LOL_HELPER_CONFIG)}`)).status, 403, 'filer uden for replay-mappen afvises');
+    assert.strictEqual((await fetch(`${base8}/clip?f=${encodeURIComponent(path.join(obsLog.dir, '..', 'replays', '..', 'config.json'))}`)).status, 403, '.. i stien afvises');
+    console.log('Kampgennemgang:', JSON.stringify({ død: rv.review.deaths, guld10: rv.review.gold[10], items: rv.review.items.map((i) => i.name), klip: rv.clips.map((c) => c.name) }));
     if (process.env.HOLD_END) {
       state.phase = 'EndOfGame';
       console.log('HOLD', /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1]);
@@ -882,6 +1183,9 @@ server.listen(0, '127.0.0.1', async () => {
     // 8z) config.json: BOM-filen blev læst, og stemme-knappen bevarede resten af indstillingerne
     assert(!out.includes('Kunne ikke læse config.json'), 'config.json med BOM læses');
     assert.strictEqual(JSON.parse(fs.readFileSync(env.LOL_HELPER_CONFIG, 'utf8')).remoteLan, true, 'stemme-knappen bevarer de andre indstillinger');
+
+    // 8p) Dine mønstre + ældre kampes gennemgang: en ekstra kopi af programmet med en syntetisk historik
+    await patternsTest(cmd, args, env, tmp);
 
     // 9) Telefon-adgang: kræver nøgle udefra, POST kun som JSON
     if (process.env.NO_REMOTE) throw new Error('SKIP_REMOTE');
@@ -932,6 +1236,7 @@ server.listen(0, '127.0.0.1', async () => {
     liveServer.close();
     mcpServer.close();
     opggWeb.close();
+    obsServer.close();
     if (!hadToken) fs.rmSync(tokenFile, { force: true });
     fs.rmSync(tmp, { recursive: true, force: true });
   }
