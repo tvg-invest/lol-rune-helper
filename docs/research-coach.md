@@ -110,3 +110,17 @@ Kørt på de 51 timelines fra klienten (23 LeBlanc MID, 15 JUNGLE: Lee Sin 7, Ev
 
 JUNGLE: **Gank lanes der kan følge op** - lykkede ganks før 10 min 1,1 pr. kamp i nederlag mod 1,6 i sejre; 10 top, 3 mid, 15 bot,
 og i 8 af 28 døde han selv inden for 30 sek.
+
+## "Se det i replayet" (v1.22.0) - kilder til endpoints (tjekket 9/11-2026)
+
+| Hvad | Kilde |
+|---|---|
+| Klientens replay-endpoints og typer (configuration, rofls/path, metadata/{gameId}, rofls/{gameId}/download og /watch med `LolReplaysReplayContextData {componentType}`, metadata-states) | LCU `/help?format=Full` fra Tobias' klient (patch 16.22.834.8910), kun GET |
+| `componentType: "replay-button_match-history"` | LeagueAkari (`src/shared/http-api-axios-helper/league-client/replays.ts`), dysolix/hasagi-core (`docs/Common-Endpoints.md`), wooto/lol-replay-recorder |
+| Metadata giver 404 før download; `downloadProgress` er ikke altid en procent; `watch` starter spillet og `isPlayingReplay` bliver `true` | github.com/wnzzer/rank-analysis, `docs/superpowers/specs/2026-07-27-match-replay-design.md` (målt på en rigtig klient 16.14) |
+| Replay API: slået fra som standard, `[General] EnableReplayApi=1` i game.cfg, `GET /replay/game`, `GET/POST /replay/playback` | https://developer.riotgames.com/docs/lol#game-client-api_replay-api |
+| Felterne `time`, `paused`, `speed`, `length`, `seeking` i `/replay/playback` | Riots League Director: https://github.com/RiotGames/leaguedirector (`leaguedirector/api.py`) |
+
+Tobias' game.cfg (9/11-2026) har allerede linjen `EnableReplayApi=0` under `[General]`. Ikke verificeret mod en rigtig klient:
+POST download/watch (ikke kørt på hans pc), at `/replay/playback` `time` er kamptid i sekunder som timelinens, og at spillet
+beholder `EnableReplayApi=1` når det selv skriver game.cfg.

@@ -237,6 +237,32 @@ før dragen spawner, og gå så mod dragen."
 - Positionerne i klientens timeline er pr. minut, så "ved dragen" er omtrentligt.
 - Kun før og efter kampen - intet under kampen. Slå fra med "coach": false.
 
+SE DET I REPLAYET (NYT I 1.22)
+Ved hvert dødsfald i kampgennemgangen og ved coachens øjeblikke står en knap
+"Se det (14:32)". Den henter kampens replay i League-klienten og starter det.
+- Uden mere: replayet starter, og du spoler selv (vinduet siger hvortil).
+- Med replay-spring: programmet hopper selv til 10 sek. før øjeblikket. Klik "Slå
+  replay-spring til" nederst i kampgennemgangen. Det kræver Riots Replay API, som slås
+  til med linjen EnableReplayApi=1 under [General] i League's game.cfg. Programmet laver
+  en backup (game.cfg.lrh-backup), ændrer kun den ene linje og sætter den gamle værdi
+  tilbage, når du klikker "Slå replay-spring fra". Det sker KUN når du selv klikker.
+- Knappen er slået fra (med grunden) under champion select, i kø, i kamp, når klienten
+  ikke kører - og når kampen er fra en anden patch: replays kan kun ses på samme patch.
+  Riot gemmer heller ikke replays for evigt.
+
+KLIP VED RÅDENE (NYT I 1.22)
+Har du OBS-klip slået til, står klippet nu ved selve dødsfaldet ("Se klip"), og hvert
+coach-råd har "Se N klip" med netop de dødsfald rådet handler om (fx "Dø ikke lige før et
+objective" eller "1 mod 2"). Uden klip: replay-knapper i stedet.
+
+DIN CHAMPION-PULJE (NYT I 1.22)
+Pr. rolle: sejre af kampe, form (dine sidste 5 kampe) og mastery for hver champion, de
+2-3 du vinder mest med, og hvor mange forskellige champions du har spillet i dine sidste
+20 kampe i rollen. "Få kampe" står ved champions med under 20 kampe (iTero: win rate
+stiger typisk de første ca. 20 kampe på en champion). I champion select står én linje,
+når du hover: "LeBlanc: din bedste MID-champion (9 af 15)" eller "Ny champion for dig:
+0 kampe i rollen". Slå fra med "championPool": false.
+
 Vil du bruge et navn i stedet for IP (fx Tailscale MagicDNS), så skriv det i
 "remoteHosts": ["min-pc"].
 
@@ -246,7 +272,8 @@ INDSTILLINGER (config.json ved siden af programmet)
 - setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice / voice: true eller false
 - enemyAlerts: true = stemme/overlay om lane-modstanderens køb og level 6, "X er fed",
   FED-mærker og "har ult" (forbudt efter Overwolfs Riot-regler); false = slået fra
-- scouting / enemyJungle / matchReview / patterns / climbCheck / coach: true eller false (standard true)
+- scouting / enemyJungle / matchReview / patterns / climbCheck / coach / championPool: true eller false (standard true)
+- replayJump: sættes af knappen "Slå replay-spring til/fra" - ret den ikke selv
 - obsClips: true = video af dine dødsfald med OBS (standard false); obsPassword: OBS'
   WebSocket-adgangskode; obsPort: standard 4455
 - flashKey: "keep", "D" eller "F"

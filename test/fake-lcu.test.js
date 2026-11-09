@@ -101,8 +101,11 @@ const server = http.createServer((req, res) => {
     const auth = Buffer.from(`riot:${PASSWORD}`).toString('base64');
     // Anden kopi af programmet (mønster-testen) logger ind med sin egen adgangskode og har sin egen fase.
     const second = req.headers.authorization === `Basic ${Buffer.from('riot:testpw2').toString('base64')}`;
-    if (req.headers.authorization !== `Basic ${auth}` && !second) { res.writeHead(401); return res.end(); }
+    // Tredje kopi (replay-testen): egen fase og klientens replay-endpoints.
+    const third = req.headers.authorization === `Basic ${Buffer.from('riot:testpw3').toString('base64')}`;
+    if (req.headers.authorization !== `Basic ${auth}` && !second && !third) { res.writeHead(401); return res.end(); }
     if (second && req.url === '/lol-gameflow/v1/gameflow-phase') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(state.phase2)); }
+    if (third && fakeReplayLcu(req, res, body)) return;
     calls.push({ method: req.method, url: req.url, body: body ? JSON.parse(body) : undefined });
     const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(obj === undefined ? '' : JSON.stringify(obj)); };
     const key = `${req.method} ${req.url}`;
@@ -336,6 +339,268 @@ async function sseUntil(base, pred, ms) {
   return found;
 }
 
+// ---------- "Se det i replayet": falske replay-endpoints i klienten + falsk Replay API (spillets port) ----------
+// Formen er den rigtige klients (LCU /help?format=Full, patch 16.22): configuration, rofls/path, metadata/{id}
+// ({state, gameId, downloadProgress}; 404 før der er bedt om download), rofls/{id}/download og /watch ({componentType}).
+const rp = { phase: 'Lobby', conf: null, dir: null, meta: {}, expired: new Set(), downloads: [], watches: [], list: [],
+  apiUp: false, apiUpAt: 0, time: 0, playbackPosts: [], liveHits: 0, other: [] };
+const rpConf = () => ({ gameVersion: '16.22.834.8910', isInTournament: false, isLoggedIn: true, isPatching: false, isPlayingGame: false, isPlayingReplay: false,
+  isReplaysEnabled: true, isReplaysForEndOfGameEnabled: true, isReplaysForMatchHistoryEnabled: true, minServerVersion: '', minutesUntilReplayConsideredLost: 30 });
+function fakeReplayLcu(req, res, body) {
+  const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(obj === undefined ? '' : JSON.stringify(obj)); return true; };
+  const key = `${req.method} ${req.url}`;
+  if (key === 'GET /lol-gameflow/v1/gameflow-phase') return send(200, rp.phase);
+  if (key === 'GET /lol-replays/v1/configuration') return send(200, rp.conf);
+  if (key === 'GET /lol-replays/v1/rofls/path') return send(200, rp.dir);
+  if (key.startsWith('GET /lol-match-history/v1/products/lol/current-summoner/matches')) return send(200, { games: { games: rp.list } });
+  let m = /^GET \/lol-replays\/v1\/metadata\/(\d+)$/.exec(key);
+  if (m) {
+    const x = rp.meta[m[1]];
+    if (!x) return send(404, { errorCode: 'RPC_ERROR', httpStatus: 404, message: 'Plugin found no local metadata. Try using the POST metadata create endpoint first.' });
+    const out = { ...x };
+    if (x.state === 'downloading') rp.meta[m[1]] = { ...x, state: 'watch', downloadProgress: 100 }; // næste opslag: klar
+    return send(200, out);
+  }
+  m = /^POST \/lol-replays\/v1\/rofls\/(\d+)\/(download|watch)$/.exec(key);
+  if (m) {
+    const b = body ? JSON.parse(body) : undefined;
+    if (m[2] === 'download') {
+      rp.downloads.push({ id: Number(m[1]), body: b });
+      rp.meta[m[1]] = rp.expired.has(Number(m[1])) ? { state: 'missingOrExpired', gameId: Number(m[1]), downloadProgress: 0 } : { state: 'downloading', gameId: Number(m[1]), downloadProgress: 40 };
+    } else {
+      rp.watches.push({ id: Number(m[1]), body: b });
+      rp.conf.isPlayingReplay = true;
+      rp.apiUpAt = Date.now() + 300; // spillet indlæser replayet
+      rp.apiUp = true;
+    }
+    return send(204);
+  }
+  if (req.url.startsWith('/lol-replays/')) { rp.other.push(key); return send(404, { message: 'ukendt' }); }
+  return false;
+}
+// Falsk spil-port (2999): Replay API'et + Live Client Data, kun "oppe" mens et replay kører. Nede = forbindelsen lukkes (som en lukket port).
+const replayServer = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (c) => (body += c));
+  req.on('end', () => {
+    if (!rp.apiUp || Date.now() < rp.apiUpAt) return req.socket.destroy();
+    const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+    if (req.url === '/liveclientdata/allgamedata' || req.url === '/liveclientdata/gamestats') { rp.liveHits++; return send(200, liveGame(3191)); }
+    if (req.url === '/replay/game') return send(200, { processID: 4242 });
+    if (req.url === '/replay/playback' && req.method === 'GET') return send(200, { paused: false, seeking: false, time: rp.time, speed: 1, length: 1560 });
+    if (req.url === '/replay/playback' && req.method === 'POST') {
+      const b = JSON.parse(body);
+      rp.playbackPosts.push(b);
+      if (typeof b.time === 'number') rp.time = b.time;
+      return send(200, { paused: false, seeking: false, time: rp.time, speed: 1, length: 1560 });
+    }
+    send(404, {});
+  });
+});
+
+async function replayTest(cmd, args, baseEnv, tmp) {
+  const dir = path.join(tmp, 'replay');
+  fs.mkdirSync(path.join(dir, 'Config'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'clips'));
+  fs.mkdirSync(path.join(dir, 'Replays'));
+  rp.dir = path.join(dir, 'Replays');
+  rp.conf = rpConf();
+  // League's game.cfg (CRLF som på Windows). Må ikke røres uden opt-in.
+  const cfgFile = path.join(dir, 'Config', 'game.cfg');
+  const cfgOrig = '[General]\r\nEnableReplayApi=0\r\nWindowMode=2\r\n[HUD]\r\nShowTimestamps=1\r\n';
+  fs.writeFileSync(cfgFile, cfgOrig);
+  const cfgNow = () => fs.readFileSync(cfgFile, 'utf8');
+  // Kampe i klientens rigtige format: 8001 (patch 16.22, med klip), 8002 (patch 16.21), 8003 (16.22, udløbet hos Riot).
+  const start = Date.parse('2026-11-09T12:00:00Z');
+  const versions = { 8001: '16.22.834.8910', 8002: '16.21.830.1234', 8003: '16.22.834.8910' };
+  const games = [];
+  for (const id of [8001, 8002, 8003]) {
+    MATCHES[id] = coachMatch(id, 'MID', false);
+    MATCHES[id].game.gameVersion = versions[id];
+    MATCHES[id].game.platformId = 'EUN1';
+  }
+  rp.expired.add(8003);
+  const clip = (n) => { const p = path.join(dir, 'clips', `Replay ${n}.mp4`); fs.writeFileSync(p, Buffer.alloc(1024, n)); return p; };
+  const g0 = { date: new Date(start).toISOString(), championId: 7, champion: 'LeBlanc', gameMode: 'CLASSIC', mapNumber: 11, position: 'MID', result: 'Nederlag',
+    duration: 1560, kills: 2, deaths: 3, assists: 1, cs: 180, csPerMin: 6.9, items: [], buys: [], gameId: 8001,
+    // Live-tiden ligger lidt fra timelinens (som i de rigtige kampe: højst 1 sek.) - og ét klip uden dødsfald i timelinen.
+    deathLog: [{ t: 305.4, killer: 'Zed', helpers: 0, clip: clip(1) }, { t: 800.7, killer: 'Zed', helpers: 1, clip: clip(2) }, { t: 1500, killer: 'Darius', helpers: 0, clip: clip(3) }],
+    review: { v: 3, side: 'BLUE', deaths: [], gold: [], team: [], at: {}, path: [], jgPath: [], ganks: [], objectives: [] } };
+  games.push(g0);
+  for (const [i, id] of [[1, 8002], [2, 8003]]) {
+    games.push({ ...g0, date: new Date(start - i * 3600e3).toISOString(), gameId: id, deathLog: [] });
+  }
+  // Champion-puljen: LeBlanc MID 9 af 15 (3 ovenfor + 12 her), Ahri MID 1 af 1, Syndra MID 0 af 2, Lee Sin JUNGLE 2 af 3.
+  const extra = (champ, championId, position, win, i) => games.push({ date: new Date(start - (10 + i) * 3600e3).toISOString(), championId, champion: champ, gameMode: 'CLASSIC',
+    mapNumber: 11, position, result: win ? 'Sejr' : 'Nederlag', duration: 1700, kills: 1, deaths: 1, assists: 1, cs: 150, csPerMin: 6, items: [], buys: [] });
+  let k = 0;
+  for (let i = 0; i < 12; i++) extra('LeBlanc', 7, 'MID', i < 9, k++);
+  extra('Ahri', 103, 'MID', true, k++);
+  extra('Syndra', 134, 'MID', false, k++); extra('Syndra', 134, 'MID', false, k++);
+  for (let i = 0; i < 3; i++) extra('Lee Sin', 64, 'JUNGLE', i < 2, k++);
+  fs.writeFileSync(path.join(dir, 'history.json'), JSON.stringify({ games }));
+  fs.writeFileSync(path.join(dir, 'config.json'), '{}');
+  // Klientens kamphistorik (kun dig som deltager, som den rigtige liste).
+  rp.list = [8001, 8002, 8003].map((id, i) => ({ ...MATCHES[id].game, gameCreation: start - i * 3600e3 - 1700e3, gameDuration: 1560, participants: [MATCHES[id].game.participants[0]] }));
+  rp.phase = 'Lobby';
+  const env = { ...baseEnv, LOL_HELPER_HISTORY: path.join(dir, 'history.json'), LOL_HELPER_CONFIG: path.join(dir, 'config.json'),
+    LOL_HELPER_SHAPES: path.join(dir, 'lcu-shapes.json'), LOL_HELPER_LCU: baseEnv.LOL_HELPER_LCU.replace(/:[^:]+$/, ':testpw3'), LOL_HELPER_REMOTE: '',
+    // Spillets port: Replay API og live-data på samme port (som 2999 i virkeligheden).
+    LOL_HELPER_LIVE: `http:${replayServer.address().port}`, LOL_HELPER_GAME_CFG: cfgFile, LOL_HELPER_REPLAY_POLL_MS: '100' };
+  const child = spawn(cmd, args, { env });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  const base = () => /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
+  const st = async () => (await fetch(base() + '/state')).json();
+  const api = async (p, b) => { const r = await fetch(base() + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) }); return { status: r.status, body: await r.json() }; };
+  const until = async (fn, ms, what) => { let s; const end = Date.now() + ms; while (Date.now() < end) { s = await st(); if (fn(s)) return s; await wait(200); } throw new Error(`Timeout: ${what}: ${JSON.stringify(s?.replay)}`); };
+  try {
+    await waitFor(() => /Vindue: http/.test(out), 30000, 'replay-kopien starter');
+    // Klientens replay-indstillinger + gennemgange i v5 (med patch) hentes i lobbyen.
+    let s = await until((x) => x.replay?.clientPatch === '16.22' && x.reviews?.length >= 3 && x.reviews.every((r) => r.review), 30000, 'replay-tilstand og gennemgange');
+    assert.strictEqual(cfgNow(), cfgOrig, 'game.cfg er ikke rørt uden opt-in');
+    assert.strictEqual(s.replay.jump, false);
+    assert.strictEqual(s.replay.optIn, false);
+    assert.strictEqual(s.replay.cfgFound, true);
+    assert.strictEqual(s.replay.block, null, `ingen blokering i lobbyen: ${s.replay.block}`);
+    const saved = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games;
+    assert.deepStrictEqual(saved.slice(0, 3).map((g) => [g.review.v, g.review.gv, g.review.pf]), [[5, '16.22.834.8910', 'EUN1'], [5, '16.21.830.1234', 'EUN1'], [5, '16.22.834.8910', 'EUN1']], 'v5 med patch og platform');
+    const rv = (id) => s.reviews.find((r) => r.gameId === id);
+    assert.strictEqual(rv(8001).replay.ok, true);
+    assert.strictEqual(rv(8002).replay.ok, false);
+    assert(/patch 16\.21 - klienten er på 16\.22/.test(rv(8002).replay.reason), rv(8002).replay.reason);
+    // OBS-klip ved dødsfaldene i gennemgangen (live-tid 305,4 og 800,7 mod timelinens 305 og 800); klippet ved 25:00 har intet dødsfald.
+    assert.deepStrictEqual(rv(8001).review.deaths.map((d) => [d.t, d.clip && d.clip.name]), [[305, 'Replay 1.mp4'], [800, 'Replay 2.mp4'], [1320, null]], 'klip ved dødsfald');
+    assert.deepStrictEqual(rv(8001).clips.map((c) => c.name), ['Replay 3.mp4'], 'kun klip uden dødsfald står for sig');
+    const clipRes = await fetch(`${base()}/clip?f=${encodeURIComponent(rv(8001).review.deaths[0].clip.file)}`);
+    assert.strictEqual(clipRes.status, 200, 'klippet ved dødsfaldet kan afspilles');
+
+    // Champion-puljen (din egen historik + klientens liste + mastery).
+    const pool = s.pool;
+    assert(pool, 'pulje-kort');
+    const mid = pool.roles.find((r) => r.role === 'MID');
+    assert.strictEqual(mid.games, 18);
+    assert.deepStrictEqual(mid.champions.map((c) => [c.name, c.wins, c.games, c.few]), [['LeBlanc', 9, 15, true], ['Ahri', 1, 1, true], ['Syndra', 0, 2, true]], 'Wilson: 9 af 15 før 1 af 1');
+    assert.deepStrictEqual(mid.best, [7, 103], 'du vinder mest med LeBlanc og Ahri (Syndra har ingen sejre)');
+    assert.strictEqual(mid.distinct, 3);
+    assert.strictEqual(mid.last, 18);
+    assert.deepStrictEqual(mid.champions[0].form, [false, false, false, true, true], 'form: nyeste først');
+    assert.deepStrictEqual(mid.champions[0].mastery, { points: 300000, level: null }, 'mastery fra klienten');
+    assert.strictEqual(mid.topVsRest, null, 'under 3 kampe uden for top 2 -> ingen sammenligning');
+    assert.deepStrictEqual(pool.client && [pool.client.games, pool.client.champions[0].name], [3, 'LeBlanc'], 'klientens liste');
+    assert(pool.sources[0].url.includes('itero.gg'));
+
+    // Champion select: én linje når du hover - bedste champion, en anden, og en ny champion.
+    rp.phase = 'ChampSelect';
+    state.myIntent = 7;
+    s = await until((x) => x.poolPick?.championId === 7, 15000, 'pulje-linje for LeBlanc');
+    assert.strictEqual(s.poolPick.text, 'LeBlanc: din bedste MID-champion (9 af 15)');
+    assert(/få kampe \(under 20\) · 300\.000 mastery-point/.test(s.poolPick.extra), s.poolPick.extra);
+    assert.strictEqual(s.replay.block, 'Ikke under champion select.');
+    const busy = await api('/api/replay', { gameId: 8001, t: 305 });
+    assert.strictEqual(busy.status, 409, 'replay afvises i champion select');
+    assert.strictEqual(busy.body.error, 'Ikke under champion select.');
+    const busyJump = await api('/api/replay-jump', { enabled: true });
+    assert.strictEqual(busyJump.status, 409, 'opt-in afvises i champion select');
+    assert.strictEqual(cfgNow(), cfgOrig, 'game.cfg uændret');
+    state.myIntent = 103;
+    s = await until((x) => x.poolPick?.championId === 103, 15000, 'pulje-linje for Ahri');
+    assert.strictEqual(s.poolPick.text, 'Ahri: 1 af 1 i MID - nr. 2 af dine 3 MID-champions (bedste: LeBlanc 9 af 15)');
+    state.myIntent = 61;
+    s = await until((x) => x.poolPick?.championId === 61, 15000, 'pulje-linje for Orianna');
+    assert.strictEqual(s.poolPick.text, 'Ny champion for dig: 0 kampe i rollen MID');
+    state.myIntent = 0;
+    rp.phase = 'Lobby';
+    s = await until((x) => !x.poolPick && x.replay?.block === null, 15000, 'tilbage i lobbyen');
+    assert.strictEqual(rp.downloads.length + rp.watches.length, 0, 'intet replay startet indtil nu');
+
+    // 1) Uden opt-in: replayet hentes og startes, men der hoppes ikke (game.cfg røres ikke, ingen kald til Replay API'et).
+    let r = await api('/api/replay', { gameId: 8001, t: 305 });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    s = await until((x) => x.replay.job?.done || x.replay.job?.error, 15000, 'replay uden spring');
+    assert.strictEqual(s.replay.job.error, null, s.replay.job.error);
+    assert(/Spol selv til 4:55 \(10 sek\. før 5:05\)/.test(s.replay.job.step), s.replay.job.step);
+    assert.deepStrictEqual(rp.downloads, [{ id: 8001, body: { componentType: 'replay-button_match-history' } }], 'download med componentType');
+    assert.deepStrictEqual(rp.watches, [{ id: 8001, body: { componentType: 'replay-button_match-history' } }], 'watch med componentType');
+    assert.strictEqual(rp.playbackPosts.length, 0, 'uden opt-in: intet hop');
+    assert.strictEqual(cfgNow(), cfgOrig, 'game.cfg uændret uden opt-in');
+    // Replayet kører på spillets port: live-løkken må ikke tage det for en kamp.
+    await waitFor(() => rp.liveHits > 0 || Date.now() - rp.apiUpAt > 4000, 8000, 'live-løkken ser porten');
+    await wait(1500);
+    s = await st();
+    assert.strictEqual(s.live, null, 'et replay er ikke en kamp');
+    assert(!/Live: /.test(out), 'ingen live-kamp i loggen');
+    // Mens spillet/replayet kører, kan replay-spring ikke slås til.
+    const running = await api('/api/replay-jump', { enabled: true });
+    assert.strictEqual(running.status, 409);
+    assert(/Luk spillet/.test(running.body.error), running.body.error);
+    assert.strictEqual(cfgNow(), cfgOrig);
+    // Replayet lukkes.
+    rp.apiUp = false; rp.conf.isPlayingReplay = false;
+
+    // 2) Udløbet hos Riot.
+    r = await api('/api/replay', { gameId: 8003, t: 100 });
+    assert.strictEqual(r.status, 200);
+    s = await until((x) => x.replay.job?.gameId === 8003 && (x.replay.job.done || x.replay.job.error), 15000, 'udløbet replay');
+    assert.strictEqual(s.replay.job.error, 'Riot har ikke replayet længere (udløbet).');
+    // Gammel patch afvises før noget kald.
+    r = await api('/api/replay', { gameId: 8002, t: 100 });
+    assert.strictEqual(r.status, 409);
+    assert(/Replays kan kun ses på samme patch/.test(r.body.error));
+    assert.strictEqual(rp.downloads.filter((d) => d.id === 8002).length, 0);
+    // Ukendt kamp (ikke i din historik) afvises.
+    assert.strictEqual((await api('/api/replay', { gameId: 999, t: 1 })).status, 409);
+
+    // 3) Opt-in: backup + EnableReplayApi=1 (kun den linje), CRLF bevaret.
+    r = await api('/api/replay-jump', { enabled: true });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    assert.strictEqual(cfgNow(), cfgOrig.replace('EnableReplayApi=0', 'EnableReplayApi=1'), 'kun den ene linje ændret');
+    assert.strictEqual(fs.readFileSync(cfgFile + '.lrh-backup', 'utf8'), cfgOrig, 'backup af den oprindelige fil');
+    let conf = JSON.parse(fs.readFileSync(env.LOL_HELPER_CONFIG, 'utf8'));
+    assert.strictEqual(conf.replayJump, true);
+    assert.strictEqual(conf.replayApiBefore, '0', 'den gamle værdi huskes');
+    s = await until((x) => x.replay.jump && x.replay.optIn, 10000, 'replay-spring til');
+
+    // 4) Med opt-in: replayet (allerede hentet) startes, programmet venter på Replay API'et og hopper til 10 sek. før.
+    const dl = rp.downloads.length;
+    r = await api('/api/replay', { gameId: 8001, t: 800 });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    s = await until((x) => x.replay.job?.t === 800 && (x.replay.job.done || x.replay.job.error), 20000, 'replay med spring');
+    assert.strictEqual(s.replay.job.error, null, s.replay.job.error);
+    assert.strictEqual(s.replay.job.step, 'Replayet står på 13:10 - 10 sek. før 13:20.');
+    assert.strictEqual(rp.downloads.length, dl, 'allerede hentet: ingen ny download');
+    assert.deepStrictEqual(rp.playbackPosts, [{ time: 790, paused: false }], 'POST /replay/playback {time, paused}');
+    // Samme replay kører stadig: næste knap hopper bare (ingen ny watch).
+    const w = rp.watches.length;
+    r = await api('/api/replay', { gameId: 8001, t: 1320 });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    s = await until((x) => x.replay.job?.t === 1320 && (x.replay.job.done || x.replay.job.error), 20000, 'hop i kørende replay');
+    assert.strictEqual(s.replay.job.step, 'Replayet står på 21:50 - 10 sek. før 22:00.');
+    assert.strictEqual(rp.watches.length, w, 'ingen ny watch');
+    assert.strictEqual(rp.playbackPosts.at(-1).time, 1310);
+    rp.apiUp = false; rp.conf.isPlayingReplay = false;
+
+    // 5) Slå fra: den gamle værdi tilbage - filen er som før.
+    r = await api('/api/replay-jump', { enabled: false });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    assert.strictEqual(cfgNow(), cfgOrig, 'game.cfg som før opt-in');
+    conf = JSON.parse(fs.readFileSync(env.LOL_HELPER_CONFIG, 'utf8'));
+    assert.strictEqual(conf.replayJump, false);
+    assert(!('replayApiBefore' in conf));
+    assert.deepStrictEqual(rp.other, [], `ingen ukendte replay-endpoints: ${rp.other}`);
+    assert(!/Fejl/.test(out), `ingen fejl i replay-kopien: ${out}`);
+    console.log('Replay:', rp.downloads.length, 'download,', rp.watches.length, 'watch, hop:', JSON.stringify(rp.playbackPosts));
+    console.log('Champion-pulje (MID):', mid.champions.map((c) => `${c.name} ${c.wins}/${c.games}`).join(', '));
+  } catch (e) {
+    console.log(out);
+    throw e;
+  } finally {
+    state.myIntent = 0;
+    child.kill();
+  }
+}
+
 // "Dine mønstre" fra en syntetisk historik (12 LeBlanc mid-kampe) + gennemgang af en ældre kamp fra klientens kamphistorik.
 // Kører som en ekstra kopi af programmet (egen config og historik, egen fase i den falske klient).
 async function patternsTest(cmd, args, baseEnv, tmp) {
@@ -430,7 +695,7 @@ async function patternsTest(cmd, args, baseEnv, tmp) {
     assert.deepStrictEqual(sy.review.items.map((x) => [x.id, x.t]), [['6655', 700]], 'items fra live-data (klientens timeline har ingen køb)');
     assert.strictEqual(sy.result, 'Sejr', 'manglende resultat udfyldt fra klienten');
     const syHist = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games.find((x) => x.gameId === 6666);
-    assert.strictEqual(syHist.review.v, 4, 'gennemgangen er gemt i det nye format');
+    assert.strictEqual(syHist.review.v, 5, 'gennemgangen er gemt i det nye format');
     assert(syHist.review.stats && Array.isArray(syHist.review.csm) && Array.isArray(syHist.review.objectives), 'v3: stats, CS pr. minut og objectives');
 
     // Klatre-tjekket: de 12 LeBlanc-kampe (v2-gennemgange vises stadig) + tilt fra klientens kamphistorik.
@@ -453,7 +718,7 @@ async function patternsTest(cmd, args, baseEnv, tmp) {
     assert(guard && /^2 tab i træk\./.test(guard.text), `tilt-vagten efter 2 tab i træk: ${JSON.stringify(guard)}`);
     const saved = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8'));
     assert.strictEqual(saved.recent.length, 12, 'klientens kamphistorik gemt kompakt i history.json');
-    assert.deepStrictEqual(Object.keys(saved.recent[0]).sort(), ['champ', 'dur', 'id', 'queue', 'start', 'win']);
+    assert.deepStrictEqual(Object.keys(saved.recent[0]).sort(), ['champ', 'dur', 'gv', 'id', 'queue', 'start', 'win']);
     console.log('Klatre-tjek:', climb.last.leaks[0].text, '|', climb.lead, '|', guard.text);
 
     // Ældre kamp: kampens id findes i klientens kamphistorik (samme champion + sluttidspunkt), gennemgangen hentes
@@ -566,6 +831,10 @@ async function coachTest(cmd, args, baseEnv, tmp) {
   };
   // 12 MID-kampe (LeBlanc, 6 sejre) og 11 JUNGLE-kampe (Lee Sin, 6 sejre) - nyeste først: en MID-sejr og et MID-nederlag.
   for (let i = 0; i < 12; i++) add(7000 + i, 'MID', i % 2 === 0, i);
+  // OBS-klip af dødsfaldene i MID-nederlaget 7001 (live-tid lidt fra timelinens 5:05, 13:20 og 22:00).
+  fs.mkdirSync(path.join(dir, 'clips'));
+  const coachClip = (n) => { const p = path.join(dir, 'clips', `Replay c${n}.mp4`); fs.writeFileSync(p, Buffer.alloc(512, n)); return p; };
+  games[1].deathLog = [{ t: 305.6, killer: 'Zed', helpers: 0, clip: coachClip(1) }, { t: 799.5, killer: 'Zed', helpers: 1, clip: coachClip(2) }, { t: 1320.9, killer: 'Viktor', helpers: 0, clip: coachClip(3) }];
   for (let i = 0; i < 11; i++) add(7100 + i, 'JUNGLE', i % 2 === 0, 12 + i);
   // 3 TOP-kampe med coachens tal (v4) - for få til råd: "Spil 7 kampe mere med rollen".
   for (let i = 0; i < 3; i++) {
@@ -593,7 +862,7 @@ async function coachTest(cmd, args, baseEnv, tmp) {
     for (let i = 0; i < 60 && !ready(coach = (await st()).coach); i++) await wait(500);
     assert(coach?.main?.advice?.length, `coach-kort: ${JSON.stringify(coach)}\n${out}`);
     const saved = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games;
-    assert(saved.filter((g) => g.gameId >= 7000).every((g) => g.review.v === 4), 'alle 23 kampe hentet igen i v4');
+    assert(saved.filter((g) => g.gameId >= 7000).every((g) => g.review.v === 5), 'alle 23 kampe hentet igen i v5');
     const m = coach.main;
     assert.strictEqual(m.role, 'MID');
     assert.strictEqual(m.scope, 'dine LeBlanc MID-kampe', 'championen har 10+ kampe i rollen');
@@ -612,6 +881,19 @@ async function coachTest(cmd, args, baseEnv, tmp) {
     if (od) assert.strictEqual(od.evidence, 'Dødsfald der gav fjenden et stort monster: 6 i 6 nederlag (1 pr. kamp) mod 0 i 6 sejre (0 pr. kamp).');
     const alone = m.advice.find((a) => a.key === 'sideAlone');
     if (alone) assert.strictEqual(alone.evidence, 'Dødsfald alene i en sidelane efter 20 min: 6 i 6 nederlag (1 pr. kamp) mod 0 i 6 sejre (0 pr. kamp).');
+    // Klip ved rådene: hvert råd får klippene af netop de dødsfald det handler om.
+    const clipsOf = (key) => m.advice.find((a) => a.key === key)?.media.clips.map((c) => [c.t, c.clip.name, c.gameId]);
+    if (od) assert.deepStrictEqual(clipsOf('objDeath'), [[305, 'Replay c1.mp4', 7001]], 'dø før objective -> klippet fra 5:05');
+    if (keys.includes('outnumbered')) assert.deepStrictEqual(clipsOf('outnumbered'), [[800, 'Replay c2.mp4', 7001]], '1 mod 2 -> klippet fra 13:20');
+    if (alone) assert.deepStrictEqual(clipsOf('sideAlone'), [[1320, 'Replay c3.mp4', 7001]], 'alene i sidelane -> klippet fra 22:00');
+    if (od) assert(/fjenden tog drage 5:10, mens du var død/.test(m.advice.find((a) => a.key === 'objDeath').media.clips[0].what));
+    // Ingen klip til dragen (du var ikke død) - men replay-knapper til de drager du ikke var ved.
+    if (dragon) {
+      const md = m.advice.find((a) => a.key === 'dragon').media;
+      assert.strictEqual(md.clips.length, 0);
+      assert(md.replay && md.replay.gameId === 7001 && md.replay.moments.length === 2, `replay ved dragen: ${JSON.stringify(md)}`);
+      assert.deepStrictEqual(md.replay.moments.map((x) => [x.t, x.what]), [[310, 'Drage 5:10 uden dig - fjenden tog den'], [620, 'Drage 10:20 uden dig - fjenden tog den']]);
+    }
     assert(!keys.includes('gank'), 'ganks er kun et jungle-råd');
     // Jungle: ganks (lykkede = ingen død inden for 30 sek.) - og ikke roams.
     const jg = coach.others.find((o) => o.role === 'JUNGLE');
@@ -629,6 +911,13 @@ async function coachTest(cmd, args, baseEnv, tmp) {
     const ga = lossRv.review.coach?.advice || [];
     assert(ga.length === 3, `3 ting fra kampen: ${JSON.stringify(lossRv.review.coach)}`);
     assert(ga.every((a) => /^I denne kamp/.test(a.game) && a.next && a.url), JSON.stringify(ga));
+    // Kampgennemgangen: klip ved dødsfaldene og ved rådene fra netop denne kamp.
+    assert.deepStrictEqual(lossRv.review.deaths.map((d) => d.clip && d.clip.name), ['Replay c1.mp4', 'Replay c2.mp4', 'Replay c3.mp4']);
+    assert.deepStrictEqual(lossRv.clips, [], 'alle klip hører til et dødsfald');
+    for (const a of ga) {
+      const want = { objDeath: ['Replay c1.mp4'], outnumbered: ['Replay c2.mp4'], sideAlone: ['Replay c3.mp4'] }[a.key];
+      if (want) assert.deepStrictEqual(a.moments.filter((x) => x.clip).map((x) => x.clip.name), want, `klip ved ${a.key}`);
+    }
     console.log('Coach efter kampen:', ga.map((a) => `${a.title}: ${a.game}`).join(' | '));
     // Jungle-nederlaget: ganks i kampgennemgangen har died = true.
     const jgHist = saved.find((g) => g.gameId === 7101);
@@ -667,6 +956,7 @@ liveServer.listen(0, '127.0.0.1');
 mcpServer.listen(0, '127.0.0.1');
 opggWeb.listen(0, '127.0.0.1');
 obsServer.listen(0, '127.0.0.1');
+replayServer.listen(0, '127.0.0.1');
 server.listen(0, '127.0.0.1', async () => {
   const port = server.address().port;
   const livePort = liveServer.address().port;
@@ -1445,6 +1735,9 @@ server.listen(0, '127.0.0.1', async () => {
     // 8q) Coachen: 3-5 konkrete råd fra falske kampe i klientens rigtige format (endnu en kopi af programmet)
     await coachTest(cmd, args, env, tmp);
 
+    // 8r) "Se det i replayet", klip ved rådene og champion-puljen (endnu en kopi, falsk Replay API)
+    await replayTest(cmd, args, env, tmp);
+
     // 9) Telefon-adgang: kræver nøgle udefra, POST kun som JSON
     if (process.env.NO_REMOTE) throw new Error('SKIP_REMOTE');
     const base = /Vindue: http:\/\/127\.0\.0\.1:(\d+)/.exec(out)[1];
@@ -1495,6 +1788,7 @@ server.listen(0, '127.0.0.1', async () => {
     mcpServer.close();
     opggWeb.close();
     obsServer.close();
+    replayServer.close();
     if (!hadToken) fs.rmSync(tokenFile, { force: true });
     fs.rmSync(tmp, { recursive: true, force: true });
   }

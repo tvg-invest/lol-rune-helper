@@ -214,6 +214,21 @@
   .coach-item h3 { margin: 0 0 4px; font-size: 15px; color: var(--gold2); }
   .coach-next { margin-top: 6px; font-size: 13px; }
   .coach-num { font-size: 13px; }
+  .rbtn { font-size: 12px; padding: 2px 8px; margin-left: 6px; }
+  .rbtn[disabled] { opacity: .45; cursor: not-allowed; }
+  .moments { margin-top: 6px; font-size: 13px; }
+  .moments li { margin: 2px 0; }
+  .replay-line { margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: var(--panel2); border-left: 4px solid var(--blue); font-size: 13px; }
+  .replay-line.err { border-left-color: var(--red); }
+  .pool-role { margin-top: 10px; }
+  .pool-row { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 3px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .pool-row img { width: 24px; height: 24px; border-radius: 5px; }
+  .pool-row .nm { min-width: 110px; }
+  .pool-row .best { color: var(--gold2); font-weight: 700; }
+  .form { display: inline-flex; gap: 2px; }
+  .form i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; background: var(--red); }
+  .form i.w { background: #3fbf7f; }
+  .pool-pick { margin: 4px 0 10px; padding: 8px 12px; border-radius: 8px; background: var(--panel2); border-left: 4px solid var(--gold); font-size: 14px; }
   .phone { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
   .phone .qr { background: #fff; padding: 8px; border-radius: 8px; }
   .phone a { color: var(--gold2); word-break: break-all; font-size: 12px; }
@@ -325,6 +340,7 @@ function renderDraft(s) {
     el('header', {},
       el('div', {}, el('h1', {}, 'Champion select'), el('div', { class: 'meta' }, `Din rolle: ${d.position}`), statusLine(s),
         d.myBanTurn ? el('div', { class: 'turn' }, 'DIN TUR TIL AT BANNE') : null)),
+    poolPickLine(s.poolPick),
     guardBox(s.climbGuard),
     el('div', { class: 'grid' },
       el('div', {},
@@ -494,7 +510,11 @@ function reviewCard(s) {
           r.opp ? el('div', { style: 'margin-top:6px' }, `Lane-modstander: ${r.opp.name}`,
             el('span', { class: 'muted', style: 'font-size:11px' }, ` (${OPP_BY[r.oppBy] || '?'})`)) : el('div', { class: 'muted', style: 'margin-top:6px;font-size:12px' }, 'Lane-modstanderen kunne ikke findes i denne kamp.'),
           atLine(r, 10, g), atLine(r, 15, g),
-          r.deaths.length ? el('ul', { class: 'notes' }, r.deaths.map((d) => el('li', {}, deathText(d)))) : el('div', { class: 'muted', style: 'margin-top:8px' }, 'Ingen dødsfald.'),
+          r.deaths.length ? el('ul', { class: 'notes' }, r.deaths.map((d) => el('li', {}, deathText(d),
+            d.clip ? clipToggle({ t: d.t, killer: d.killer, file: d.clip.file, name: d.clip.name }) : null,
+            replayBtn(s, g.replay, d.t),
+            d.clip && openClips.has(d.clip.file) ? clipVideo(d.clip.file) : null))) : el('div', { class: 'muted', style: 'margin-top:8px' }, 'Ingen dødsfald.'),
+          replayStatus(s, g),
           g.jungle && r.ganks.length ? [el('div', { class: 'plan-sub' }, `Ganks før 10 min: ${r.ganks.length}`),
             el('ul', { class: 'notes' }, r.ganks.map((x) => el('li', {}, `${clock(x.t)} ${x.lane}: ${x.kill ? 'kill' : 'assist'} på ${x.victim || '?'}`)))] : null,
           g.jungle && !r.ganks.length ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Ingen kills/assists i en lane før 10 min.') : null)),
@@ -502,17 +522,66 @@ function reviewCard(s) {
       r.team && r.team.length > 1 ? [el('div', { class: 'plan-sub' }, 'Holdets guldforskel pr. minut'), goldChart(r.team)] : null,
       r.items.length ? [el('div', { class: 'plan-sub' }, 'Dine første færdige items (fra live-data under kampen)'),
         el('div', { class: 'buys' }, r.items.map((it) => el('div', { class: 'buy' }, img(it.icon, it.name), clock(it.t))))] : null,
-      coachGameBlock(r.coach),
+      coachGameBlock(r.coach, s, g),
       climbGameBlock(r.climb),
     ] : el('div', { class: 'muted' }, g.outdated
       ? 'Gennemgangen er lavet med en ældre version (uden lane-modstander og guld). Den hentes igen af sig selv, når klienten er ledig - eller klik herunder.'
       : 'Ingen timeline for denne kamp.'),
-    g.clips.length ? [el('div', { class: 'plan-sub' }, 'Dine dødsfald (video)'),
+    g.clips.length ? [el('div', { class: 'plan-sub' }, r ? 'Andre klip fra kampen (video)' : 'Dine dødsfald (video)'),
       el('div', { class: 'clips' }, g.clips.map((c) => clipRow(c)))] : null,
+    replayJumpBox(s),
     olderButton());
 }
 
 const openClips = new Set();
+const isLocal = () => ['127.0.0.1', 'localhost'].includes(location.hostname);
+const clipVideo = (file) => el('video', { src: '/clip?f=' + encodeURIComponent(file), controls: 'controls', preload: 'metadata', style: 'display:block;width:100%;max-width:480px;border-radius:8px;margin-top:4px' });
+// Knap til et klip (videoen vises under linjen).
+function clipToggle(c) {
+  if (!isLocal()) return null;
+  return el('button', { class: 'rbtn', onclick: () => { openClips.has(c.file) ? openClips.delete(c.file) : openClips.add(c.file); render(lastState); } },
+    openClips.has(c.file) ? 'Skjul klip' : 'Se klip');
+}
+
+// ---------- "Se det i replayet" ----------
+// rp = kampens replay-info fra programmet ({ ok, reason, gameId }). Knappen er slået fra med grunden som tekst.
+function replayBtn(s, rp, t) {
+  if (!isLocal() || !rp || !s.replay || t == null) return null;
+  const why = !rp.ok ? rp.reason : s.replay.block;
+  const to = clock(Math.max(0, t - s.replay.lead));
+  return el('button', {
+    class: 'rbtn', disabled: why ? 'disabled' : null,
+    title: why || (s.replay.jump ? `Starter kampens replay i League og hopper til ${to}` : `Starter kampens replay i League - spol selv til ${to} (eller slå "Replay-spring" til)`),
+    onclick: () => post('/api/replay', { gameId: rp.gameId, t: Math.round(t) }),
+  }, `Se det (${clock(t)})`);
+}
+// Status for replayet (henter, starter, står på 14:22) eller hvorfor knapperne er slået fra.
+function replayStatus(s, g) {
+  if (!isLocal() || !s.replay) return null;
+  const j = s.replay.job;
+  if (j && j.gameId === g.gameId) return el('div', { class: 'replay-line' + (j.error ? ' err' : '') }, el('b', {}, 'Replay: '), j.error || j.step);
+  const why = g.replay && !g.replay.ok ? g.replay.reason : s.replay.block;
+  return why ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:6px' }, `Replay-knapperne er slået fra: ${why}`) : null;
+}
+const REPLAY_EXPLAIN = 'Uden replay-spring starter "Se det" kampens replay i League, og du spoler selv. Med replay-spring hopper programmet til 10 sek. før øjeblikket. ' +
+  "Det kræver Riots Replay API, som slås til med linjen EnableReplayApi=1 under [General] i League's game.cfg. Programmet laver en backup (game.cfg.lrh-backup), " +
+  'ændrer kun den ene linje og sætter den gamle værdi tilbage, når du slår det fra. Spillet og champion select må ikke køre imens. Replays kan kun ses på samme patch som kampen.';
+function replayJumpBox(s) {
+  if (!isLocal() || !s.replay) return null;
+  const r = s.replay;
+  const toggle = (on) => {
+    if (on && !confirm(REPLAY_EXPLAIN + '\n\nSlå replay-spring til?')) return;
+    post('/api/replay-jump', { enabled: on });
+  };
+  return el('div', { class: 'muted', style: 'font-size:12px;margin-top:10px' },
+    el('b', {}, 'Replay-spring: '),
+    r.optIn ? ['til (EnableReplayApi=1 i game.cfg). ', el('button', { class: 'rbtn', onclick: () => toggle(false) }, 'Slå replay-spring fra')]
+      : r.jump ? "Replay API'et er allerede slået til i game.cfg - programmet hopper direkte til øjeblikket."
+      : ['fra. ', REPLAY_EXPLAIN, ' ', r.cfgFound ? el('button', { class: 'rbtn', onclick: () => toggle(true) }, 'Slå replay-spring til')
+        : el('span', {}, "(League's game.cfg er ikke fundet endnu - start League-klienten.)")],
+    r.cfgError ? el('div', {}, `game.cfg kunne ikke læses: ${r.cfgError}`) : null);
+}
+
 function clipRow(c) {
   const local = ['127.0.0.1', 'localhost'].includes(location.hostname);
   const src = '/clip?f=' + encodeURIComponent(c.file);
@@ -566,7 +635,7 @@ function patternsPickCard(p) {
 
 // ---------- Coach: de vigtigste ændringer i din spillestil (før og efter kampen - aldrig under) ----------
 const COACH_POS_NOTE = 'Timelinen har én position pr. minut, så "ved dragen" er omtrentligt: inden for 3.000 enheder af stedet hvor monsteret døde, i minut-billedet lige før eller lige efter.';
-function coachItem(a, n, withGame) {
+function coachItem(a, n, withGame, media) {
   return el('div', { class: 'coach-item' },
     el('h3', {}, `${n}. ${a.title}`),
     withGame && a.game ? el('div', { class: 'coach-num' }, el('b', {}, a.game)) : null,
@@ -574,25 +643,57 @@ function coachItem(a, n, withGame) {
     a.extra ? el('div', { class: 'coach-num muted' }, a.extra) : null,
     el('div', { class: 'muted', style: 'font-size:12px' }, `${a.split} (${a.scope}, ${a.games} kampe)`),
     el('div', { class: 'coach-next' }, el('b', {}, 'Næste kamp: '), a.next),
+    media || null,
     a.url ? el('div', { class: 'climb-src', style: 'margin-top:3px' }, a.source, ' - ', srcLink(a.url)) : null);
+}
+// "Se N klip" (afspilles her i vinduet) og replay-knapper for øjeblikke uden klip.
+const openMedia = new Set();
+function clipsToggle(key, clips, withGame) {
+  if (!isLocal() || !clips.length) return null;
+  const open = openMedia.has(key);
+  return [el('button', { class: 'rbtn', style: 'margin-left:0', onclick: () => { open ? openMedia.delete(key) : openMedia.add(key); render(lastState); } },
+      open ? 'Skjul klip' : `Se ${clips.length} klip`),
+    open ? el('div', { class: 'clips' }, clips.map((m) => el('div', {},
+      el('div', { class: 'clip' }, withGame ? el('span', { class: 'muted' }, `${new Date(m.date).toLocaleDateString('da-DK')} ${m.champion}`) : null, m.what),
+      clipVideo(m.clip.file)))) : null];
+}
+// Kampgennemgangen: øjeblikkene i denne kamp.
+function gameMedia(s, a, g) {
+  const ms = a.moments || [];
+  const clips = ms.filter((m) => m.clip);
+  const open = ms.filter((m) => !m.clip && g.replay && g.replay.ok);
+  if (!clips.length && !open.length) return null;
+  return el('div', { class: 'moments' }, clipsToggle(`g${g.gameId || g.date}-${a.key}`, clips, false),
+    open.length && isLocal() ? el('ul', { class: 'notes', style: 'margin-top:4px' }, open.map((m) => el('li', {}, m.what, replayBtn(s, g.replay, m.t)))) : null);
+}
+// Kortet: klip på tværs af kampene, ellers replay-knapper fra den nyeste kamp der kan ses.
+function cardMedia(s, a) {
+  const md = a.media;
+  if (!md) return null;
+  if (md.clips.length) return el('div', { class: 'moments' }, clipsToggle(`c-${a.key}`, md.clips, true));
+  if (md.replay && md.replay.moments.length && isLocal()) {
+    return el('div', { class: 'moments' }, el('span', { class: 'muted' }, `Fra ${new Date(md.replay.date).toLocaleDateString('da-DK')} ${md.replay.champion}${md.replay.result ? ` (${md.replay.result})` : ''}:`),
+      el('ul', { class: 'notes', style: 'margin-top:2px' }, md.replay.moments.map((m) => el('li', {}, m.what, replayBtn(s, md.replay, m.t)))));
+  }
+  return null;
 }
 const needText = (role, need) => `Spil ${need} kamp${need === 1 ? '' : 'e'} mere med rollen ${role} (med kampgennemgang), så kan coachen måle dine råd.`;
 // Kampgennemgangen: de op til 3 vigtigste ting fra netop denne kamp.
-function coachGameBlock(c) {
+function coachGameBlock(c, s, g) {
   if (!c) return null;
   return [el('div', { class: 'plan-sub' }, 'Coach: 3 ting fra denne kamp'),
     c.need ? el('div', { class: 'muted', style: 'font-size:13px;margin-top:4px' }, needText(c.role, c.need))
-      : c.advice.length ? c.advice.map((a, i) => coachItem(a, i + 1, true))
+      : c.advice.length ? c.advice.map((a, i) => coachItem(a, i + 1, true, gameMedia(s, a, g)))
       : el('div', { class: 'muted', style: 'font-size:13px;margin-top:4px' }, 'Ingen af coachens punkter lå på den dårlige side af din median i denne kamp.')];
 }
-function coachCard(c) {
+function coachCard(c, s) {
   if (!c) return null;
   const m = c.main;
   return el('div', { class: 'card' }, el('h2', {}, 'Din coach: de 5 vigtigste ændringer'),
     el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:4px' },
       `Målt i ${m.scope} (${m.games} kampe med kampgennemgang), sorteret efter hvor meget de hænger sammen med dine nederlag. Rådene vises kun før og efter kampen.`),
     m.need ? el('div', { style: 'font-size:13px' }, needText(m.role, m.need))
-      : m.advice.length ? m.advice.map((a, i) => coachItem(a, i + 1, false))
+      : m.advice.length ? m.advice.map((a, i) => coachItem(a, i + 1, false, cardMedia(s, a)))
       : el('div', { class: 'muted', style: 'font-size:13px' }, 'Ingen af de målte råd skiller dine sejre fra dine nederlag endnu.'),
     c.others.length ? [el('div', { class: 'plan-sub' }, 'Dine andre roller'),
       el('ul', { class: 'notes' }, c.others.map((o) => el('li', {}, `${o.role}: `, o.need ? needText(o.role, o.need)
@@ -606,6 +707,36 @@ function coachPickCard(p) {
   return el('div', { class: 'card' }, el('h2', {}, 'Coach'),
     p.need ? el('div', { class: 'muted', style: 'font-size:13px' }, needText(p.role, p.need))
       : el('div', { style: 'font-size:13px' }, el('b', {}, `${p.title}: `), p.next, ' ', el('span', { class: 'muted' }, `(${p.evidence}) `), srcLink(p.url)));
+}
+
+// ---------- Din champion-pulje ----------
+const formDots = (f) => el('span', { class: 'form', title: 'Dine sidste kampe på championen (nyeste til venstre): grøn = sejr, rød = nederlag' },
+  f.map((w) => el('i', { class: w ? 'w' : '' })));
+function poolCard(p) {
+  if (!p) return null;
+  return el('div', { class: 'card' }, el('h2', {}, 'Din champion-pulje'),
+    el('div', { class: 'muted', style: 'font-size:12px' }, `Fra dine kampe med programmet (rollen kendes fra kampen). Sorteret efter den nederste grænse af din win rate (95 %, Wilson), så 1 af 1 ikke slår 9 af 15. "Få kampe" = under ${p.few} kampe på championen.`),
+    p.roles.map((r) => el('div', { class: 'pool-role' },
+      el('div', { class: 'plan-sub', style: 'margin-top:0' }, `${r.role} - ${r.games} kampe`),
+      r.best.length ? el('div', { style: 'font-size:13px' }, el('b', {}, 'Du vinder mest med: '),
+        r.best.map((id, i) => { const c = r.champions.find((x) => x.id === id); return [i ? ', ' : '', `${c.name} (${c.wins} af ${c.games}${c.few ? ', få kampe' : ''})`]; })) : null,
+      r.champions.slice(0, 8).map((c) => el('div', { class: 'pool-row' }, img(c.icon, c.name),
+        el('span', { class: 'nm' + (r.best[0] === c.id ? ' best' : '') }, c.name),
+        el('span', {}, `${c.wins} af ${c.games}`), el('span', { class: 'muted' }, `(${Math.round(c.wins / c.games * 100)} %)`),
+        formDots(c.form),
+        c.few ? el('span', { class: 'muted', style: 'font-size:11px' }, 'få kampe') : null,
+        c.mastery && c.mastery.points != null ? el('span', { class: 'muted', style: 'margin-left:auto;font-size:12px' }, `${num(c.mastery.points)} mastery${c.mastery.level != null ? ` (level ${c.mastery.level})` : ''}`) : null)),
+      el('div', { style: 'font-size:13px;margin-top:4px' }, `${r.distinct} forskellige champions i dine sidste ${r.last} ${r.role}-kampe.`, r.topVsRest ? ` ${r.topVsRest}.` : ''))),
+    p.client ? [el('div', { class: 'plan-sub' }, `Klientens kamphistorik (${p.client.games} kampe, alle roller)`),
+      el('div', { style: 'font-size:13px' }, `${p.client.distinct} forskellige champions: `,
+        p.client.champions.map((c, i) => [i ? ' · ' : '', `${c.name} ${c.wins} af ${c.games}`])),
+      el('div', { class: 'muted', style: 'font-size:11px' }, 'Klientens kamphistorik har ingen pålidelig rolle, så den står samlet.')] : null,
+    !p.masteryKnown ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, 'Mastery hentes fra klienten, når den er i lobbyen.') : null,
+    el('div', { class: 'climb-src', style: 'margin-top:8px' }, p.sources.map((x) => [x.name, ' - ', srcLink(x.url), '. ']), srcLink(p.research, 'Research')));
+}
+function poolPickLine(p) {
+  if (!p) return null;
+  return el('div', { class: 'pool-pick' }, el('b', {}, p.text), p.extra ? el('span', { class: 'muted' }, ` · ${p.extra}`) : null);
 }
 
 // ---------- Klatre-tjek (de kendte low elo-huller i dine egne kampe) ----------
@@ -1036,7 +1167,8 @@ function renderInto(s) {
       s.draftStatus ? enemyJungleCard(s.enemyJungle) : null,
       guardBox(s.climbGuard),
       reviewCard(s),
-      coachCard(s.coach),
+      poolCard(s.pool),
+      coachCard(s.coach, s),
       climbCard(s.climb),
       patternsCard(s.patterns),
       historyCards(s),
@@ -1055,6 +1187,7 @@ function renderInto(s) {
     s.position !== 'ARAM' ? el('div', { class: 'roles' },
       el('button', { class: role ? '' : 'active', onclick: () => post('/api/role', { position: null }) }, 'Auto'),
       s.positions.map((p) => el('button', { class: role === p ? 'active' : '', onclick: () => post('/api/role', { position: p }) }, p))) : null,
+    poolPickLine(s.poolPick),
     coachPickCard(s.coachPick),
     climbPickCard(s.climbPick),
     patternsPickCard(s.patternsPick),

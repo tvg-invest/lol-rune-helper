@@ -212,4 +212,33 @@ assert(focus.focus && focus.guard, JSON.stringify(focus));
   assert.deepStrictEqual(JSON.parse(JSON.stringify(K.coachFor('MID', 7))), { role: 'MID', scope: 'dine MID-kampe', games: 4, need: 6, advice: [] });
 }
 
+// 10) game.cfg (replay-spring): kun linjen EnableReplayApi under [General] ændres - alt andet bevares.
+{
+  const C = vm.runInContext('({ cfgReplayValue, cfgSetReplay, wilsonLow, clipAt, majorMinor })', ctx);
+  const crlf = '[General]\r\nEnableReplayApi=0\r\nWindowMode=2\r\n[HUD]\r\nEnableReplayApi=7\r\n';
+  assert.deepStrictEqual({ ...C.cfgReplayValue(crlf) }, { found: true, value: '0' }, 'kun [General] tæller');
+  assert.strictEqual(C.cfgSetReplay(crlf, '1'), crlf.replace('EnableReplayApi=0', 'EnableReplayApi=1'), 'CRLF og [HUD] uændret');
+  assert.strictEqual(C.cfgSetReplay(C.cfgSetReplay(crlf, '1'), '0'), crlf, 'tilbage til det oprindelige');
+  // Linjen findes ikke: indsættes lige efter [General] - og fjernes igen når den gamle "værdi" var ingen linje.
+  const noKey = '[General]\nWindowMode=2\n[HUD]\nX=1\n';
+  assert.strictEqual(C.cfgSetReplay(noKey, '1'), '[General]\nEnableReplayApi=1\nWindowMode=2\n[HUD]\nX=1\n');
+  assert.strictEqual(C.cfgSetReplay(C.cfgSetReplay(noKey, '1'), null), noKey);
+  assert.deepStrictEqual({ ...C.cfgReplayValue(noKey) }, { found: false, value: null });
+  // Ingen [General]-sektion, og BOM i starten.
+  assert.strictEqual(C.cfgSetReplay('[HUD]\r\nX=1\r\n', '1'), '[General]\r\nEnableReplayApi=1\r\n[HUD]\r\nX=1\r\n');
+  const bom = '\uFEFF[General]\nEnableReplayApi=0\n';
+  assert.strictEqual(C.cfgSetReplay(bom, '1'), '\uFEFF[General]\nEnableReplayApi=1\n', 'BOM bevares');
+  assert.strictEqual(C.cfgReplayValue(bom).value, '0');
+  // Wilson (rangering af champion-puljen): 9 af 15 over 1 af 1, og 0 af n = 0.
+  assert(C.wilsonLow(9, 15) > C.wilsonLow(1, 1));
+  assert.strictEqual(C.wilsonLow(0, 4), 0);
+  assert.strictEqual(C.majorMinor('16.22.834.8910'), '16.22');
+  // Klip -> dødsfald: inden for 5 sek. (live-tid mod timelinens tid), nærmeste vinder.
+  const g = { deathLog: [{ t: 305.4, clip: 'C:/v/a.mp4' }, { t: 318, clip: 'C:/v/b.mp4' }, { t: 900, clip: null }] };
+  assert.strictEqual(C.clipAt(g, 305).name, 'a.mp4');
+  assert.strictEqual(C.clipAt(g, 316).name, 'b.mp4');
+  assert.strictEqual(C.clipAt(g, 311), null, 'over 5 sek. fra begge');
+  assert.strictEqual(C.clipAt(g, 900), null, 'dødsfald uden klip');
+}
+
 console.log('Kampgennemgang (rigtigt format): alle tests bestået');

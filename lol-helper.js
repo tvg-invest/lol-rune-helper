@@ -45,6 +45,10 @@ const DEFAULT_CONFIG = {
   obsClips: false,        // video af dine dødsfald via OBS' replay buffer (OBS 28+ med WebSocket slået til)
   obsPassword: '',        // OBS WebSocket-adgangskode (logges aldrig)
   obsPort: 4455,
+  // "Se det i replayet": hop til øjeblikket i League's eget replay. Kræver EnableReplayApi=1 i League's game.cfg,
+  // som programmet KUN sætter når du slår "Replay-spring" til i vinduet (med backup - samme knap slår det fra igen).
+  replayJump: false,
+  championPool: true,     // "Din champion-pulje": win rate, form og mastery pr. champion i hver rolle + én linje i champion select
   openWindow: true,       // åbn vinduet i browseren ved start
   remoteAccess: false,    // true = vinduet kan åbnes fra telefonen via Tailscale med en hemmelig nøgle
   remoteLan: false,       // true = også via wifi/LAN (ukrypteret HTTP - nøglen kan aflyttes på delte netværk)
@@ -170,7 +174,8 @@ async function findClient() {
 
   const port = /--app-port=(\d+)/.exec(cmdline);
   const token = /--remoting-auth-token=([\w-]+)/.exec(cmdline);
-  if (port && token) return { protocol: 'https', port: Number(port[1]), password: token[1] };
+  const installDir = /--install-directory=(.+?)(?="|\s+"?--|$)/m.exec(cmdline);
+  if (port && token) return { protocol: 'https', port: Number(port[1]), password: token[1], dir: installDir ? installDir[1].trim() : null };
 
   return readLockfile(lockfileCandidates(cmdline));
 }
@@ -187,7 +192,7 @@ function readLockfile(files) {
   for (const file of files) {
     try {
       const [, pid, p, password, protocol] = fs.readFileSync(file, 'utf8').trim().split(':');
-      if (Number(p) > 0 && password && (!(Number(pid) > 0) || pidAlive(pid))) return { protocol, port: Number(p), password };
+      if (Number(p) > 0 && password && (!(Number(pid) > 0) || pidAlive(pid))) return { protocol, port: Number(p), password, dir: path.dirname(file) };
     } catch {}
   }
   return null;
@@ -1864,7 +1869,9 @@ function participantFrame(frame, id) {
 // v2-gennemgange vises stadig (REVIEW_MIN) og opgraderes af sig selv, hvis klienten stadig har kampen.
 // v4 (v1.21.0) har også coachens tal: hvem der stod ved de store monstre, roams, ganks med dødsfald bagefter
 // og dødsfald alene i en sidelane efter 20 min.
-const REVIEW_VERSION = 4;
+// v5 (v1.22.0) har også kampens patch (gameVersion) og platform (til "Se det i replayet": replays kan kun ses
+// på samme patch, og filen hedder <platform>-<gameId>.rofl).
+const REVIEW_VERSION = 5;
 const REVIEW_MIN = 2;
 // "Tæt på" et sted (coachen): 3.000 enheder. Valgt ud fra kortet, ikke ud fra præstation: i Tobias' 51 kampe
 // døde dragen i median ved (9.837, 4.397) og Baron ved (5.007, 10.471); fra dragen er der ca. 3.100 enheder til
@@ -2064,6 +2071,8 @@ function buildReview(game, timeline, s) {
     dur: num(game.gameDuration),
     start: num(game.gameCreation),
     queue: num(game.queueId),
+    gv: typeof game.gameVersion === 'string' && game.gameVersion ? game.gameVersion : null,
+    pf: typeof game.platformId === 'string' && game.platformId ? game.platformId : null,
     stats: {
       vision: num(st.visionScore), wardsPlaced: num(st.wardsPlaced), wardsKilled: num(st.wardsKilled), controlWards: num(st.visionWardsBoughtInGame),
       kills: num(st.kills), deaths: num(st.deaths), assists: num(st.assists), teamKills,
@@ -2216,7 +2225,7 @@ function reviewView() {
         oppBy: r.oppBy,
         jg: r.jg ? champView(r.jg) : null,
         deaths: r.deaths.map((d) => ({ ...d, killer: d.killer ? dd.champions[d.killer]?.name || d.killer : null,
-          beforeItem: firstItem != null ? d.t < firstItem : null })),
+          beforeItem: firstItem != null ? d.t < firstItem : null, clip: clipAt(g, d.t) })),
         gold: r.gold,
         team: r.team,
         at: r.at,
@@ -2231,7 +2240,11 @@ function reviewView() {
         climb: app.cfg.climbCheck ? safeView(() => gameLeaks(g)) : null,
         coach: app.cfg.coach ? safeView(() => coachGame(g)) : null,
       } : null,
-      clips: (g.deathLog || []).filter((d) => d.clip).map((d) => ({ t: d.t, killer: d.killer, file: d.clip, name: path.basename(d.clip) })),
+      // Klip der ikke hører til et dødsfald i gennemgangen (eller kampe uden gennemgang) - de andre står ved dødsfaldet.
+      clips: (g.deathLog || []).filter((d) => d.clip && !(r && r.deaths.some((x) => Math.abs(x.t - d.t) <= CLIP_MATCH_SEC)))
+        .map((d) => ({ t: d.t, killer: d.killer, file: d.clip, name: path.basename(d.clip) })),
+      gameId: g.gameId || null,
+      replay: replayFor(g),
     };
   });
 }
@@ -2635,7 +2648,7 @@ function tiltGuard(s = streakStats()) {
 // Henter klientens kamphistorik (kun GET, kun når klienten er ledig) til tilt- og tidspunkt-tallene.
 const RECENT_REFRESH_MS = 10 * 60 * 1000;
 async function refreshRecentGames(force = false) {
-  if (!app.client || !app.cfg.climbCheck || app.recentBusy || (!force && Date.now() - (app.recentAt || 0) < RECENT_REFRESH_MS)) return;
+  if (!app.client || !(app.cfg.climbCheck || app.cfg.championPool) || app.recentBusy || (!force && Date.now() - (app.recentAt || 0) < RECENT_REFRESH_MS)) return;
   app.recentBusy = true;
   app.recentAt = Date.now();
   try {
@@ -2647,9 +2660,18 @@ async function refreshRecentGames(force = false) {
       if (typeof win !== 'boolean' || typeof x.gameCreation !== 'number' || x.mapId !== 11 || !['CLASSIC', 'SWIFTPLAY'].includes(x.gameMode)) continue;
       if (x.endOfGameResult && x.endOfGameResult !== 'GameComplete') continue;
       if (!byId.has(x.gameId)) added++;
-      byId.set(x.gameId, { id: x.gameId, start: x.gameCreation, dur: x.gameDuration || 0, win, queue: x.queueId ?? null, champ: x.participants[0].championId ?? null });
+      byId.set(x.gameId, { id: x.gameId, start: x.gameCreation, dur: x.gameDuration || 0, win, queue: x.queueId ?? null, champ: x.participants[0].championId ?? null,
+        gv: typeof x.gameVersion === 'string' ? x.gameVersion : null });
     }
-    if (added) {
+    // Mastery pr. champion (champion-puljen) - samme GET som champion select bruger.
+    if (app.cfg.championPool) {
+      const list = await lcu(app.client, 'GET', '/lol-champion-mastery/v1/local-player/champion-mastery').catch(() => null);
+      if (Array.isArray(list)) {
+        app.mastery = new Map(list.filter((m) => m && typeof m.championId === 'number').map((m) => [m.championId,
+          { points: typeof m.championPoints === 'number' ? m.championPoints : null, level: typeof m.championLevel === 'number' ? m.championLevel : null }]));
+      }
+    }
+    if (added || history.recent.some((x) => x.gv === undefined)) {
       history.recent = [...byId.values()].sort((a, b) => b.start - a.start).slice(0, 200);
       saveHistory();
     }
@@ -2956,7 +2978,8 @@ function coachFor(position, championId = null) {
   if (games.length < COACH_MIN_GAMES) return { role: position, scope, games: games.length, need: COACH_MIN_GAMES - games.length, advice: [] };
   const advice = COACH_ADVICE.filter((a) => a.roles.includes(position)).map((a) => coachSplit(a, games))
     .filter((s) => s && s.agrees && s.cost != null && s.cost > 0).sort((x, y) => y.cost - x.cost);
-  return { role: position, scope, games: games.length, need: 0, advice: advice.slice(0, 5).map((s) => adviceItem(s, position, scope)) };
+  return { role: position, scope, games: games.length, need: 0,
+    advice: advice.slice(0, 5).map((s) => ({ ...adviceItem(s, position, scope), media: adviceMedia(s.a, s.values.map((x) => x.g)) })) };
 }
 
 // Kampens tal for ét råd ("I denne kamp: 0 af 3 drager").
@@ -2978,7 +3001,7 @@ function coachGame(g) {
     if (typeof v !== 'number' || !Number.isFinite(v)) continue;
     const s = coachSplit(a, others);
     if (!s || !s.agrees || !(s.cost > 0) || !s.worse(v)) continue;
-    out.push({ ...adviceItem(s, g.position, scope), game: coachGameText(a, g), cost: s.cost });
+    out.push({ ...adviceItem(s, g.position, scope), game: coachGameText(a, g), cost: s.cost, moments: adviceMoments(a, g).map((m) => momentView(m, g)) });
   }
   out.sort((x, y) => y.cost - x.cost);
   return { role: g.position, need: 0, advice: out.slice(0, 3).map(({ cost, ...x }) => x) };
@@ -3184,9 +3207,460 @@ function openFile(file) {
   else execFile('xdg-open', [file], () => {});
 }
 
+// ---------- "Se det i replayet": start kampens replay i League-klienten og hop til øjeblikket ----------
+// Kun efter kampen og kun med Riots egen replay-funktion. Kilder (tjekket 9/11-2026):
+// - Klientens egne endpoints (LCU /help?format=Full fra en rigtig klient, patch 16.22): GET /lol-replays/v1/configuration
+//   (isReplaysEnabled, isPlayingGame, isPlayingReplay, isPatching, gameVersion), GET /lol-replays/v1/rofls/path,
+//   GET /lol-replays/v1/metadata/{gameId} -> {state, gameId, downloadProgress} (state: checking, found, watch, download,
+//   downloading, retryDownload, incompatible, missingOrExpired, lost, error, maxLimitReached, unsupported),
+//   POST /lol-replays/v1/rofls/{gameId}/download og .../watch med body LolReplaysReplayContextData {componentType}.
+// - componentType "replay-button_match-history" (klientens egen kamphistorik-knap; brugt af LeagueAkari, hasagi-core m.fl.).
+// - Målt på en rigtig klient (github.com/wnzzer/rank-analysis, 27/7-2026): metadata giver 404 før der er bedt om
+//   download, og downloadProgress er ikke altid en procent - derfor vises den kun når den ligger i 0-100.
+// - Riots Replay API (https://developer.riotgames.com/docs/lol#game-client-api_replay-api): slået fra som standard,
+//   kræver "[General] EnableReplayApi=1" i game.cfg. GET /replay/game, GET/POST /replay/playback - felterne
+//   time/paused/speed/length/seeking er dem Riots League Director bruger (github.com/RiotGames/leaguedirector, api.py).
+// game.cfg ændres KUN når du selv slår "Replay-spring" til i vinduet (backup + den gamle værdi lægges tilbage, når
+// du slår det fra). Uden det starter knappen bare replayet, og du spoler selv.
+
+const REPLAY_COMPONENT = 'replay-button_match-history';
+const REPLAY_LEAD_SEC = 10;            // hop til 10 sek. før øjeblikket
+const REPLAY_POLL_MS = Number(process.env.LOL_HELPER_REPLAY_POLL_MS) || 1000;
+const REPLAY_DOWNLOAD_TRIES = 120;     // ca. 2 min på at hente replayet
+const REPLAY_LOAD_TRIES = 180;         // ca. 3 min på at replayet indlæses i spillet
+const REPLAY_API = (() => {
+  const [protocol, port] = (process.env.LOL_HELPER_REPLAY || process.env.LOL_HELPER_LIVE || 'https:2999').split(':');
+  return { protocol, port: Number(port) };
+})();
+const replayApi = (method, p, body) => localJson(REPLAY_API.protocol, REPLAY_API.port, method, p, {}, body, 3000);
+const REPLAY_BUSY = {
+  ChampSelect: 'Ikke under champion select.', InProgress: 'Ikke mens du er i kamp.', GameStart: 'Ikke mens en kamp starter.',
+  Reconnect: 'Ikke mens du er i kamp.', Matchmaking: 'Ikke mens du står i kø.', ReadyCheck: 'Ikke mens du står i kø.',
+};
+const REPLAY_FAIL = {
+  incompatible: 'Replayet er fra en anden patch og kan ikke afspilles i denne klient.',
+  missingOrExpired: 'Riot har ikke replayet længere (udløbet).',
+  lost: 'Replayet er gået tabt hos Riot.',
+  unsupported: 'Replays understøttes ikke for denne kamp.',
+  maxLimitReached: 'Klienten har for mange replays - slet nogle i replay-mappen.',
+  error: 'Klienten kunne ikke hente replayet.',
+};
+const majorMinor = (v) => { const m = /^(\d+)\.(\d+)/.exec(String(v || '')); return m ? `${m[1]}.${m[2]}` : null; };
+
+// League's game.cfg ligger i Config-mappen ved siden af klientens lockfile (Windows: C:\Riot Games\League of Legends\Config).
+function gameCfgPath() {
+  if (process.env.LOL_HELPER_GAME_CFG) return process.env.LOL_HELPER_GAME_CFG;
+  const dirs = [app.client?.dir, ...lockfileCandidates(findClient.lastCmdline || '').map((f) => path.dirname(f))].filter(Boolean);
+  for (const d of dirs) {
+    const f = path.join(d, 'Config', 'game.cfg');
+    if (fs.existsSync(f)) return f;
+  }
+  return null;
+}
+const CFG_SECTION = /^\s*\[([^\]]*)\]\s*$/;
+const CFG_KEY = /^\s*EnableReplayApi\s*=\s*(.*?)\s*$/i;
+// Værdien af EnableReplayApi under [General] (found: false hvis linjen ikke findes).
+function cfgReplayValue(text) {
+  let section = null;
+  for (const line of String(text).replace(/^\uFEFF/, '').split(/\r?\n/)) {
+    const s = CFG_SECTION.exec(line);
+    if (s) { section = s[1].trim().toLowerCase(); continue; }
+    const k = section === 'general' ? CFG_KEY.exec(line) : null;
+    if (k) return { found: true, value: k[1] };
+  }
+  return { found: false, value: null };
+}
+// Sæt (eller fjern, value = null) EnableReplayApi under [General]. Resten af filen røres ikke (linjeskift og BOM bevares).
+function cfgSetReplay(text, value) {
+  const bom = text.startsWith('\uFEFF') ? '\uFEFF' : '';
+  const body = text.slice(bom.length);
+  const eol = /\r\n/.test(body) ? '\r\n' : '\n';
+  const lines = body.split(/\r?\n/);
+  let section = null; let header = -1; let at = -1;
+  lines.forEach((line, i) => {
+    const s = CFG_SECTION.exec(line);
+    if (s) { section = s[1].trim().toLowerCase(); if (section === 'general' && header === -1) header = i; return; }
+    if (section === 'general' && at === -1 && CFG_KEY.test(line)) at = i;
+  });
+  if (value == null) {
+    if (at !== -1) lines.splice(at, 1);
+    return bom + lines.join(eol);
+  }
+  const line = `EnableReplayApi=${value}`;
+  if (at !== -1) lines[at] = line;
+  else if (header !== -1) lines.splice(header + 1, 0, line);
+  else return `${bom}[General]${eol}${line}${eol}${body}`;
+  return bom + lines.join(eol);
+}
+// Læser (aldrig skriver) game.cfg: er Replay API'et slået til? Gemmes i 5 sek.
+function replayCfgState(force = false) {
+  if (!force && app.replayCfg && Date.now() - app.replayCfg.at < 5000) return app.replayCfg;
+  const file = gameCfgPath();
+  let st = { at: Date.now(), file, on: false, value: null, error: null };
+  if (file) {
+    try { const v = cfgReplayValue(fs.readFileSync(file, 'utf8')); st = { ...st, on: v.value === '1', value: v.found ? v.value : null }; } catch (e) { st.error = e.message; }
+  }
+  app.replayCfg = st;
+  return st;
+}
+
+// Kører spillet (eller et replay)? Port 2999 hører til spilprocessen - ethvert HTTP-svar betyder at den kører.
+async function gameProcessRunning() {
+  for (const get of [() => liveGet('/liveclientdata/gamestats'), () => replayApi('GET', '/replay/game')]) {
+    try { await get(); return true; } catch (e) { if (e.status) return true; }
+  }
+  return false;
+}
+
+// Slå replay-spring til/fra (kun på din opfordring fra vinduet). Til: backup af game.cfg + EnableReplayApi=1.
+// Fra: den værdi der stod før (eller linjen fjernes, hvis den ikke fandtes).
+async function setReplayJump(on) {
+  const phase = app.client ? await lcu(app.client, 'GET', '/lol-gameflow/v1/gameflow-phase').catch(() => null) : null;
+  if (['ChampSelect', 'InProgress', 'GameStart', 'Reconnect'].includes(phase)) return { ok: false, error: 'Ikke under champion select eller kamp - prøv igen bagefter.' };
+  if (await gameProcessRunning()) return { ok: false, error: 'Luk spillet eller replayet først (spillet skriver selv game.cfg, når det lukker).' };
+  const file = gameCfgPath();
+  if (!file) return { ok: false, error: "League's game.cfg blev ikke fundet. Start League-klienten, så finder programmet installationsmappen." };
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return { ok: false, error: `game.cfg kunne ikke læses (${e.message}).` }; }
+  const cur = cfgReplayValue(text);
+  try {
+    if (on) {
+      const backup = `${file}.lrh-backup`;
+      fs.copyFileSync(file, backup);
+      // Den oprindelige værdi huskes kun første gang (ikke når du allerede har slået det til).
+      const before = app.cfg.replayJump && app.cfg.replayApiBefore !== undefined ? app.cfg.replayApiBefore : (cur.found ? cur.value : null);
+      if (cur.value !== '1') fs.writeFileSync(file, cfgSetReplay(text, '1'));
+      app.cfg.replayJump = true;
+      app.cfg.replayApiBefore = before;
+      saveConfigValue('replayApiBefore', before);
+      saveConfigValue('replayJump', true);
+      log(`Replay-spring slået til: EnableReplayApi=1 under [General] i ${file} (backup: ${path.basename(backup)}).`);
+      replayCfgState(true);
+      return { ok: true, file, backup };
+    }
+    const before = app.cfg.replayApiBefore === undefined ? '0' : app.cfg.replayApiBefore;
+    const next = cfgSetReplay(text, before);
+    if (app.cfg.replayJump && next !== text) fs.writeFileSync(file, next);
+    app.cfg.replayJump = false;
+    delete app.cfg.replayApiBefore;
+    saveConfigValue('replayJump', false);
+    saveConfigValue('replayApiBefore', undefined);
+    log(`Replay-spring slået fra: EnableReplayApi sat tilbage til ${before == null ? '(ingen linje)' : before} i ${file}.`);
+    replayCfgState(true);
+    return { ok: true, file };
+  } catch (e) {
+    return { ok: false, error: `game.cfg kunne ikke ændres (${e.message}).` };
+  }
+}
+
+// Klientens replay-indstillinger (kun GET, når klienten er ledig). Gemmes i 15 sek.
+async function refreshReplayEnv(force = false) {
+  if (!app.client) { app.replayEnv = null; return null; }
+  if (!force && app.replayEnv && Date.now() - app.replayEnv.at < 15000) return app.replayEnv;
+  const conf = await lcu(app.client, 'GET', '/lol-replays/v1/configuration').catch(() => null);
+  const dir = conf ? await lcu(app.client, 'GET', '/lol-replays/v1/rofls/path').catch(() => null) : null;
+  app.replayEnv = { at: Date.now(), conf: conf && typeof conf === 'object' ? conf : null, dir: typeof dir === 'string' ? dir : null };
+  if (app.replayEnv.conf) app.replayWatching = Boolean(conf.isPlayingReplay);
+  return app.replayEnv;
+}
+
+// Hvorfor knappen er slået fra lige nu (null = den virker).
+function replayBlock() {
+  if (!app.client) return 'League-klienten kører ikke.';
+  if (REPLAY_BUSY[app.phase]) return REPLAY_BUSY[app.phase];
+  const c = app.replayEnv?.conf;
+  if (c?.isPatching) return 'Klienten er ved at opdatere.';
+  if (c && c.isReplaysEnabled === false) return 'Replays er slået fra i League-klienten.';
+  if (c?.isPlayingGame) return 'Spillet kører allerede.';
+  if (app.replayJob && !app.replayJob.done && !app.replayJob.error) return 'Et replay er ved at starte.';
+  return null;
+}
+
+// Kampens patch: fra gennemgangen (v5) eller klientens kamphistorik.
+const gameVersionOf = (g) => g.review?.gv || history.recent.find((x) => x.id === g.gameId)?.gv || null;
+// Kan netop denne kamp ses som replay? (Replays kan kun afspilles på samme patch som kampen.)
+function replayFor(g) {
+  if (!g?.gameId) return { ok: false, reason: 'Kampens id kendes ikke, så replayet kan ikke findes.' };
+  const gv = majorMinor(gameVersionOf(g));
+  const cv = majorMinor(app.replayEnv?.conf?.gameVersion);
+  if (gv && cv && gv !== cv) return { ok: false, gameId: g.gameId, reason: `Kampen er fra patch ${gv} - klienten er på ${cv}. Replays kan kun ses på samme patch.` };
+  const pf = g.review?.pf; const dir = app.replayEnv?.dir;
+  let local = false;
+  try { local = Boolean(pf && dir && fs.existsSync(path.join(dir, `${pf}-${g.gameId}.rofl`))); } catch {}
+  return { ok: true, gameId: g.gameId, patch: gv, local };
+}
+
+function replayView() {
+  const st = replayCfgState();
+  const job = app.replayJob;
+  return {
+    block: replayBlock(),
+    jump: st.on,
+    optIn: Boolean(app.cfg.replayJump),
+    cfgFound: Boolean(st.file),
+    cfgError: st.error,
+    clientPatch: majorMinor(app.replayEnv?.conf?.gameVersion),
+    lead: REPLAY_LEAD_SEC,
+    job: job ? { gameId: job.gameId, t: job.t, target: job.target, step: job.step, error: job.error, done: job.done } : null,
+  };
+}
+
+// Start replayet af en af dine egne kampe og hop til t - REPLAY_LEAD_SEC (kun med replay-spring slået til).
+async function startReplay(gameId, t) {
+  const g = srGames().find((x) => x.gameId === gameId);
+  if (!g) return { ok: false, error: 'Kampen findes ikke i din historik.' };
+  if (!app.client) return { ok: false, error: 'League-klienten kører ikke.' };
+  app.phase = await lcu(app.client, 'GET', '/lol-gameflow/v1/gameflow-phase').catch(() => app.phase);
+  await refreshReplayEnv(true);
+  const block = replayBlock();
+  if (block) return { ok: false, error: block };
+  const conf = app.replayEnv?.conf;
+  if (!conf) return { ok: false, error: 'Klienten svarer ikke på replay-forespørgsler.' };
+  const r = replayFor(g);
+  if (!r.ok) return { ok: false, error: r.reason };
+  const jump = replayCfgState(true).on;
+  const sameReplay = conf.isPlayingReplay && app.replayCurrent === gameId;
+  if (conf.isPlayingReplay && !(jump && sameReplay)) return { ok: false, error: 'Et replay kører allerede - luk det først.' };
+  const job = { gameId, t, target: Math.max(0, Math.round(t) - REPLAY_LEAD_SEC), step: 'Forbereder replayet...', error: null, done: false };
+  app.replayJob = job;
+  runReplayJob(job, sameReplay, jump).catch((e) => { job.error = `Replayet kunne ikke startes (${String(e.message).slice(0, 160)}).`; log(`Replay: ${job.error}`); broadcast(); });
+  broadcast();
+  return { ok: true };
+}
+
+async function runReplayJob(job, alreadyPlaying, jump) {
+  const set = (step) => { job.step = step; broadcast(); };
+  const fail = (msg) => { job.error = msg; log(`Replay: ${msg}`); broadcast(); };
+  const busyNow = async () => REPLAY_BUSY[await lcu(app.client, 'GET', '/lol-gameflow/v1/gameflow-phase').catch(() => null)] || null;
+  if (!alreadyPlaying) {
+    // 1) Hent replayet (download), til klienten melder "watch".
+    let posts = 0; let ready = false;
+    for (let i = 0; i < REPLAY_DOWNLOAD_TRIES && !ready; i++) {
+      if (i) await sleep(REPLAY_POLL_MS);
+      if (!app.client) return fail('League-klienten lukkede.');
+      if (i % 5 === 0) { const b = await busyNow(); if (b) return fail(`Stoppet: ${b}`); }
+      let meta;
+      try { meta = await lcu(app.client, 'GET', `/lol-replays/v1/metadata/${job.gameId}`); } catch (e) { meta = e.status === 404 ? null : undefined; }
+      const state = meta?.state;
+      if (state === 'watch') { ready = true; break; }
+      if (REPLAY_FAIL[state]) return fail(REPLAY_FAIL[state]);
+      if (meta === null || state === 'download' || state === 'retryDownload') {
+        if (posts < 3) {
+          posts++;
+          set('Henter replayet fra Riot...');
+          await lcu(app.client, 'POST', `/lol-replays/v1/rofls/${job.gameId}/download`, { componentType: REPLAY_COMPONENT });
+        }
+        continue;
+      }
+      if (state === 'downloading') {
+        const p = meta.downloadProgress;
+        set(`Henter replayet...${typeof p === 'number' && p >= 0 && p <= 100 ? ` ${p} %` : ''}`);
+      } else if (meta) set('Klienten tjekker replayet...');
+    }
+    if (!ready) return fail('Klienten blev ikke klar med replayet inden for 2 minutter. Kampen er måske for gammel, eller Riot har ikke replayet.');
+    const b = await busyNow();
+    if (b) return fail(`Stoppet: ${b}`);
+    // 2) Start replayet i spillet.
+    set('Starter replayet i League...');
+    await lcu(app.client, 'POST', `/lol-replays/v1/rofls/${job.gameId}/watch`, { componentType: REPLAY_COMPONENT });
+    app.replayWatching = true;
+    app.replayCurrent = job.gameId;
+    log(`Replay: kamp ${job.gameId} startet${jump ? ` - hopper til ${mmss(job.target)}` : ''}.`);
+  }
+  if (!jump) {
+    job.done = true;
+    return set(`Replayet starter. Spol selv til ${mmss(job.target)} (${REPLAY_LEAD_SEC} sek. før ${mmss(job.t)}) - eller slå "Replay-spring" til, så hopper programmet selv.`);
+  }
+  // 3) Vent på Replay API'et (spillet indlæser replayet), og sæt tiden.
+  set('Venter på at replayet er indlæst...');
+  let pb = null;
+  for (let i = 0; i < REPLAY_LOAD_TRIES && !pb; i++) {
+    if (i) await sleep(REPLAY_POLL_MS);
+    if (!(await replayApi('GET', '/replay/game').catch(() => null))) continue;
+    const x = await replayApi('GET', '/replay/playback').catch(() => null);
+    if (x && typeof x.length === 'number' && x.length > 0) pb = x;
+  }
+  if (!pb) return fail(`Replayet startede, men Replay API'et svarede ikke inden for 3 minutter. Står "EnableReplayApi=1" stadig i game.cfg? Spol selv til ${mmss(job.target)}.`);
+  const target = Math.min(job.target, Math.floor(pb.length));
+  for (let k = 0; k < 3; k++) {
+    await replayApi('POST', '/replay/playback', { time: target, paused: false }).catch(() => null);
+    for (let i = 0; i < 5; i++) {
+      await sleep(REPLAY_POLL_MS);
+      const now = await replayApi('GET', '/replay/playback').catch(() => null);
+      if (now && !now.seeking && typeof now.time === 'number' && now.time >= target - 5 && now.time <= target + 30) {
+        job.done = true;
+        log(`Replay: står på ${mmss(target)}.`);
+        return set(`Replayet står på ${mmss(target)} - ${REPLAY_LEAD_SEC} sek. før ${mmss(job.t)}.`);
+      }
+    }
+  }
+  return fail(`Replayet kører, men springet til ${mmss(target)} blev ikke bekræftet af spillet. Spol selv til ${mmss(target)}.`);
+}
+
+// Kører et replay lige nu? (Så live-løkken ikke tager replayet for en kamp.) Kun når der ikke allerede er en kamp.
+async function replayRunning() {
+  if (app.live) return false;
+  if (app.replayWatching) return true;
+  if (!app.client) return false;
+  if (Date.now() - (app.replayCheckAt || 0) < 10000) return Boolean(app.replayCheckHit);
+  app.replayCheckAt = Date.now();
+  const c = await lcu(app.client, 'GET', '/lol-replays/v1/configuration').catch(() => null);
+  app.replayCheckHit = Boolean(c?.isPlayingReplay);
+  return app.replayCheckHit;
+}
+
+// ---------- Klip og replay ved coachens råd ----------
+// OBS-klip gemmes med kamptiden fra live-API'et (deathLog), dødsfald i gennemgangen med timelinens tid. I Tobias'
+// rigtige kampe lå de to højst 1 sek. fra hinanden. To af dine dødsfald ligger altid mindst 10 sek. fra hinanden
+// (laveste dødstid, League Wiki: https://wiki.leagueoflegends.com/en-us/Death), så 5 sek. kan ikke ramme et andet dødsfald.
+const CLIP_MATCH_SEC = 5;
+function clipAt(g, t) {
+  const d = (g.deathLog || []).filter((x) => x.clip && typeof x.t === 'number' && Math.abs(x.t - t) <= CLIP_MATCH_SEC)
+    .sort((a, b) => Math.abs(a.t - t) - Math.abs(b.t - t))[0];
+  return d ? { file: d.clip, name: path.basename(d.clip) } : null;
+}
+const capFirst = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+// Øjeblikkene i en kamp, som et råd handler om (med tid): dødsfaldene for dødsråd, de store monstre du ikke var ved osv.
+function adviceMoments(a, g) {
+  const r = g.review;
+  if (!r || !(r.v >= 4)) return [];
+  const killer = (d) => (d.killer ? dd.champions[d.killer]?.name || d.killer : null);
+  const death = (d, what) => ({ t: d.t, what, killer: killer(d), clip: clipAt(g, d.t) });
+  const deaths = Array.isArray(r.deaths) ? r.deaths : [];
+  switch (a.key) {
+    case 'objDeath': {
+      const takes = epicTakes(r, EPIC_MONSTERS);
+      return objDeaths(r).map((d) => {
+        const o = takes.find((x) => !x.mine && x.t >= d.t && x.t <= d.t + d.dead);
+        return death(d, `Død ${mmss(d.t)}${o ? ` - fjenden tog ${OBJECTIVE_NAMES[o.k] || o.k} ${mmss(o.t)}, mens du var død` : ''}`);
+      });
+    }
+    case 'outnumbered': return deaths.filter((d) => d.n >= 2).map((d) => death(d, `Død ${mmss(d.t)} mod ${d.n}`));
+    case 'sideAlone': return deaths.filter((d) => d.alone).map((d) => death(d, `Død ${mmss(d.t)} alene i ${d.zone === 'Top' ? 'top' : 'bot'}-lanen`));
+    case 'dragon':
+    case 'topside':
+      return epicTakes(r, a.key === 'dragon' ? ['DRAGON'] : TOPSIDE).filter((o) => !o.near)
+        .map((o) => ({ t: o.t, what: `${capFirst(OBJECTIVE_NAMES[o.k] || o.k)} ${mmss(o.t)} uden dig - ${o.mine ? 'dit hold' : 'fjenden'} tog den`, killer: null, clip: null }));
+    case 'gank':
+      return (r.ganks || []).filter((x) => x.died).map((x) => {
+        const d = deaths.find((y) => y.t >= x.t && y.t <= x.t + GANK_FIGHT_SEC);
+        return { t: x.t, what: `Gank i ${x.lane} ${mmss(x.t)} - du døde ${d ? mmss(d.t) : 'lige efter'}`, killer: d ? killer(d) : null, clip: d ? clipAt(g, d.t) : null };
+      });
+    default: return [];
+  }
+}
+const momentView = (m, g) => ({ ...m, gameId: g.gameId || null, date: g.date, champion: g.champion });
+// Kortet: klip af rådets øjeblikke på tværs af kampene (nyeste først), og ellers replay-knapper fra den nyeste kamp der kan ses.
+function adviceMedia(a, games) {
+  const clips = []; let replay = null;
+  for (const g of games) {
+    const ms = adviceMoments(a, g);
+    for (const m of ms) if (m.clip && clips.length < 10) clips.push(momentView(m, g));
+    const open = ms.filter((m) => !m.clip);
+    if (!replay && open.length && g.gameId) {
+      const rp = replayFor(g);
+      if (rp.ok) replay = { ...rp, date: g.date, champion: g.champion, result: g.result || null, moments: open.slice(0, 3).map((m) => momentView(m, g)) };
+    }
+  }
+  return { clips, replay };
+}
+
+// ---------- Din champion-pulje ----------
+// Pr. rolle: win rate, kampe og form pr. champion (history.json - rollen kommer fra live-API'et), de champions du
+// vinder mest med, hvor mange forskellige champions du har spillet i rollen, og mastery fra klienten. Klientens
+// kamphistorik (history.recent) har ingen pålidelig rolle (se README), så den vises samlet for alle roller.
+// Kilde (docs/research-low-elo.md, punkt 4, dobbelttjekket): iTero - win rate krydser 50 % ved ca. 12.000 mastery
+// = ca. 20 kampe på en champion, og ligger omkring 44 % under 10.000. (Do et al. står også i researchen, men er ikke
+// dobbelttjekket - derfor vises ingen tal derfra.)
+const POOL_FEW = 20;     // under iTeros ca. 20 kampe står "få kampe"
+const POOL_SPREAD = 20;  // spredning: forskellige champions i dine sidste 20 kampe i rollen
+const POOL_FORM = 5;     // form: dine sidste 5 kampe på championen
+const POOL_SOURCES = [
+  { name: 'iTero (1M+ solo queue-kampe omkring Gold, patch 13.7): win rate krydser 50 % ved ca. 12.000 mastery-point = ca. 20 kampe på en champion; under 10.000 ligger den omkring 44 %', url: MASTERY_URL },
+];
+// Rangering: nederste grænse af et 95 %-interval for din win rate (Wilson) - så 1 af 1 ikke slår 9 af 15.
+function wilsonLow(w, n, z = 1.96) {
+  if (!n) return 0;
+  const p = w / n;
+  return (p + z * z / (2 * n) - z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / (1 + z * z / n);
+}
+function poolRoles() {
+  const roles = new Map();
+  for (const g of srGames()) {
+    if (!knownResult(g) || !POSITIONS.includes(g.position) || !g.championId) continue;
+    if (!roles.has(g.position)) roles.set(g.position, []);
+    roles.get(g.position).push(g);
+  }
+  return [...roles].map(([role, gs]) => {
+    const by = new Map();
+    for (const g of gs) {
+      const x = by.get(g.championId) || { id: g.championId, games: 0, wins: 0, form: [] };
+      x.games++;
+      if (g.result === 'Sejr') x.wins++;
+      if (x.form.length < POOL_FORM) x.form.push(g.result === 'Sejr');
+      by.set(g.championId, x);
+    }
+    const list = [...by.values()].map((x) => ({ ...x, low: wilsonLow(x.wins, x.games) })).sort((a, b) => b.low - a.low || b.games - a.games);
+    const last = gs.slice(0, POOL_SPREAD);
+    const n = new Map();
+    for (const g of last) n.set(g.championId, (n.get(g.championId) || 0) + 1);
+    const top2 = new Set([...n].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([id]) => id));
+    const inTop = last.filter((g) => top2.has(g.championId)); const rest = last.filter((g) => !top2.has(g.championId));
+    return { role, games: gs.length, list, last: last.length, distinct: n.size, inTop: { games: inTop.length, wins: winsOf(inTop) }, rest: { games: rest.length, wins: winsOf(rest) } };
+  }).sort((a, b) => b.games - a.games);
+}
+const masteryOf = (id) => app.mastery?.get(Number(id)) || null;
+function championPoolView() {
+  if (!app.cfg.championPool) return null;
+  const roles = poolRoles();
+  const recent = history.recent.filter((x) => x.champ);
+  const byChamp = new Map();
+  for (const x of recent) { const c = byChamp.get(x.champ) || { id: x.champ, games: 0, wins: 0 }; c.games++; if (x.win) c.wins++; byChamp.set(x.champ, c); }
+  if (!roles.length && !recent.length) return null;
+  return {
+    few: POOL_FEW,
+    roles: roles.map((r) => ({
+      role: r.role, games: r.games, last: r.last, distinct: r.distinct,
+      topVsRest: r.rest.games >= 3 && r.inTop.games >= 3
+        ? `Dine 2 mest spillede ${r.role}-champions: ${r.inTop.wins} af ${r.inTop.games} sejre - alle andre: ${r.rest.wins} af ${r.rest.games}` : null,
+      best: r.list.filter((x) => x.wins > 0).slice(0, 3).map((x) => x.id),
+      champions: r.list.map((x) => ({ ...champView(x.id), games: x.games, wins: x.wins, form: x.form, few: x.games < POOL_FEW, mastery: masteryOf(x.id) })),
+    })),
+    client: recent.length ? { games: recent.length, distinct: byChamp.size,
+      champions: [...byChamp.values()].sort((a, b) => b.games - a.games).slice(0, 8).map((c) => ({ ...champView(c.id), games: c.games, wins: c.wins })) } : null,
+    masteryKnown: Boolean(app.mastery),
+    sources: POOL_SOURCES,
+    research: RESEARCH_URL,
+  };
+}
+// Champion select: én linje for den champion du hover/har låst i din rolle.
+function poolPick(championId, position) {
+  if (!app.cfg.championPool || !(championId > 0)) return null;
+  const name = dd.champions[championId]?.name || `Champion ${championId}`;
+  const m = masteryOf(championId);
+  const mastery = m?.points != null ? `${gnum(m.points)} mastery-point` : null;
+  const roles = poolRoles();
+  const elsewhere = srGames().filter((g) => g.championId === championId && knownResult(g) && g.position !== position).length;
+  const clientGames = history.recent.filter((x) => x.champ === championId).length;
+  const r = position ? roles.find((x) => x.role === position) : null;
+  const me = r?.list.find((x) => x.id === championId);
+  if (!position) return null;
+  if (!me) {
+    return { championId, isNew: true, text: `Ny champion for dig: 0 kampe i rollen ${position}`,
+      extra: [mastery, elsewhere ? `${elsewhere} kampe i andre roller` : null, clientGames ? `${clientGames} i klientens kamphistorik (alle roller)` : null].filter(Boolean).join(' · ') || null };
+  }
+  const best = r.list.filter((x) => x.wins > 0)[0];
+  const isBest = best && best.id === championId;
+  const text = isBest ? `${name}: din bedste ${position}-champion (${me.wins} af ${me.games})`
+    : `${name}: ${me.wins} af ${me.games} i ${position} - nr. ${r.list.indexOf(me) + 1} af dine ${r.list.length} ${position}-champions` +
+      (best ? ` (bedste: ${dd.champions[best.id]?.name || best.id} ${best.wins} af ${best.games})` : '');
+  return { championId, isBest: Boolean(isBest), few: me.games < POOL_FEW, text,
+    extra: [me.games < POOL_FEW ? `få kampe (under ${POOL_FEW})` : null, mastery].filter(Boolean).join(' · ') || null };
+}
+
 // ---------- Opdateringer ----------
 
-const VERSION = '1.21.0';
+const VERSION = '1.22.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -4052,7 +4526,7 @@ async function liveLoop() {
       // Ingen kamp: tjek sjældnere, og endnu sjældnere når klienten slet ikke kører.
       wait = app.client || process.env.LOL_HELPER_LIVE ? 3000 : 6000;
     }
-    if (data?.allPlayers?.length && data.activePlayer) {
+    if (data?.allPlayers?.length && data.activePlayer && !(await replayRunning())) {
       try {
         await updateLive(data);
       } catch (e) {
@@ -4122,6 +4596,14 @@ const app = {
   pickMastery: null,   // { championId, points } for den champion du har låst
   recentAt: 0,         // sidst klientens kamphistorik blev hentet (tilt-tallene)
   recentBusy: false,
+  phase: null,         // klientens gameflow-fase (sidst set)
+  hover: null,         // { championId, position } - champion du hover/har låst i champion select
+  mastery: null,       // Map championId -> { points, level } fra klienten (champion-puljen)
+  replayEnv: null,     // { at, conf, dir } - klientens replay-indstillinger
+  replayCfg: null,     // læst fra game.cfg: er Replay API'et slået til
+  replayJob: null,     // igangværende/seneste "Se det i replayet"
+  replayWatching: false, // et replay kører (så live-løkken ikke tager det for en kamp)
+  replayCurrent: null, // gameId på replayet programmet startede
   remote: { enabled: false, token: null, urls: [] },
 };
 
@@ -4358,6 +4840,11 @@ function viewModel() {
     climbGuard: app.live || !app.cfg.climbCheck ? null : safeView(() => tiltGuard()),
     obsClips: Boolean(app.cfg.obsClips),
     obs: app.cfg.obsClips ? { status: obs.status, ready: obs.ready } : null,
+    // "Se det i replayet": kun før/efter kampen.
+    replay: app.live ? null : safeView(replayView),
+    pool: app.live ? null : safeView(championPoolView),
+    // Champion select: én linje om den champion du hover/har låst (din egen pulje i rollen).
+    poolPick: app.live || !app.hover ? null : safeView(() => poolPick(app.hover.championId, app.hover.position)),
   };
   if (!pick || !b || !rec) return base;
   if (app.cfg.patterns) {
@@ -4699,6 +5186,22 @@ async function handleRequest(req, res, html) {
     broadcast();
     return json(200, { ok: true, enabled: app.cfg.obsClips });
   }
+  // "Se det i replayet": kun fra computeren selv, kun dine egne kampe (fra history.json).
+  if (req.method === 'POST' && req.url === '/api/replay') {
+    if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
+    const { gameId, t } = await readBody(req);
+    if (!(Number(gameId) > 0) || !(Number(t) >= 0)) return json(400, { error: 'Mangler kamp og tid' });
+    const r = await startReplay(Number(gameId), Number(t));
+    return json(r.ok ? 200 : 409, r);
+  }
+  // Slå replay-spring til/fra: ændrer KUN EnableReplayApi i League's game.cfg (med backup) - på dit klik.
+  if (req.method === 'POST' && req.url === '/api/replay-jump') {
+    if (!LOOPBACK.has(req.socket.remoteAddress)) return json(403, { error: 'Kun fra computeren selv' });
+    const { enabled } = await readBody(req);
+    const r = await setReplayJump(Boolean(enabled));
+    broadcast();
+    return json(r.ok ? 200 : 409, r);
+  }
   if (req.method === 'POST' && req.url === '/api/review-old') {
     if (!app.cfg.matchReview) return json(400, { error: 'Kampgennemgang er slået fra (matchReview)' });
     const r = await reviewOlderGames();
@@ -4973,7 +5476,11 @@ async function tick() {
     if (!app.client) { setStatus('Venter på League-klienten...'); return 3000; }
   }
   const phase = await lcu(app.client, 'GET', '/lol-gameflow/v1/gameflow-phase');
+  if (app.phase !== phase) { app.phase = phase; broadcast(); }
   if (phase !== 'ChampSelect') {
+    if (app.hover) { app.hover = null; broadcast(); }
+    // Replay-knappen: klientens replay-indstillinger (kun GET, kun når klienten er ledig).
+    if (!REPLAY_BUSY[phase] && !app.live) refreshReplayEnv().catch(() => {});
     setStatus(phase === 'InProgress' ? 'I kamp - held og lykke!' : 'Forbundet til klienten - venter på champion select.');
     if (app.applied.pickKey) {
       app.applied = { pickKey: null, itemKey: null };
@@ -4991,6 +5498,14 @@ async function tick() {
   }
   const session = await lcu(app.client, 'GET', '/lol-champ-select/v1/session');
   const me = session.myTeam?.find((m) => m.cellId === session.localPlayerCellId);
+  app.replayWatching = false; // i champion select kører der ikke et replay
+  // Champion-puljen: den champion du hover (eller har låst) i din rolle.
+  const hv = me?.championId > 0 ? me.championId : me?.championPickIntent;
+  const hvPos = app.roleOverride || POSITION_MAP[me?.assignedPosition] || null;
+  if ((app.hover?.championId || 0) !== (hv > 0 ? hv : 0) || (hv > 0 && app.hover?.position !== hvPos)) {
+    app.hover = hv > 0 ? { championId: hv, position: hvPos } : null;
+    broadcast();
+  }
   const pickPending = (session.actions || []).flat()
     .some((a) => a.actorCellId === session.localPlayerCellId && a.type === 'pick' && !a.completed);
   try { updateEnemyJungleSelect(session, me); } catch {}
