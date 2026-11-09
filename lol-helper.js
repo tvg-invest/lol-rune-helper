@@ -3347,6 +3347,9 @@ const CLIP_HOW = {
 function recoverClips(extraDirs = []) {
   const res = { found: 0, pending: 0, games: [], dirs: [] };
   const known = new Set(history.games.flatMap((g) => gameClips(g).map((c) => normPath(c.file))));
+  // Også filnavnet alene: samme klip kan stå med en anden sti (fx OBS' "C:/..." mod en omdirigeret Videoer-mappe).
+  // OBS' navne har tidspunktet til sekundet, så to forskellige klip har ikke samme navn.
+  const knownNames = new Set(history.games.flatMap((g) => gameClips(g).map((c) => path.basename(c.file.replace(/\\/g, '/')).toLowerCase())));
   let changed = false;
   const windows = history.games.map((g) => ({ g, w: gameWindow(g) })).filter((x) => x.w);
   // Den seneste kamp, der var startet, da filen blev skrevet (kampe overlapper ikke).
@@ -3356,6 +3359,7 @@ function recoverClips(extraDirs = []) {
     if (!Array.isArray(g.clipLog)) g.clipLog = [];
     g.clipLog.push(entry);
     known.add(normPath(entry.file));
+    knownNames.add(path.basename(entry.file.replace(/\\/g, '/')).toLowerCase());
     changed = true;
   };
 
@@ -3378,7 +3382,7 @@ function recoverClips(extraDirs = []) {
   res.dirs = clipDirs(extraDirs);
   const byGame = new Map();
   for (const f of listClipFiles(res.dirs)) {
-    if (known.has(normPath(f.file))) continue;
+    if (known.has(normPath(f.file)) || knownNames.has(path.basename(f.file).toLowerCase())) continue;
     const g = gameAt(f.at);
     if (!g) continue;
     if (!byGame.has(g)) byGame.set(g, []);
