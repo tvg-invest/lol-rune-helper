@@ -241,7 +241,9 @@ SE DET I REPLAYET (NYT I 1.22)
 Ved hvert dødsfald i kampgennemgangen og ved coachens øjeblikke står en knap
 "Se det (14:32)". Den henter kampens replay i League-klienten og starter det.
 - Uden mere: replayet starter, og du spoler selv (vinduet siger hvortil).
-- Med replay-spring: programmet hopper selv til 10 sek. før øjeblikket. Klik "Slå
+- Med replay-spring: programmet hopper selv til 10 sek. før øjeblikket og låser
+  kameraet på din champion (fra 1.22.2). Kan det ikke låses, står der det i vinduet -
+  så klik selv på din champion i replayet. Klik "Slå
   replay-spring til" nederst i kampgennemgangen. Det kræver Riots Replay API, som slås
   til med linjen EnableReplayApi=1 under [General] i League's game.cfg. Programmet laver
   en backup (game.cfg.lrh-backup), ændrer kun den ene linje og sætter den gamle værdi

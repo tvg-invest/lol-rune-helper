@@ -347,7 +347,11 @@ async function sseUntil(base, pred, ms) {
 // Formen er den rigtige klients (LCU /help?format=Full, patch 16.22): configuration, rofls/path, metadata/{id}
 // ({state, gameId, downloadProgress}; 404 før der er bedt om download), rofls/{id}/download og /watch ({componentType}).
 const rp = { phase: 'Lobby', conf: null, dir: null, meta: {}, expired: new Set(), downloads: [], watches: [], list: [],
-  apiUp: false, apiUpAt: 0, time: 0, playbackPosts: [], liveHits: 0, other: [] };
+  apiUp: false, apiUpAt: 0, time: 0, playbackPosts: [], liveHits: 0, other: [],
+  // /replay/render (felter fra spillets swagger): et spring rydder valget, og de første kald efter et spring giver ""
+  // (som målt af iamacoffeepot/scry). Navnet skal være en champion eller et Riot ID i kampen.
+  render: { selectionName: '', cameraAttached: false, cameraMode: 'top' }, renderPosts: [], events: [], renderIgnore: 0, renderBroken: false };
+const RENDER_AFTER_SEEK_IGNORED = 2;
 const rpConf = () => ({ gameVersion: '16.22.834.8910', isInTournament: false, isLoggedIn: true, isPatching: false, isPlayingGame: false, isPlayingReplay: false,
   isReplaysEnabled: true, isReplaysForEndOfGameEnabled: true, isReplaysForMatchHistoryEnabled: true, minServerVersion: '', minutesUntilReplayConsideredLost: 30 });
 function fakeReplayLcu(req, res, body) {
@@ -395,8 +399,30 @@ const replayServer = http.createServer((req, res) => {
     if (req.url === '/replay/playback' && req.method === 'POST') {
       const b = JSON.parse(body);
       rp.playbackPosts.push(b);
-      if (typeof b.time === 'number') rp.time = b.time;
+      if (typeof b.time === 'number') {
+        rp.time = b.time;
+        rp.events.push('seek');
+        rp.render = { ...rp.render, selectionName: '', cameraAttached: false };
+        rp.renderIgnore = RENDER_AFTER_SEEK_IGNORED;
+      }
       return send(200, { paused: false, seeking: false, time: rp.time, speed: 1, length: 1560 });
+    }
+    if (req.url === '/replay/render' && req.method === 'GET') return send(200, rp.render);
+    if (req.url === '/replay/render' && req.method === 'POST') {
+      const b = JSON.parse(body);
+      const known = ['selectionName', 'cameraAttached', 'cameraMode', 'selectionOffset'];
+      if (Object.keys(b).some((k) => !known.includes(k))) return send(400, { message: 'ukendt felt' });
+      rp.renderPosts.push(b);
+      rp.events.push('render');
+      if (b.cameraMode) rp.render.cameraMode = b.cameraMode;
+      if ('selectionName' in b) {
+        const names = liveGame(3191).allPlayers.flatMap((p) => [p.championName, p.riotId]).map((n) => n.toLowerCase());
+        const hit = !rp.renderBroken && rp.renderIgnore <= 0 && names.includes(String(b.selectionName).toLowerCase());
+        if (rp.renderIgnore > 0) rp.renderIgnore--;
+        rp.render.selectionName = hit ? b.selectionName : '';
+        rp.render.cameraAttached = hit && b.cameraAttached === true;
+      }
+      return send(200, rp.render);
     }
     send(404, {});
   });
@@ -572,6 +598,8 @@ async function replayTest(cmd, args, baseEnv, tmp) {
     MATCHES[id] = coachMatch(id, 'MID', false);
     MATCHES[id].game.gameVersion = versions[id];
     MATCHES[id].game.platformId = 'EUN1';
+    // Dit Riot ID i kampens data (participantIdentities, som i klientens rigtige form) - samme spiller som i replayet.
+    Object.assign(MATCHES[id].game.participantIdentities[0].player, { gameName: 'Mig', tagLine: 'EUW' });
   }
   rp.expired.add(8003);
   const clip = (n) => { const p = path.join(dir, 'clips', `Replay ${n}.mp4`); fs.writeFileSync(p, Buffer.alloc(1024, n)); return p; };
@@ -722,17 +750,40 @@ async function replayTest(cmd, args, baseEnv, tmp) {
     assert.strictEqual(r.status, 200, JSON.stringify(r.body));
     s = await until((x) => x.replay.job?.t === 800 && (x.replay.job.done || x.replay.job.error), 20000, 'replay med spring');
     assert.strictEqual(s.replay.job.error, null, s.replay.job.error);
-    assert.strictEqual(s.replay.job.step, 'Replayet står på 13:10 - 10 sek. før 13:20.');
+    assert.strictEqual(s.replay.job.step, 'Replayet står på 13:10 - 10 sek. før 13:20. Kameraet følger Ahri.');
+    assert.strictEqual(s.replay.job.camera, 'locked');
     assert.strictEqual(rp.downloads.length, dl, 'allerede hentet: ingen ny download');
     assert.deepStrictEqual(rp.playbackPosts, [{ time: 790, paused: false }], 'POST /replay/playback {time, paused}');
+    // Kameraet låses EFTER springet, på din champion i replayet (Mig#EUW = Ahri), og prøves igen indtil spillet bekræfter.
+    const firstRender = rp.events.indexOf('render');
+    assert(firstRender > rp.events.indexOf('seek'), `render efter springet: ${rp.events}`);
+    assert(rp.renderPosts.length > RENDER_AFTER_SEEK_IGNORED, `prøvet igen: ${JSON.stringify(rp.renderPosts)}`);
+    assert.deepStrictEqual(rp.renderPosts[0], { selectionName: 'Ahri', cameraAttached: true, cameraMode: 'top' });
+    assert(rp.renderPosts.every((b) => ['Ahri', 'Mig#EUW', 'Mig'].includes(b.selectionName) && b.cameraAttached === true && b.cameraMode === 'top'),
+      `kun dine navne: ${JSON.stringify(rp.renderPosts)}`);
+    assert.deepStrictEqual(rp.render, { selectionName: 'Ahri', cameraAttached: true, cameraMode: 'top' });
     // Samme replay kører stadig: næste knap hopper bare (ingen ny watch).
     const w = rp.watches.length;
     r = await api('/api/replay', { gameId: 8001, t: 1320 });
     assert.strictEqual(r.status, 200, JSON.stringify(r.body));
     s = await until((x) => x.replay.job?.t === 1320 && (x.replay.job.done || x.replay.job.error), 20000, 'hop i kørende replay');
-    assert.strictEqual(s.replay.job.step, 'Replayet står på 21:50 - 10 sek. før 22:00.');
+    assert.strictEqual(s.replay.job.step, 'Replayet står på 21:50 - 10 sek. før 22:00. Kameraet følger Ahri.');
     assert.strictEqual(rp.watches.length, w, 'ingen ny watch');
     assert.strictEqual(rp.playbackPosts.at(-1).time, 1310);
+    // Kørende replay genbrugt: springet rydder valget, og kameraet låses igen bagefter.
+    assert(rp.events.lastIndexOf('render') > rp.events.lastIndexOf('seek'), `låst igen efter springet: ${rp.events}`);
+    assert.strictEqual(rp.render.selectionName, 'Ahri');
+    assert.strictEqual(rp.render.cameraAttached, true);
+    // Spillet vil ikke låse kameraet: replayet står stadig rigtigt, men vinduet siger hvad du selv skal gøre.
+    rp.renderBroken = true;
+    r = await api('/api/replay', { gameId: 8001, t: 1500 });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    s = await until((x) => x.replay.job?.t === 1500 && (x.replay.job.done || x.replay.job.error), 30000, 'kamera kan ikke låses');
+    assert.strictEqual(s.replay.job.error, null, s.replay.job.error);
+    assert.strictEqual(s.replay.job.camera, 'failed');
+    assert.strictEqual(s.replay.job.step, 'Replayet står på 24:50 - 10 sek. før 25:00. Kameraet kunne ikke låses - klik på din champion i replayet.');
+    assert(/Replay: kameraet kunne ikke låses \(prøvede Ahri, Mig#EUW, Mig/.test(out), 'årsagen logges');
+    rp.renderBroken = false;
     rp.apiUp = false; rp.conf.isPlayingReplay = false;
 
     // 5) Slå fra: den gamle værdi tilbage - filen er som før.
@@ -744,7 +795,7 @@ async function replayTest(cmd, args, baseEnv, tmp) {
     assert(!('replayApiBefore' in conf));
     assert.deepStrictEqual(rp.other, [], `ingen ukendte replay-endpoints: ${rp.other}`);
     assert(!/Fejl/.test(out), `ingen fejl i replay-kopien: ${out}`);
-    console.log('Replay:', rp.downloads.length, 'download,', rp.watches.length, 'watch, hop:', JSON.stringify(rp.playbackPosts));
+    console.log('Replay:', rp.downloads.length, 'download,', rp.watches.length, 'watch, hop:', JSON.stringify(rp.playbackPosts), 'kamera:', rp.renderPosts.length, 'render-kald');
     console.log('Champion-pulje (MID):', mid.champions.map((c) => `${c.name} ${c.wins}/${c.games}`).join(', '));
   } catch (e) {
     console.log(out);

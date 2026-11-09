@@ -3469,6 +3469,22 @@ function openFile(file) {
 //   time/paused/speed/length/seeking er dem Riots League Director bruger (github.com/RiotGames/leaguedirector, api.py).
 // game.cfg ændres KUN når du selv slår "Replay-spring" til i vinduet (backup + den gamle værdi lægges tilbage, når
 // du slår det fra). Uden det starter knappen bare replayet, og du spoler selv.
+// Kameraet på din champion (v1.22.2) - kilder (tjekket 9/11-2026):
+// - Spillets egen swagger (/swagger/v3/openapi.json, dumpet af github.com/Huy22032002/Proview-HUD-App og
+//   github.com/AlsoSylv/Irelia schemas/replay.json): GET/POST /replay/render ("All values are optional", svarer med
+//   Render). selectionName: "Sets the selection to the given name, case insensitive". cameraAttached: "True if the
+//   camera is attached to an object in the game". cameraMode: HudCameraMode = top | fps | tps | focus | path.
+// - Hvilket navn: champion-navnet virker i flere værktøjer (iamacoffeepot/scry highlight.sh, ssalbdivad/eepalytics
+//   via /replay/objects characterName, fletch-spec/lol-path-mapper "Ahri"); motoren kender champion-id'et
+//   (MissFortune, ikke "Miss Fortune") - skilledDev96/League-team-comp. Ved valg med tasterne læser wooto/lol-replay-
+//   recorder Riot ID'et (Navn#TAG) tilbage i selectionName. Derfor prøves champion-id, Riot ID og navn, og svaret
+//   godtages kun når GET /replay/render melder cameraAttached: true og et af DINE navne.
+// - Timing: et spring rydder valget (skilledDev96, QShin21/lolob "apply selection after the game has actually
+//   finished seeking"), og lige efter indlæsning svarer spillet med selectionName "" (scry) - så det sættes EFTER
+//   springet og prøves igen. cameraMode "top" (lolob; det normale ovenfra-kamera). Aldrig "fps": det fik klienten
+//   til at gå ned hos skilledDev96.
+// - Dig i replayet: puuid -> participantIdentities (gameName/tagLine) i kampens data, og replayets egen
+//   /liveclientdata/allgamedata (læses under replays af wooto/lol-replay-recorder) giver din champion.
 
 const REPLAY_COMPONENT = 'replay-button_match-history';
 const REPLAY_LEAD_SEC = 10;            // hop til 10 sek. før øjeblikket
@@ -3648,7 +3664,7 @@ function replayView() {
     cfgError: st.error,
     clientPatch: majorMinor(app.replayEnv?.conf?.gameVersion),
     lead: REPLAY_LEAD_SEC,
-    job: job ? { gameId: job.gameId, t: job.t, target: job.target, step: job.step, error: job.error, done: job.done } : null,
+    job: job ? { gameId: job.gameId, t: job.t, target: job.target, step: job.step, error: job.error, done: job.done, camera: job.camera || null } : null,
   };
 }
 
@@ -3673,6 +3689,70 @@ async function startReplay(gameId, t) {
   runReplayJob(job, sameReplay, jump).catch((e) => { job.error = `Replayet kunne ikke startes (${String(e.message).slice(0, 160)}).`; log(`Replay: ${job.error}`); broadcast(); });
   broadcast();
   return { ok: true };
+}
+
+const REPLAY_CAMERA_FAIL = 'Kameraet kunne ikke låses - klik på din champion i replayet.';
+const REPLAY_CAMERA_ROUNDS = 6;
+const camKey = (s) => String(s || '').normalize('NFKC').toLowerCase().replace(/[\s'._-]/g, '');
+// Hvem er du i kampen? Kampens data (puuid -> Riot ID + champion), derefter replayets egen spillerliste.
+async function replayIdentity(job) {
+  const g = srGames().find((x) => x.gameId === job.gameId) || {};
+  let championId = g.championId || null; let riot = null;
+  if (app.client) {
+    if (!app.puuid) {
+      const me = await lcu(app.client, 'GET', '/lol-summoner/v1/current-summoner').catch(() => null);
+      if (me?.puuid) app.puuid = me.puuid;
+    }
+    const game = await lcu(app.client, 'GET', `/lol-match-history/v1/games/${job.gameId}`).catch(() => null);
+    const mine = app.puuid ? (game?.participantIdentities || []).find((pi) => pi.player?.puuid === app.puuid) : null;
+    if (mine) {
+      const p = mine.player;
+      riot = { gameName: p.gameName || null, tagLine: p.tagLine || null, summonerName: p.summonerName || null };
+      const part = (game.participants || []).find((x) => x.participantId === mine.participantId);
+      if (part?.championId) championId = part.championId;
+    }
+  }
+  const players = (await replayApi('GET', '/liveclientdata/allgamedata').catch(() => null))?.allPlayers;
+  const list = Array.isArray(players) ? players : [];
+  const riotId = riot?.gameName && riot?.tagLine ? `${riot.gameName}#${riot.tagLine}` : null;
+  const champOf = (p) => String(p.rawChampionName || '').replace(/^game_character_displayname_/, '') || null;
+  const ddc = dd.champions[String(championId)];
+  // Din spiller i replayet: Riot ID, ellers navnet, ellers den eneste med din champion.
+  let me = riotId && list.find((p) => camKey(p.riotId || p.summonerName) === camKey(riotId));
+  if (!me && riot?.gameName) { const same = list.filter((p) => camKey(p.riotIdGameName || String(p.riotId || '').split('#')[0]) === camKey(riot.gameName)); if (same.length === 1) [me] = same; }
+  if (!me && ddc) { const same = list.filter((p) => camKey(champOf(p)) === camKey(ddc.id) || camKey(p.championName) === camKey(ddc.name)); if (same.length === 1) [me] = same; }
+  const champs = [me && champOf(me), me?.championName, ddc?.id, ddc?.name].filter(Boolean);
+  // Samme champion to gange (blind pick): så kan champion-navnet ikke skelne - kun dine navne bruges.
+  const dup = champs.length && list.filter((p) => champs.some((c) => camKey(c) === camKey(champOf(p)) || camKey(c) === camKey(p.championName))).length > 1;
+  const names = [me?.riotId || riotId, me?.riotIdGameName || riot?.gameName, me?.summonerName, riot?.summonerName].filter(Boolean);
+  const candidates = [...new Set([...(dup ? [] : champs.slice(0, 1)), ...names.slice(0, 2)].filter(Boolean))];
+  const expected = new Set([...names, ...(dup ? [] : champs)].map(camKey).filter(Boolean));
+  return { candidates, expected, label: me?.championName || ddc?.name || (riot?.gameName ?? 'din champion') };
+}
+// Lås kameraet på din champion EFTER springet (et spring rydder valget) og bekræft det ved at læse /replay/render.
+async function lockReplayCamera(job) {
+  const who = await replayIdentity(job);
+  if (!who.candidates.length) return { ok: false, why: 'din champion blev ikke fundet i kampens data' };
+  const pause = Math.max(50, Math.round(REPLAY_POLL_MS / 2));
+  const lockedNow = async () => {
+    const r = await replayApi('GET', '/replay/render').catch(() => null);
+    return r && r.cameraAttached === true && who.expected.has(camKey(r.selectionName)) ? r : null;
+  };
+  let last = null;
+  for (let round = 0; round < REPLAY_CAMERA_ROUNDS; round++) {
+    for (const name of who.candidates) {
+      last = await replayApi('POST', '/replay/render', { selectionName: name, cameraAttached: true, cameraMode: 'top' }).catch((e) => ({ error: e.message }));
+      await sleep(pause);
+      const r = await lockedNow();
+      if (!r) continue;
+      // Hold øje et øjeblik: et spring der stadig falder på plads kan rydde valget igen.
+      await sleep(pause);
+      if (await lockedNow()) return { ok: true, name: r.selectionName, label: who.label };
+    }
+    await sleep(pause);
+  }
+  const got = last && !last.error ? `selectionName "${last.selectionName ?? ''}", cameraAttached ${last.cameraAttached}` : (last?.error || 'intet svar');
+  return { ok: false, why: `prøvede ${who.candidates.join(', ')} - spillet svarede ${got}` };
 }
 
 async function runReplayJob(job, alreadyPlaying, jump) {
@@ -3735,9 +3815,14 @@ async function runReplayJob(job, alreadyPlaying, jump) {
       await sleep(REPLAY_POLL_MS);
       const now = await replayApi('GET', '/replay/playback').catch(() => null);
       if (now && !now.seeking && typeof now.time === 'number' && now.time >= target - 5 && now.time <= target + 30) {
-        job.done = true;
         log(`Replay: står på ${mmss(target)}.`);
-        return set(`Replayet står på ${mmss(target)} - ${REPLAY_LEAD_SEC} sek. før ${mmss(job.t)}.`);
+        const at = `Replayet står på ${mmss(target)} - ${REPLAY_LEAD_SEC} sek. før ${mmss(job.t)}.`;
+        set(`${at} Låser kameraet på din champion...`);
+        const lock = await lockReplayCamera(job).catch((e) => ({ ok: false, why: e.message }));
+        job.camera = lock.ok ? 'locked' : 'failed';
+        job.done = true;
+        log(lock.ok ? `Replay: kameraet følger ${lock.name}.` : `Replay: kameraet kunne ikke låses (${lock.why}).`);
+        return set(lock.ok ? `${at} Kameraet følger ${lock.label}.` : `${at} ${REPLAY_CAMERA_FAIL}`);
       }
     }
   }
@@ -3907,7 +3992,7 @@ function poolPick(championId, position) {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.22.1';
+const VERSION = '1.22.2';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 

@@ -582,7 +582,7 @@ function replayBtn(s, rp, t) {
 function replayStatus(s, g) {
   if (!isLocal() || !s.replay) return null;
   const j = s.replay.job;
-  if (j && j.gameId === g.gameId) return el('div', { class: 'replay-line' + (j.error ? ' err' : '') }, el('b', {}, 'Replay: '), j.error || j.step);
+  if (j && j.gameId === g.gameId) return el('div', { class: 'replay-line' + (j.error || j.camera === 'failed' ? ' err' : '') }, el('b', {}, 'Replay: '), j.error || j.step);
   const why = g.replay && !g.replay.ok ? g.replay.reason : s.replay.block;
   return why ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:6px' }, `Replay-knapperne er slået fra: ${why}`) : null;
 }
