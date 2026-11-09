@@ -1851,61 +1851,146 @@ function participantFrame(frame, id) {
   return pf[id] || pf[String(id)] || null;
 }
 
+// Kampgennemgangens format. v1 (v1.18.0) fandt ingen lane-modstander i kampe uden live-data og
+// forventede ITEM_PURCHASED-events, som klientens timeline ikke har - de hentes igen (se reviewOlderGames).
+const REVIEW_VERSION = 2;
+const LANE_POSITION = { TOP: 'Top', MID: 'Mid', ADC: 'Bot', SUPPORT: 'Bot', JUNGLE: 'Jungle' };
+// Guld med tusindtalspunktum (1.250), uden at afhænge af Node's sprogdata.
+const gnum = (x) => { const r = Math.round(x); return (r < 0 ? '-' : '') + String(Math.abs(r)).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); };
+
+// Hvem spillede hvor. Klientens egen timeline.lane/role er upålidelig (i Tobias' 51 kampe stod mid-spillere
+// som NONE/SUPPORT, TOP/SOLO og BOTTOM/DUO, og en top-Darius som JUNGLE), så rollen findes ud fra
+// positionerne: den lane man oftest står i minut 2-10 (laneAt). Smite = jungle.
+// Det ramte den lane-modstander som live-API'et selv fandt i 19 af 19 kampe.
+function assignLanes(parts, frames) {
+  const minuteOf = (f, i) => (typeof f.timestamp === 'number' ? Math.round(f.timestamp / 60000) : i);
+  const early = frames.filter((f, i) => minuteOf(f, i) >= 2 && minuteOf(f, i) <= 10);
+  for (const p of parts) {
+    if (p.spells.includes(11)) { p.lane = 'Jungle'; continue; }
+    const n = { Top: 0, Mid: 0, Bot: 0 };
+    for (const f of early) {
+      const pos = participantFrame(f, p.id)?.position;
+      const l = pos && typeof pos.x === 'number' ? laneAt(pos.x, pos.y) : null;
+      if (l) n[l]++;
+    }
+    const [best, cnt] = Object.entries(n).sort((a, b) => b[1] - a[1])[0];
+    p.lane = cnt > 0 ? best : null;
+  }
+  // Bot-lanen: carry/support efter CS ved 10 min (flest minions = carry) - kun til at vælge den rigtige modstander.
+  const f10 = early[early.length - 1];
+  for (const team of new Set(parts.map((p) => p.team))) {
+    const bot = parts.filter((p) => p.team === team && p.lane === 'Bot');
+    if (bot.length !== 2) continue;
+    const cs = (p) => participantFrame(f10, p.id)?.minionsKilled || 0;
+    const [a, b] = bot;
+    if (cs(a) === cs(b)) continue;
+    (cs(a) > cs(b) ? a : b).botRole = 'carry';
+    (cs(a) > cs(b) ? b : a).botRole = 'support';
+  }
+}
+
+// Lane-modstanderen: 1) den live-API'et fandt under kampen, 2) samme lane ud fra positionerne,
+// 3) klientens timeline.lane/role. Metoden gemmes (oppBy), så gennemgangen kan vise hvor sikker den er.
+function findOpponent(me, enemies, s) {
+  const live = s.oppChampionId ? enemies.find((p) => p.champ === String(s.oppChampionId)) : null;
+  if (live) return { opp: live, by: 'live' };
+  const lane = me.lane || LANE_POSITION[s.position];
+  if (lane) {
+    let same = enemies.filter((p) => p.lane === lane);
+    if (same.length > 1 && me.botRole) same = same.filter((p) => p.botRole === me.botRole);
+    if (same.length === 1) return { opp: same[0], by: 'position' };
+  }
+  // Klientens lane bruges kun når den passer med den rolle du selv spillede (den tager ofte fejl).
+  const LCU_LANE = { TOP: 'Top', MIDDLE: 'Mid', BOTTOM: 'Bot', JUNGLE: 'Jungle' };
+  const lcuSame = LCU_LANE[me.lcuLane] && LCU_LANE[me.lcuLane] === LANE_POSITION[s.position]
+    ? enemies.filter((p) => p.lcuLane === me.lcuLane && (me.lcuLane !== 'BOTTOM' || p.lcuRole === me.lcuRole)) : [];
+  if (lcuSame.length === 1) return { opp: lcuSame[0], by: 'client' };
+  return { opp: null, by: null };
+}
+
 function buildReview(game, timeline, s) {
   const ids = new Map((game?.participantIdentities || []).map((pi) => [pi.participantId, pi.player || {}]));
   const parts = (game?.participants || []).map((p) => ({
     id: p.participantId, team: p.teamId, champ: String(p.championId), spells: [p.spell1Id, p.spell2Id], puuid: ids.get(p.participantId)?.puuid,
+    lcuLane: p.timeline?.lane || null, lcuRole: p.timeline?.role || null, win: p.stats?.win,
   }));
   const me = (s.puuid && parts.find((p) => p.puuid && p.puuid === s.puuid)) || parts.find((p) => p.champ === String(s.championId));
   if (!me) return null;
-  const enemies = parts.filter((p) => p.team !== me.team);
-  const opp = s.oppChampionId ? enemies.find((p) => p.champ === String(s.oppChampionId)) : null;
-  const smiters = enemies.filter((p) => p.spells.includes(11));
-  const jg = (s.enemyJunglerId && enemies.find((p) => p.champ === String(s.enemyJunglerId))) || (smiters.length === 1 ? smiters[0] : null);
   const frames = Array.isArray(timeline?.frames) ? timeline.frames : [];
   if (!frames.length) return null;
+  assignLanes(parts, frames);
+  const enemies = parts.filter((p) => p.team !== me.team);
+  const { opp, by: oppBy } = findOpponent(me, enemies, s);
+  const smiters = enemies.filter((p) => p.spells.includes(11));
+  const jg = (s.enemyJunglerId && enemies.find((p) => p.champ === String(s.enemyJunglerId))) || (smiters.length === 1 ? smiters[0] : null);
   const champOf = (id) => parts.find((p) => p.id === id)?.champ || null;
   const minute = (f, i) => (typeof f.timestamp === 'number' ? Math.round(f.timestamp / 60000) : i);
-  const pos = (f, id) => { const p = participantFrame(f, id)?.position; return p && typeof p.x === 'number' ? [Math.round(p.x), Math.round(p.y)] : null; };
-  // Guldforskel mod lane-modstanderen pr. minut (totalGold i timelinen).
+  const pf = (f, id) => participantFrame(f, id);
+  const pos = (f, id) => { const p = pf(f, id)?.position; return p && typeof p.x === 'number' ? [Math.round(p.x), Math.round(p.y)] : null; };
+  const cs = (f, id) => { const p = pf(f, id); return p ? (p.minionsKilled || 0) + (p.jungleMinionsKilled || 0) : null; };
+  // Guldforskel mod lane-modstanderen og mellem holdene pr. minut (totalGold i timelinen).
   const gold = opp ? frames.map((f, i) => {
-    const a = participantFrame(f, me.id)?.totalGold; const b = participantFrame(f, opp.id)?.totalGold;
+    const a = pf(f, me.id)?.totalGold; const b = pf(f, opp.id)?.totalGold;
     return typeof a === 'number' && typeof b === 'number' ? [minute(f, i), a - b] : null;
   }).filter(Boolean) : [];
-  const early = frames.filter((f, i) => minute(f, i) >= 1 && minute(f, i) <= 8);
-  const jungle = s.position === 'JUNGLE';
+  const team = frames.map((f, i) => {
+    let d = 0;
+    for (const p of parts) { const g = pf(f, p.id)?.totalGold; if (typeof g !== 'number') return null; d += p.team === me.team ? g : -g; }
+    return [minute(f, i), d];
+  }).filter(Boolean);
+  // Øjebliksbilleder ved 10 og 15 min: guld, CS og XP mod lane-modstanderen.
+  const at = {};
+  for (const m of [10, 15]) {
+    const f = frames.find((x, i) => minute(x, i) === m);
+    if (!f || !pf(f, me.id)) continue;
+    const mine = pf(f, me.id); const theirs = opp ? pf(f, opp.id) : null;
+    at[m] = {
+      cs: cs(f, me.id),
+      oppCs: theirs ? cs(f, opp.id) : null,
+      gold: theirs && typeof mine.totalGold === 'number' ? mine.totalGold - theirs.totalGold : null,
+      xp: theirs && typeof mine.xp === 'number' ? mine.xp - theirs.xp : null,
+    };
+  }
+  const jungle = s.position === 'JUNGLE' || me.lane === 'Jungle';
   const events = frames.flatMap((f) => (Array.isArray(f.events) ? f.events : []));
   const sec = (e) => Math.round((e.timestamp || 0) / 1000);
   const kills = events.filter((e) => e.type === 'CHAMPION_KILL');
-  const deaths = kills.filter((e) => e.victimId === me.id).map((e) => ({
-    t: sec(e), x: e.position?.x ?? null, y: e.position?.y ?? null, killer: champOf(e.killerId),
-    by: opp && e.killerId === opp.id ? 'lane' : jg && e.killerId === jg.id ? 'jungle' : 'other',
-  }));
+  // Din halvdel af kortet: blå = nederst til venstre (x + y < kortets størrelse).
+  const ownHalf = (x, y) => (me.team === 200 ? x + y > MAP_SIZE : x + y < MAP_SIZE);
+  const deaths = kills.filter((e) => e.victimId === me.id).map((e) => {
+    const x = e.position?.x ?? null; const y = e.position?.y ?? null;
+    return {
+      t: sec(e), x, y, killer: champOf(e.killerId),
+      // Fjendens jungler først: for en jungler er lane-modstanderen den samme.
+      by: jg && e.killerId === jg.id ? 'jungle' : opp && e.killerId === opp.id ? 'lane' : 'other',
+      // Antal fjender om drabet: drabsmanden + dem med assist (0 = tårn/minions).
+      n: (e.killerId > 0 ? 1 : 0) + (Array.isArray(e.assistingParticipantIds) ? e.assistingParticipantIds.length : 0),
+      zone: x == null ? null : laneAt(x, y) || 'Jungle',
+      own: x == null ? null : ownHalf(x, y),
+    };
+  });
   const ganks = jungle ? kills.filter((e) => sec(e) < 600 && e.position && (e.killerId === me.id || (e.assistingParticipantIds || []).includes(me.id)))
     .map((e) => ({ t: sec(e), x: e.position.x, y: e.position.y, lane: laneAt(e.position.x, e.position.y), kill: e.killerId === me.id, victim: champOf(e.victimId) }))
     .filter((x) => x.lane) : [];
-  // Første færdige items (ITEM_UNDO fortryder et køb).
-  const bought = [];
-  for (const e of events) {
-    if (e.participantId !== me.id) continue;
-    if (e.type === 'ITEM_PURCHASED') bought.push({ id: String(e.itemId), t: sec(e) });
-    else if (e.type === 'ITEM_UNDO') {
-      const i = bought.map((b) => b.id).lastIndexOf(String(e.beforeId));
-      if (i !== -1) bought.splice(i, 1);
-    }
-  }
-  const items = bought.filter((b) => isCompleted(dd.items[b.id])).slice(0, 4);
+  // Din position minut for minut: junglere 1-8 (første clear), lanere 1-14 (laning til tårnpladerne falder).
+  const pathTo = jungle ? 8 : 14;
+  const span = frames.filter((f, i) => minute(f, i) >= 1 && minute(f, i) <= pathTo);
   return {
-    v: 1,
+    v: REVIEW_VERSION,
     side: me.team === 200 ? 'RED' : 'BLUE',
+    win: typeof me.win === 'boolean' ? me.win : null,
+    lane: me.lane,
     opp: opp?.champ || null,
+    oppBy,
     jg: jg?.champ || null,
     deaths,
     gold,
-    path: jungle ? early.map((f) => pos(f, me.id)).filter(Boolean) : [],
-    jgPath: jungle && jg ? early.map((f) => pos(f, jg.id)).filter(Boolean) : [],
+    team,
+    at,
+    path: span.map((f) => pos(f, me.id)).filter(Boolean),
+    pathTo,
+    jgPath: jungle && jg ? frames.filter((f, i) => minute(f, i) >= 1 && minute(f, i) <= 8).map((f) => pos(f, jg.id)).filter(Boolean) : [],
     ganks,
-    items,
   };
 }
 
@@ -1943,8 +2028,11 @@ async function fetchReview(summary, attempts) {
       const review = buildReview(game, timeline, { ...summary, puuid: app.puuid });
       if (!review) { lastErr = new Error('kampen kunne ikke læses'); continue; }
       summary.review = review;
+      // Resultatet mangler, når kampen sluttede uden GameEnd-event i live-API'et: klienten ved det.
+      if (!summary.result && review.win != null) summary.result = review.win ? 'Sejr' : 'Nederlag';
       saveHistory();
-      log(`Kampgennemgang klar: ${summary.champion} (${review.deaths.length} dødsfald, ${review.gold.length} minutter guld).`);
+      log(`Kampgennemgang klar: ${summary.champion} (${review.deaths.length} dødsfald, ` +
+        `${review.opp ? `mod ${dd.champions[review.opp]?.name || review.opp}` : 'ingen lane-modstander fundet'}, ${review.team.length} minutter guld).`);
       broadcast();
       return true;
     } catch (e) {
@@ -1955,19 +2043,24 @@ async function fetchReview(summary, attempts) {
   return false;
 }
 
-// Ældre kampe (fra før v1.18 eller hvor hentningen fejlede): find kampens id i klientens kamphistorik
-// (samme champion, sluttede inden for 10 min af det gemte tidspunkt) og hent gennemgangen, hvis klienten stadig har den.
-async function reviewOlderGames() {
+const BUSY_PHASES = ['ChampSelect', 'InProgress', 'GameStart', 'Reconnect'];
+const reviewOutdated = (g) => g.review && !(g.review.v >= REVIEW_VERSION);
+// Ældre kampe (uden gennemgang, eller med en gennemgang i et ældre format): find kampens id i klientens
+// kamphistorik (samme champion, sluttede inden for 10 min af det gemte tidspunkt) og hent gennemgangen,
+// hvis klienten stadig har den. Stopper hvis champion select eller en kamp går i gang undervejs.
+async function reviewOlderGames(opts = {}) {
   if (!app.client) return { ok: false, error: 'League-klienten kører ikke' };
-  const phase = await lcu(app.client, 'GET', '/lol-gameflow/v1/gameflow-phase').catch(() => null);
-  if (['ChampSelect', 'InProgress', 'GameStart', 'Reconnect'].includes(phase)) return { ok: false, error: 'Ikke under champion select eller kamp' };
-  const missing = srGames().slice(0, 20).filter((g) => !g.review);
+  const busy = async () => BUSY_PHASES.includes(await lcu(app.client, 'GET', '/lol-gameflow/v1/gameflow-phase').catch(() => null));
+  if (await busy()) return { ok: false, error: 'Ikke under champion select eller kamp' };
+  const missing = srGames().slice(0, 50).filter((g) => (opts.outdatedOnly ? reviewOutdated(g) : !g.review || reviewOutdated(g)));
   if (!missing.length) return { ok: true, found: 0, tried: 0 };
   let list = [];
-  try {
-    const j = await lcu(app.client, 'GET', '/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=20');
-    list = j?.games?.games || [];
-  } catch {}
+  if (missing.some((g) => !g.gameId)) {
+    try {
+      const j = await lcu(app.client, 'GET', '/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=50');
+      list = j?.games?.games || [];
+    } catch {}
+  }
   let found = 0;
   for (const g of missing) {
     if (!g.gameId) {
@@ -1977,18 +2070,42 @@ async function reviewOlderGames() {
       if (!m) continue;
       g.gameId = m.gameId;
     }
+    if (await busy()) break;
     if (await fetchReview(g, 1)) found++;
   }
   saveHistory();
   return { ok: true, found, tried: missing.length };
 }
 
+// Gennemgange fra v1.18.0 (uden lane-modstander/guld) hentes igen af sig selv én gang, når klienten er ledig.
+function upgradeOldReviews(phase) {
+  if (app.reviewUpgrade || !app.cfg.matchReview || BUSY_PHASES.includes(phase) || !srGames().some(reviewOutdated)) return;
+  app.reviewUpgrade = 'running';
+  reviewOlderGames({ outdatedOnly: true })
+    .then((r) => { if (r.ok && r.tried) log(`Kampgennemgang: ${r.found} af ${r.tried} ældre gennemgange opdateret til det nye format.`); broadcast(); })
+    .catch(() => {})
+    .finally(() => { app.reviewUpgrade = 'done'; });
+}
+
+const median = (xs) => {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
+};
+// Gennemgange i det nuværende format (v1 mangler modstander og guld).
+const reviewed = (gs) => gs.filter((g) => g.review?.v >= REVIEW_VERSION);
+const firstBuys = (g) => (g.buys || []).slice(0, 4).map((b) => ({ id: b.id, t: Math.round(b.t) }));
+
 function reviewView() {
   if (!app.cfg.matchReview) return null;
-  const games = srGames().slice(0, 15).filter((g) => g.review || (g.deathLog || []).some((d) => d.clip));
+  const all = srGames();
+  const games = all.slice(0, 15).filter((g) => g.review || (g.deathLog || []).some((d) => d.clip));
   return games.slice(0, 10).map((g) => {
-    const r = g.review;
+    const r = g.review?.v >= REVIEW_VERSION ? g.review : null;
     const item = (id) => ({ id, name: itemName(id), icon: dd.items[id]?.icon });
+    // Din median for CS ved 10 min med samme champion og rolle (andre kampe med gennemgang).
+    const same = reviewed(all).filter((x) => x !== g && x.championId === g.championId && x.position === g.position && typeof x.review.at?.[10]?.cs === 'number');
+    const firstItem = firstItemTime(g);
     return {
       date: g.date,
       champion: g.champion,
@@ -1996,16 +2113,25 @@ function reviewView() {
       result: g.result,
       position: g.position,
       jungle: g.position === 'JUNGLE',
+      outdated: Boolean(g.review && !r),
       review: r ? {
         side: r.side,
         opp: r.opp ? champView(r.opp) : null,
+        oppBy: r.oppBy,
         jg: r.jg ? champView(r.jg) : null,
-        deaths: r.deaths.map((d) => ({ ...d, killer: d.killer ? dd.champions[d.killer]?.name || d.killer : null })),
+        deaths: r.deaths.map((d) => ({ ...d, killer: d.killer ? dd.champions[d.killer]?.name || d.killer : null,
+          beforeItem: firstItem != null ? d.t < firstItem : null })),
         gold: r.gold,
+        team: r.team,
+        at: r.at,
+        cs10Median: same.length >= 3 ? median(same.map((x) => x.review.at[10].cs)) : null,
+        cs10Games: same.length,
         path: r.path,
+        pathTo: r.pathTo,
         jgPath: r.jgPath,
         ganks: r.ganks.map((x) => ({ ...x, victim: x.victim ? dd.champions[x.victim]?.name || x.victim : null })),
-        items: r.items.map((x) => ({ ...item(x.id), t: x.t })),
+        // Klientens timeline har ingen køb - de første færdige items kommer fra live-API'et under kampen.
+        items: firstBuys(g).map((x) => ({ ...item(x.id), t: x.t })),
       } : null,
       clips: (g.deathLog || []).filter((d) => d.clip).map((d) => ({ t: d.t, killer: d.killer, file: d.clip, name: path.basename(d.clip) })),
     };
@@ -2013,23 +2139,23 @@ function reviewView() {
 }
 
 // ---------- Dine mønstre (på tværs af kampe) ----------
-// Kun sammenhænge med tal ("7 af 9"), aldrig årsager. Kræver mindst 10 kampe på samme champion og rolle,
-// og hver linje kræver selv mindst 10 kampe med de data den bygger på. Skillelinjer kommer fra dine egne data (median).
+// Kun sammenhænge med tal ("7 af 9"), aldrig årsager. Kræver mindst 10 kampe i gruppen (champion + rolle,
+// eller alle dine kampe i en rolle), og hver linje kræver selv mindst 10 kampe med de data den bygger på.
+// Skillelinjer kommer fra dine egne data (median) - ingen faste tærskler.
 
 const PATTERN_MIN_GAMES = 10;
-function patternsFor(championId, position) {
-  const games = srGames().filter((g) => g.championId === Number(championId) && (!position || g.position === position));
-  if (games.length < PATTERN_MIN_GAMES) return { games: games.length, lines: [] };
+const PHASES = [[0, 14, 'tidligt (0-14 min)'], [14, 25, 'midt (14-25 min)'], [25, Infinity, 'sent (25+ min)']];
+function patternLines(games, oppLabel = 'lane-modstanderen') {
   const known = games.filter((g) => g.result === 'Sejr' || g.result === 'Nederlag');
   const wins = (gs) => gs.filter((g) => g.result === 'Sejr').length;
   const split = (label, a, b, la, lb) => (a.length && b.length
     ? `${label}: ${la} ${wins(a)} af ${a.length} sejre - ${lb} ${wins(b)} af ${b.length}` : null);
+  const enough = (xs) => xs.length >= PATTERN_MIN_GAMES;
   const lines = [];
   // 1) Første færdige item før/efter din median.
   const withItem = known.map((g) => ({ g, t: firstItemTime(g) })).filter((x) => x.t != null);
-  if (withItem.length >= PATTERN_MIN_GAMES) {
-    const ts = withItem.map((x) => x.t).sort((a, b) => a - b);
-    const med = ts.length % 2 ? ts[(ts.length - 1) / 2] : (ts[ts.length / 2 - 1] + ts[ts.length / 2]) / 2;
+  if (enough(withItem)) {
+    const med = median(withItem.map((x) => x.t));
     const counts = new Map();
     for (const { g } of withItem) { const id = (g.buys || []).find((b) => !isBoots(dd.items[b.id]))?.id; if (id) counts.set(id, (counts.get(id) || 0) + 1); }
     const [topId, topN] = [...counts].sort((a, b) => b[1] - a[1])[0] || [];
@@ -2038,58 +2164,149 @@ function patternsFor(championId, position) {
   }
   // 2) Dødsfald før 14 min (kill-feedet).
   const withDeaths = known.filter((g) => Array.isArray(g.deathLog));
-  if (withDeaths.length >= PATTERN_MIN_GAMES) {
+  if (enough(withDeaths)) {
     const early = (g) => g.deathLog.some((d) => d.t < 840);
     const line = split('Dødsfald før 14 min', withDeaths.filter((g) => !early(g)), withDeaths.filter(early), 'ingen:', 'mindst ét:');
     if (line) lines.push({ key: 'deaths', text: line });
   }
-  // 3-4) Hvor og til hvem (kampgennemgangen).
-  const reviewed = games.filter((g) => g.review?.deaths);
-  if (reviewed.length >= PATTERN_MIN_GAMES) {
-    const early = reviewed.flatMap((g) => g.review.deaths.filter((d) => d.t < 840 && typeof d.x === 'number'));
+  const rv = reviewed(games);
+  const rvKnown = rv.filter((g) => known.includes(g));
+  if (enough(rv)) {
+    // 3) Hvor, til hvem og mod hvor mange (kampgennemgangen).
+    const all = rv.flatMap((g) => g.review.deaths.map((d) => ({ ...d, g })));
+    const early = all.filter((d) => d.t < 840);
+    const n = rv.length;
     if (early.length) {
-      const top = early.filter((d) => mapSide(d.x, d.y) === 'top').length;
-      const [n, side] = top >= early.length - top ? [top, 'top-siden'] : [early.length - top, 'bot-siden'];
-      lines.push({ key: 'side', text: `${n} af dine ${early.length} dødsfald før 14 min var på ${side} (${reviewed.length} kampe med kampgennemgang)` });
       const by = (k) => early.filter((d) => d.by === k).length;
-      lines.push({ key: 'killer', text: `Dødsfald før 14 min: ${by('lane')} til lane-modstanderen, ${by('jungle')} til fjendens jungler, ${by('other')} til andre` });
+      lines.push({ key: 'killer', text: `Dødsfald før 14 min (${early.length} i ${n} kampe): ` +
+        (oppLabel === 'lane-modstanderen' ? `${by('lane')} til lane-modstanderen, ` : '') + `${by('jungle')} til fjendens jungler, ${by('other')} til andre` });
+      const placed = early.filter((d) => d.zone);
+      if (placed.length) {
+        const own = placed.filter((d) => d.own).length;
+        const inJungle = placed.filter((d) => d.zone === 'Jungle').length;
+        lines.push({ key: 'where', text: `Hvor: ${placed.length - inJungle} af ${placed.length} i en lane, ${inJungle} i jungle/flod - ${placed.length - own} på fjendens halvdel af kortet` });
+      }
     }
-    const at10 = reviewed.filter((g) => known.includes(g)).map((g) => ({ g, d: g.review.gold.find((x) => x[0] === 10)?.[1] })).filter((x) => typeof x.d === 'number' && x.d !== 0);
-    if (at10.length >= PATTERN_MIN_GAMES) {
-      const line = split('Guld mod lane-modstanderen ved 10 min', at10.filter((x) => x.d > 0).map((x) => x.g), at10.filter((x) => x.d < 0).map((x) => x.g), 'foran:', 'bagud:');
-      if (line) lines.push({ key: 'gold10', text: line });
+    if (all.length) {
+      const c = (f) => all.filter(f).length;
+      const towers = c((d) => d.n === 0);
+      lines.push({ key: 'collapse', text: `Alle ${all.length} dødsfald (${n} kampe): ${c((d) => d.n === 1)} mod én, ${c((d) => d.n === 2)} mod to, ${c((d) => d.n >= 3)} mod tre eller flere` +
+        (towers ? `, ${towers} til tårn/minions` : '') });
+      // Før/efter første færdige item - som dødsfald pr. 10 min, da tiden før første item er kortere.
+      const timed = rv.filter((g) => firstItemTime(g) != null);
+      if (enough(timed)) {
+        let a = 0; let b = 0; let ta = 0; let tb = 0;
+        for (const g of timed) {
+          const fi = firstItemTime(g);
+          for (const d of g.review.deaths) (d.t < fi ? a++ : b++);
+          ta += Math.min(fi, g.duration); tb += Math.max(0, g.duration - fi);
+        }
+        const rate = (k, t) => String(Math.round((k / (t / 600)) * 10) / 10).replace('.', ',');
+        if (ta && tb) lines.push({ key: 'firstitem', text: `Før dit første færdige item: ${a} dødsfald (${rate(a, ta)} pr. 10 min) - efter: ${b} (${rate(b, tb)} pr. 10 min), ${timed.length} kampe` });
+      }
     }
   }
-  // 5) Dueller mod lane-modstanderen.
+  // 4) Guld og CS mod lane-modstanderen ved 10 og 15 min.
+  for (const m of [10, 15]) {
+    const at = rvKnown.map((g) => ({ g, d: g.review.at?.[m]?.gold })).filter((x) => typeof x.d === 'number' && x.d !== 0);
+    if (!enough(at)) continue;
+    const line = split(`Guld mod ${oppLabel} ved ${m} min`, at.filter((x) => x.d > 0).map((x) => x.g), at.filter((x) => x.d < 0).map((x) => x.g), 'foran:', 'bagud:');
+    if (line) lines.push({ key: `gold${m}`, text: `${line} (median ${median(at.map((x) => x.d)) >= 0 ? '+' : ''}${gnum(median(at.map((x) => x.d)))} g)` });
+  }
+  const cs10 = rvKnown.map((g) => ({ g, cs: g.review.at?.[10]?.cs })).filter((x) => typeof x.cs === 'number');
+  if (enough(cs10)) {
+    const med = median(cs10.map((x) => x.cs));
+    const line = split(`CS ved 10 min (din median ${Math.round(med)})`, cs10.filter((x) => x.cs > med).map((x) => x.g), cs10.filter((x) => x.cs <= med).map((x) => x.g), 'over:', 'median eller under:');
+    if (line) lines.push({ key: 'cs10', text: line });
+  }
+  // 5) Faser: holdets guldforskel ved 10/20 min og hvor nederlagene tabte mest guld.
+  const teamAt = (g, m) => g.review.team?.find((x) => x[0] === m)?.[1];
+  for (const m of [10, 20]) {
+    const at = rvKnown.map((g) => ({ g, d: teamAt(g, m) })).filter((x) => typeof x.d === 'number' && x.d !== 0);
+    if (!enough(at)) continue;
+    const line = split(`Holdets guld ved ${m} min`, at.filter((x) => x.d > 0).map((x) => x.g), at.filter((x) => x.d < 0).map((x) => x.g), 'foran:', 'bagud:');
+    if (line) lines.push({ key: `team${m}`, text: line });
+  }
+  const losses = rvKnown.filter((g) => g.result === 'Nederlag' && (g.review.team || []).length >= 5);
+  if (losses.length && enough(rvKnown)) {
+    // Fasen hvor holdets guldforskel faldt mest pr. minut.
+    const worst = new Map();
+    for (const g of losses) {
+      const t = g.review.team;
+      let best = null;
+      for (const [from, to, label] of PHASES) {
+        const a = [...t].reverse().find((x) => x[0] <= from) || t[0];
+        const b = [...t].reverse().find((x) => x[0] <= to) || t[t.length - 1];
+        if (b[0] - a[0] < 3) continue;
+        const rate = (b[1] - a[1]) / (b[0] - a[0]);
+        if (!best || rate < best.rate) best = { rate, label };
+      }
+      if (best && best.rate < 0) worst.set(best.label, (worst.get(best.label) || 0) + 1);
+    }
+    if (worst.size) lines.push({ key: 'phase', text: `I ${losses.length} nederlag faldt holdets guld mest (pr. minut): ${PHASES.map(([, , l]) => `${l} ${worst.get(l) || 0}`).join(', ')}` });
+    // Tabte føringer: nederlag hvor holdet var mere foran end din median for største føring (alle kampe i gruppen).
+    const peak = (g) => Math.max(0, ...g.review.team.map((x) => x[1]));
+    const medPeak = median(rvKnown.map(peak));
+    const thrown = losses.filter((g) => peak(g) > medPeak && medPeak > 0);
+    if (medPeak > 0) lines.push({ key: 'throw', text: `Tabte føringer: ${thrown.length} af ${losses.length} nederlag hvor holdet var mere end ${gnum(medPeak)} g foran (din median for største føring)` });
+  }
+  // 6) Jungle: første gank = første kill/assist i en lane før 10 min (mislykkede ganks kan ikke ses i timelinen).
+  const jg = rvKnown.filter((g) => g.position === 'JUNGLE');
+  if (enough(jg)) {
+    const withGank = jg.map((g) => ({ g, t: g.review.ganks?.[0]?.t })).filter((x) => typeof x.t === 'number');
+    const none = jg.length - withGank.length;
+    const med = median(withGank.map((x) => x.t));
+    const line = withGank.length ? split(`Første kill/assist i en lane (din median ${mmss(med)})`, withGank.filter((x) => x.t < med).map((x) => x.g), withGank.filter((x) => x.t >= med).map((x) => x.g), 'før:', 'senere:') : null;
+    if (line || none) lines.push({ key: 'gank', text: (line || 'Første kill/assist i en lane') + (none ? ` - ingen før 10 min: ${wins(jg.filter((g) => !g.review.ganks?.length))} af ${none} sejre` : '') });
+  }
+  // 7) Dueller mod lane-modstanderen.
   const withDuels = known.filter((g) => (g.duels || []).length);
-  if (withDuels.length >= PATTERN_MIN_GAMES) {
+  if (enough(withDuels)) {
     const net = (g) => g.duels.filter((d) => d.won).length - g.duels.filter((d) => !d.won).length;
-    const line = split('Dueller mod lane-modstanderen', withDuels.filter((g) => net(g) > 0), withDuels.filter((g) => net(g) < 0), 'vandt flest:', 'tabte flest:');
+    const line = split(`Dueller mod ${oppLabel}`, withDuels.filter((g) => net(g) > 0), withDuels.filter((g) => net(g) < 0), 'vandt flest:', 'tabte flest:');
     if (line) lines.push({ key: 'duels', text: line });
   }
-  return { games: games.length, lines };
+  return lines;
 }
 
-// Kortet "Dine mønstre": dine mest spillede champion + rolle-kombinationer.
+function patternsFor(championId, position) {
+  const games = srGames().filter((g) => (championId == null || g.championId === Number(championId)) && (!position || g.position === position));
+  if (games.length < PATTERN_MIN_GAMES) return { games: games.length, lines: [] };
+  return { games: games.length, reviewed: reviewed(games).length, lines: patternLines(games, position === 'JUNGLE' ? 'fjendens jungler' : 'lane-modstanderen') };
+}
+
+// Kortet "Dine mønstre": dine mest spillede champion + rolle-kombinationer, og dine roller samlet
+// (når rollen har flere champions, fx jungle med Lee Sin og Evelynn). Grupper under 10 kampe vises med antal.
 function patternsView() {
   if (!app.cfg.patterns) return null;
   const combos = new Map();
+  const roles = new Map();
   for (const g of srGames()) {
     if (!g.championId || !g.position) continue;
     const k = `${g.championId}|${g.position}`;
     combos.set(k, (combos.get(k) || 0) + 1);
+    if (!roles.has(g.position)) roles.set(g.position, new Set());
+    roles.get(g.position).add(g.championId);
   }
   const sorted = [...combos].sort((a, b) => b[1] - a[1]);
   const out = [];
-  for (const [k] of sorted) {
+  const pending = [];
+  for (const [k, n] of sorted) {
     const [id, pos] = k.split('|');
+    if (n < PATTERN_MIN_GAMES) { pending.push({ champion: champView(id), position: pos, games: n }); continue; }
     const p = patternsFor(id, pos);
-    if (p.lines.length) out.push({ champion: champView(id), position: pos, games: p.games, lines: p.lines.map((l) => l.text) });
-    if (out.length >= 3) break;
+    if (p.lines.length && out.length < 3) out.push({ champion: champView(id), position: pos, games: p.games, reviewed: p.reviewed, lines: p.lines.map((l) => l.text) });
+  }
+  // Rollen samlet kun når ingen champion i rollen selv har nok kampe (ellers gentager den champion-gruppen).
+  for (const [pos, champs] of roles) {
+    if (champs.size < 2 || [...champs].some((id) => (combos.get(`${id}|${pos}`) || 0) >= PATTERN_MIN_GAMES)) continue;
+    const p = patternsFor(null, pos);
+    if (p.lines.length) out.push({ champion: null, position: pos, games: p.games, reviewed: p.reviewed, lines: p.lines.map((l) => l.text) });
   }
   const best = sorted[0];
   return {
     groups: out,
+    pending: pending.slice(0, 6),
     minGames: PATTERN_MIN_GAMES,
     waiting: !out.length && best ? { champion: champView(best[0].split('|')[0]), position: best[0].split('|')[1], games: best[1] } : null,
   };
@@ -2260,7 +2477,7 @@ function openFile(file) {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.18.0';
+const VERSION = '1.19.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -4038,6 +4255,7 @@ async function tick() {
     if (app.draft || app.draftKey || app.draftStatus) { app.draft = null; app.draftKey = null; app.draftStatus = null; }
     // Tilbage i lobbyen uden kamp (fx dodge): vis ikke den gamle champion select.
     if ((app.pick || app.enemyJungle) && ['None', 'Lobby', 'Matchmaking', 'ReadyCheck'].includes(phase)) { clearPick(); broadcast(); }
+    if (['None', 'Lobby', 'EndOfGame'].includes(phase)) upgradeOldReviews(phase);
     return cfg.pollMs;
   }
   const session = await lcu(app.client, 'GET', '/lol-champ-select/v1/session');

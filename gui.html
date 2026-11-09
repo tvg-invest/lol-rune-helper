@@ -434,12 +434,37 @@ function goldChart(gold) {
     gold.map(([t, d]) => svg('circle', { cx: x(t), cy: y(d), r: 3, fill: d >= 0 ? '#3fbf7f' : '#e84057' }, svg('title', {}, `${t} min: ${d >= 0 ? '+' : ''}${num(d)} g`))));
 }
 
+const OPP_BY = { live: 'fundet under kampen', position: 'fundet ud fra positionerne i minut 2-10', client: 'klientens lane-angivelse' };
+const signed = (x) => `${x >= 0 ? '+' : ''}${num(x)}`;
+// Ved 10/15 min: guld, CS og XP mod lane-modstanderen (+ din median for CS ved 10 min med samme champion og rolle).
+function atLine(r, m, g) {
+  const a = r.at && r.at[m];
+  if (!a) return null;
+  const parts = [];
+  if (a.gold != null) parts.push(`${signed(a.gold)} g`);
+  parts.push(`${a.cs} CS${a.oppCs != null && r.opp ? ` (${r.opp.name} ${a.oppCs})` : ''}`);
+  if (a.xp != null) parts.push(`${signed(a.xp)} XP`);
+  const med = m === 10 && r.cs10Median != null ? ` - din median ${Math.round(r.cs10Median)} CS i ${r.cs10Games} andre kampe med ${g.champion} ${g.position}` : '';
+  return el('div', { style: 'font-size:13px;margin-top:4px' }, el('b', {}, `Ved ${m} min: `), parts.join(', '), el('span', { class: 'muted' }, med));
+}
+const ZONE = { Top: 'top-lanen', Mid: 'mid-lanen', Bot: 'bot-lanen', Jungle: 'jungle/flod' };
+function deathText(d) {
+  const who = d.by === 'lane' ? ' (lane-modstanderen)' : d.by === 'jungle' ? ' (fjendens jungler)' : '';
+  const extra = [
+    d.n === 0 ? 'tårn/minions' : d.n === 1 ? 'mod én' : d.n ? `mod ${d.n}` : null,
+    d.zone ? `i ${ZONE[d.zone] || d.zone}` : null,
+    d.own === false ? 'på fjendens halvdel' : d.own ? 'på din halvdel' : null,
+    d.beforeItem ? 'før første færdige item' : null,
+  ].filter(Boolean);
+  return `${clock(d.t)} død${d.killer ? ` til ${d.killer}` : ''}${who}${extra.length ? ' - ' + extra.join(', ') : ''}`;
+}
+
 let reviewIdx = 0;
 function reviewCard(s) {
   const list = s.reviews;
   if (!list || !list.length) {
     return s.history ? el('div', { class: 'card' }, el('h2', {}, 'Kampgennemgang'),
-      el('div', { class: 'muted' }, 'Efter din næste kamp hentes kampens timeline fra League-klienten: dødsfald på kortet, guld mod lane-modstanderen og dine første items.'),
+      el('div', { class: 'muted' }, 'Efter din næste kamp hentes kampens timeline fra League-klienten: dødsfald på kortet, guld og CS mod lane-modstanderen og holdets guldkurve.'),
       olderButton()) : null;
   }
   if (reviewIdx >= list.length) reviewIdx = 0;
@@ -455,18 +480,23 @@ function reviewCard(s) {
         minimap(s, r),
         el('div', { class: 'review-side' },
           el('div', { class: 'legend' }, el('span', {}, el('i', { style: 'background:#e84057' }), 'Dine dødsfald'),
-            r.path.length ? el('span', {}, el('i', { style: 'background:#0ac8b9' }), 'Din rute (1-8 min)') : null,
+            r.path.length ? el('span', {}, el('i', { style: 'background:#0ac8b9' }), `Din position (1-${r.pathTo || 8} min)`) : null,
             r.jgPath.length ? el('span', {}, el('i', { style: 'background:#f0a020' }), `${r.jg ? r.jg.name : 'Fjendens jungler'} (1-8 min)`) : null,
             r.ganks.length ? el('span', {}, el('i', { style: 'background:#3fbf7f' }), 'Ganks (kill/assist i en lane før 10 min)') : null),
-          r.deaths.length ? el('ul', { class: 'notes' }, r.deaths.map((d) => el('li', {}, `${clock(d.t)} død${d.killer ? ` til ${d.killer}` : ''}` +
-            (d.by === 'lane' ? ' (lane-modstanderen)' : d.by === 'jungle' ? ' (fjendens jungler)' : '')))) : el('div', { class: 'muted', style: 'margin-top:8px' }, 'Ingen dødsfald.'),
+          r.opp ? el('div', { style: 'margin-top:6px' }, `Lane-modstander: ${r.opp.name}`,
+            el('span', { class: 'muted', style: 'font-size:11px' }, ` (${OPP_BY[r.oppBy] || '?'})`)) : el('div', { class: 'muted', style: 'margin-top:6px;font-size:12px' }, 'Lane-modstanderen kunne ikke findes i denne kamp.'),
+          atLine(r, 10, g), atLine(r, 15, g),
+          r.deaths.length ? el('ul', { class: 'notes' }, r.deaths.map((d) => el('li', {}, deathText(d)))) : el('div', { class: 'muted', style: 'margin-top:8px' }, 'Ingen dødsfald.'),
           g.jungle && r.ganks.length ? [el('div', { class: 'plan-sub' }, `Ganks før 10 min: ${r.ganks.length}`),
             el('ul', { class: 'notes' }, r.ganks.map((x) => el('li', {}, `${clock(x.t)} ${x.lane}: ${x.kill ? 'kill' : 'assist'} på ${x.victim || '?'}`)))] : null,
           g.jungle && !r.ganks.length ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Ingen kills/assists i en lane før 10 min.') : null)),
       r.opp ? [el('div', { class: 'plan-sub' }, `Guld mod ${r.opp.name} pr. minut`), goldChart(r.gold) || el('div', { class: 'muted' }, 'Ingen guld-data.')] : null,
-      r.items.length ? [el('div', { class: 'plan-sub' }, 'Dine første items'),
+      r.team && r.team.length > 1 ? [el('div', { class: 'plan-sub' }, 'Holdets guldforskel pr. minut'), goldChart(r.team)] : null,
+      r.items.length ? [el('div', { class: 'plan-sub' }, 'Dine første færdige items (fra live-data under kampen)'),
         el('div', { class: 'buys' }, r.items.map((it) => el('div', { class: 'buy' }, img(it.icon, it.name), clock(it.t))))] : null,
-    ] : el('div', { class: 'muted' }, 'Ingen timeline for denne kamp.'),
+    ] : el('div', { class: 'muted' }, g.outdated
+      ? 'Gennemgangen er lavet med en ældre version (uden lane-modstander og guld). Den hentes igen af sig selv, når klienten er ledig - eller klik herunder.'
+      : 'Ingen timeline for denne kamp.'),
     g.clips.length ? [el('div', { class: 'plan-sub' }, 'Dine dødsfald (video)'),
       el('div', { class: 'clips' }, g.clips.map((c) => clipRow(c)))] : null,
     olderButton());
@@ -494,16 +524,27 @@ function olderButton() {
   } }, 'Hent gennemgang af ældre kampe (fra klientens kamphistorik)'));
 }
 
+// Grupper med under 10 kampe - med antal (undtagen den der allerede står i "venter"-teksten).
+function pendingLine(p) {
+  const w = p.waiting;
+  const list = (p.pending || []).filter((x) => !(w && x.champion.id === w.champion.id && x.position === w.position));
+  return list.length ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' },
+    `For få kampe endnu (mindst ${p.minGames}): ` + list.map((x) => `${x.champion.name} ${x.position} ${x.games}`).join(', ')) : null;
+}
+
 function patternsCard(p) {
   if (!p) return null;
   return el('div', { class: 'card' }, el('h2', {}, 'Dine mønstre'),
     p.groups.length ? p.groups.map((g) => el('div', { style: 'margin-bottom:10px' },
-      el('div', { class: 'plan-head', style: 'margin-bottom:2px' }, img(g.champion.icon, g.champion.name, 'plan-ic'), el('b', {}, `${g.champion.name} ${g.position}`), el('span', { class: 'muted' }, `${g.games} kampe`)),
+      el('div', { class: 'plan-head', style: 'margin-bottom:2px' }, g.champion ? img(g.champion.icon, g.champion.name, 'plan-ic') : null,
+        el('b', {}, g.champion ? `${g.champion.name} ${g.position}` : `Alle dine ${g.position}-kampe`),
+        el('span', { class: 'muted' }, `${g.games} kampe${g.reviewed != null ? `, ${g.reviewed} med gennemgang` : ''}`)),
       el('ul', { class: 'notes', style: 'margin-top:4px' }, g.lines.map((l) => el('li', {}, l)))))
       : el('div', { class: 'muted' }, p.waiting
         ? `Mønstre vises fra ${p.minGames} kampe med samme champion og rolle (${p.waiting.champion.name} ${p.waiting.position}: ${p.waiting.games} indtil nu).`
         : `Mønstre vises fra ${p.minGames} kampe med samme champion og rolle.`),
-    el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' }, 'Sammenhænge i dine egne kampe (med antal) - ikke årsager.'));
+    pendingLine(p),
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' }, 'Sammenhænge i dine egne kampe (med antal) - ikke årsager. Skillelinjer er dine egne medianer.'));
 }
 
 function patternsPickCard(p) {

@@ -45,45 +45,53 @@ const MASTERY = [
   { championId: 134, championPoints: 200000 }, { championId: 64, championPoints: 150000 },
 ];
 
-// Falske kampe i klientens kamphistorik: 4242 = live-kampen (Ahri mid mod Zed), 5555 = en ældre Evelynn jungle-kamp.
-const frame = (min, pf, events = []) => ({ timestamp: min * 60000, participantFrames: pf, events });
-const pfOf = (list) => Object.fromEntries(list.map((p) => [String(p.participantId), p]));
+// Falske kampe i klientens kamphistorik - i det RIGTIGE format (test/fixtures/lcu-match.js bygger dem ud fra
+// formen logget fra en rigtig klient og afviser felter der ikke findes dér).
+// 4242 = live-kampen (Ahri mid mod Zed), 5555 = en ældre Evelynn jungle-kamp uden gennemgang,
+// 6666 = en Syndra mid-kamp med en fejlbehæftet gennemgang fra v1.18.0 (review.v 1: ingen modstander/guld).
+// Klientens lane/role er bevidst forkert flere steder (som i de rigtige data) - modstanderen findes ud fra positionerne.
+const { lcuGame, lcuTimeline } = require('./fixtures/lcu-match');
+const kill = (t, killerId, victimId, x, y, assistingParticipantIds = []) => ({ type: 'CHAMPION_KILL', timestamp: t, killerId, victimId, assistingParticipantIds, position: { x, y } });
+const P = (id, champ, team, lane, role, spells) => ({ id, champ, team, lane, role, spells, puuid: id === 1 ? 'me-puuid' : `p${id}` });
+const team10 = (list) => list.map(([id, champ, lane, role, smite]) => P(id, champ, id <= 5 ? 100 : 200, lane, role, [4, smite ? 11 : 14]));
 const MATCHES = {
-  4242: {
-    game: {
-      gameId: 4242, platformId: 'EUN1',
-      participantIdentities: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((id) => ({ participantId: id, player: { puuid: id === 1 ? 'me-puuid' : `p${id}` } })),
-      participants: [[1, 103, 100], [2, 86, 100], [3, 254, 100], [4, 222, 100], [5, 89, 100], [6, 238, 200], [7, 122, 200], [8, 104, 200], [9, 202, 200], [10, 16, 200]]
-        .map(([participantId, championId, teamId]) => ({ participantId, championId, teamId, spell1Id: 4, spell2Id: participantId === 8 || participantId === 3 ? 11 : 14 })),
-    },
-    timeline: {
-      frameInterval: 60000,
-      frames: Array.from({ length: 13 }, (_, m) => frame(m, pfOf([
-        { participantId: 1, totalGold: 500 + m * 400, position: { x: 7000 + m, y: 7400 } },
-        { participantId: 6, totalGold: 500 + m * 450, position: { x: 7600, y: 7600 } },
-      ]), m === 5 ? [{ type: 'CHAMPION_KILL', timestamp: 300000, killerId: 6, victimId: 1, assistingParticipantIds: [], position: { x: 7000, y: 7400 } }]
-        : m === 6 ? [{ type: 'ITEM_PURCHASED', timestamp: 400000, participantId: 1, itemId: 3020 }]
-        : m === 11 ? [{ type: 'ITEM_PURCHASED', timestamp: 800000, participantId: 1, itemId: 3157 }, { type: 'ITEM_UNDO', timestamp: 801000, participantId: 1, beforeId: 3157, afterId: 0 },
-          { type: 'ITEM_PURCHASED', timestamp: 900000, participantId: 1, itemId: 6655 }]
-        : [])),
-    },
-  },
-  5555: {
-    game: {
-      gameId: 5555,
-      participantIdentities: [1, 6, 7].map((id) => ({ participantId: id, player: { puuid: id === 1 ? 'me-puuid' : `p${id}` } })),
-      participants: [[1, 28, 100, 11], [6, 122, 200, 12], [7, 64, 200, 11]].map(([participantId, championId, teamId, s2]) => ({ participantId, championId, teamId, spell1Id: 4, spell2Id: s2 })),
-    },
-    timeline: {
-      frames: Array.from({ length: 11 }, (_, m) => frame(m, pfOf([
-        { participantId: 1, totalGold: 500 + m * 300, position: { x: 3000 + m * 300, y: 8000 } },
-        { participantId: 6, totalGold: 500 + m * 300, position: { x: 1300, y: 12000 } },
-        { participantId: 7, totalGold: 500 + m * 300, position: { x: 11000, y: 6000 + m * 200 } },
-      ]), m === 4 ? [{ type: 'CHAMPION_KILL', timestamp: 240000, killerId: 1, victimId: 6, assistingParticipantIds: [], position: { x: 1500, y: 11000 } }]
-        : m === 8 ? [{ type: 'CHAMPION_KILL', timestamp: 500000, killerId: 2, victimId: 7, assistingParticipantIds: [1], position: { x: 5000, y: 9000 } }]
-        : [])),
-    },
-  },
+  4242: (() => {
+    const players = team10([[1, 103, 'MIDDLE', 'SOLO'], [2, 86, 'TOP', 'SOLO'], [3, 254, 'JUNGLE', 'NONE', true], [4, 222, 'BOTTOM', 'CARRY'], [5, 89, 'BOTTOM', 'SUPPORT'],
+      [6, 238, 'NONE', 'SUPPORT'], [7, 122, 'JUNGLE', 'NONE'], [8, 104, 'JUNGLE', 'NONE', true], [9, 202, 'BOTTOM', 'CARRY'], [10, 16, 'BOTTOM', 'SUPPORT']]);
+    players[5].win = true;
+    return {
+      game: lcuGame({ gameId: 4242, players }),
+      timeline: lcuTimeline({ minutes: 12, ids: players.map((p) => p.id), events: [kill(300000, 6, 1, 7000, 7400)],
+        frame: (m, id) => (id === 1 ? { totalGold: 500 + m * 400, minionsKilled: m * 6, xp: m * 300, position: { x: 7000 + m, y: 7400 } }
+          : id === 6 ? { totalGold: 500 + m * 450, minionsKilled: m * 7, xp: m * 320, position: { x: 7600, y: 7600 } }
+          : { totalGold: 500 + m * 300 }) }),
+    };
+  })(),
+  5555: (() => {
+    const players = team10([[1, 28, 'JUNGLE', 'NONE', true], [2, 86, 'TOP', 'SOLO'], [3, 103, 'MIDDLE', 'SOLO'], [4, 222, 'BOTTOM', 'CARRY'], [5, 89, 'BOTTOM', 'SUPPORT'],
+      [6, 122, 'JUNGLE', 'NONE'], [7, 64, 'NONE', 'SUPPORT', true], [8, 238, 'MIDDLE', 'SOLO'], [9, 202, 'BOTTOM', 'CARRY'], [10, 16, 'BOTTOM', 'SUPPORT']]);
+    players[0].win = true;
+    return {
+      game: lcuGame({ gameId: 5555, players }),
+      timeline: lcuTimeline({ minutes: 10, ids: players.map((p) => p.id),
+        events: [kill(240000, 1, 6, 1500, 11000), kill(500000, 2, 7, 5000, 9000, [1])],
+        frame: (m, id) => ({ totalGold: 500 + m * 300, ...(id === 1 ? { position: { x: 3000 + m * 300, y: 8000 } } : id === 6 ? { position: { x: 1300, y: 12000 } }
+          : id === 7 ? { position: { x: 11000, y: 6000 + m * 200 } } : {}) }) }),
+    };
+  })(),
+  6666: (() => {
+    const players = team10([[1, 134, 'NONE', 'SUPPORT'], [2, 86, 'TOP', 'SOLO'], [3, 254, 'JUNGLE', 'NONE', true], [4, 222, 'BOTTOM', 'CARRY'], [5, 89, 'BOTTOM', 'SUPPORT'],
+      [6, 55, 'MIDDLE', 'SOLO'], [7, 234, 'JUNGLE', 'NONE', true], [8, 122, 'JUNGLE', 'NONE'], [9, 202, 'BOTTOM', 'CARRY'], [10, 16, 'BOTTOM', 'SUPPORT']]);
+    players[0].win = true;
+    return {
+      game: lcuGame({ gameId: 6666, players }),
+      timeline: lcuTimeline({ minutes: 16, ids: players.map((p) => p.id), events: [kill(360000, 6, 1, 7500, 7700, [7])],
+        frame: (m, id) => (id === 1 ? { totalGold: 500 + m * 420, minionsKilled: m * 6, position: { x: 7300, y: 7500 } }
+          : id === 6 ? { totalGold: 500 + m * 380, minionsKilled: m * 5, position: { x: 7700, y: 7600 } }
+          : id === 8 ? { totalGold: 500 + m * 300, position: { x: 1300, y: 10000 } }
+          : { totalGold: 500 + m * 300 }) }),
+    };
+  })(),
 };
 
 const server = http.createServer((req, res) => {
@@ -342,10 +350,15 @@ async function patternsTest(cmd, args, baseEnv, tmp) {
       result: i < 7 ? 'Sejr' : 'Nederlag', duration: 1800, kills: 5, deaths: early ? 3 : 1, assists: 4, cs: 200, csPerMin: 6.7, items: ['6655'],
       buys: [{ id: '3020', t: 300, suggested: true, adapted: false }, { id: '6655', t: 600 + i * 30, suggested: true, adapted: false }],
       deathLog: early ? [{ t: 300, killer: 'Lee Sin', helpers: 0, context: null }, { t: 1000, killer: 'Zed', helpers: 0, context: null }] : [{ t: 1000, killer: 'Zed', helpers: 0, context: null }],
+      // Gennemgang i det nuværende format (v2): sejre stiger i holdguld, nederlag topper ved 20 min og falder sent.
       review: {
-        v: 1, side: 'BLUE', opp: '238', jg: '64', path: [], jgPath: [], ganks: [], items: [{ id: '6655', t: 600 + i * 30 }],
-        deaths: (early ? [{ t: 300, x: 2000, y: 9000, killer: '64', by: 'jungle' }] : []).concat([{ t: 1000, x: 9000, y: 2000, killer: '238', by: 'lane' }]),
+        v: 2, side: 'BLUE', win: i < 7, lane: 'Mid', opp: '238', oppBy: 'live', jg: '64', path: [], pathTo: 14, jgPath: [], ganks: [],
+        deaths: (early ? [{ t: 300, x: 2000, y: 9000, killer: '64', by: 'jungle', n: 1, zone: 'Top', own: true }] : [])
+          .concat([{ t: 1000, x: 9000, y: 2000, killer: '238', by: 'lane', n: 3, zone: 'Bot', own: false }]),
         gold: [[10, i < 7 ? 300 : -300]],
+        team: i < 7 ? [[0, 0], [10, 1000], [14, 1500], [20, 2500], [25, 3000], [30, 4000]]
+          : [[0, 0], [10, -500], [14, 500], [20, 3000 + (i - 7) * 1000], [25, 1000], [30, -3000]],
+        at: { 10: { cs: 50 + i, oppCs: 50, gold: i < 7 ? 300 : -300, xp: 0 } },
       },
     });
   }
@@ -354,6 +367,10 @@ async function patternsTest(cmd, args, baseEnv, tmp) {
   games.unshift({ date: new Date(evDate).toISOString(), championId: 28, champion: 'Evelynn', gameMode: 'CLASSIC', mapNumber: 11, position: 'JUNGLE',
     result: 'Sejr', duration: 1800, kills: 8, deaths: 2, assists: 6, cs: 150, csPerMin: 5, items: [], buys: [] });
   state.matchList = [{ gameId: 5555, gameCreation: evDate - 1800 * 1000, gameDuration: 1800, participants: [{ championId: 28 }] }];
+  // En Syndra mid-kamp med en gennemgang fra v1.18.0 (v1: ingen modstander, intet guld, ingen rute for mid, intet resultat).
+  games.unshift({ date: '2026-11-03T20:00:00.000Z', championId: 134, champion: 'Syndra', gameMode: 'CLASSIC', mapNumber: 11, position: 'MID',
+    result: null, duration: 1000, kills: 3, deaths: 1, assists: 2, cs: 100, csPerMin: 6, items: [], buys: [{ id: '6655', t: 700, suggested: true, adapted: false }], gameId: 6666,
+    review: { v: 1, side: 'BLUE', opp: null, jg: '234', deaths: [{ t: 360, x: 7500, y: 7700, killer: '55', by: 'other' }], gold: [], path: [], jgPath: [], ganks: [], items: [] } });
   fs.writeFileSync(path.join(dir, 'history.json'), JSON.stringify({ games }));
   fs.writeFileSync(path.join(dir, 'config.json'), '{}');
   state.phase2 = 'Lobby';
@@ -373,26 +390,53 @@ async function patternsTest(cmd, args, baseEnv, tmp) {
     assert.strictEqual(g.champion.name, 'LeBlanc');
     assert.strictEqual(g.position, 'MID');
     assert.strictEqual(g.games, 12);
-    const has = (prefix) => g.lines.find((l) => l.startsWith(prefix));
-    assert(has('Første færdige item (din median 12:45): før: 6 af 6 sejre - senere: 1 af 6 (oftest '), JSON.stringify(g.lines));
-    assert(has('Dødsfald før 14 min: ingen: 4 af 6 sejre - mindst ét: 3 af 6'), JSON.stringify(g.lines));
-    assert(has('6 af dine 6 dødsfald før 14 min var på top-siden (12 kampe med kampgennemgang)'), JSON.stringify(g.lines));
-    assert(has('Dødsfald før 14 min: 0 til lane-modstanderen, 6 til fjendens jungler, 0 til andre'), JSON.stringify(g.lines));
-    assert(has('Guld mod lane-modstanderen ved 10 min: foran: 7 af 7 sejre - bagud: 0 af 5'), JSON.stringify(g.lines));
-    assert(!g.lines.some((l) => l.startsWith('Dueller')), 'ingen duel-linje uden dueller');
+    assert.strictEqual(g.reviewed, 12, 'kampe med gennemgang');
+    const has = (line) => assert(g.lines.includes(line), `mangler "${line}" i ${JSON.stringify(g.lines, null, 1)}`);
+    assert(g.lines.some((l) => l.startsWith('Første færdige item (din median 12:45): før: 6 af 6 sejre - senere: 1 af 6 (oftest ')), JSON.stringify(g.lines));
+    has('Dødsfald før 14 min: ingen: 4 af 6 sejre - mindst ét: 3 af 6');
+    has('Dødsfald før 14 min (6 i 12 kampe): 0 til lane-modstanderen, 6 til fjendens jungler, 0 til andre');
+    has('Hvor: 6 af 6 i en lane, 0 i jungle/flod - 0 på fjendens halvdel af kortet');
+    has('Alle 18 dødsfald (12 kampe): 6 mod én, 0 mod to, 12 mod tre eller flere');
+    has('Før dit første færdige item: 6 dødsfald (0,4 pr. 10 min) - efter: 12 (0,6 pr. 10 min), 12 kampe');
+    has('Guld mod lane-modstanderen ved 10 min: foran: 7 af 7 sejre - bagud: 0 af 5 (median +300 g)');
+    has('CS ved 10 min (din median 56): over: 1 af 6 sejre - median eller under: 6 af 6');
+    has('Holdets guld ved 10 min: foran: 7 af 7 sejre - bagud: 0 af 5');
+    has('I 5 nederlag faldt holdets guld mest (pr. minut): tidligt (0-14 min) 0, midt (14-25 min) 0, sent (25+ min) 5');
+    has('Tabte føringer: 3 af 5 nederlag hvor holdet var mere end 4.000 g foran (din median for største føring)');
+    assert(!g.lines.some((l) => l.startsWith('Dueller') || l.startsWith('Holdets guld ved 20')), 'ingen linje uden data på begge sider');
+    assert(p.pending.some((x) => x.champion.name === 'Evelynn' && x.games === 1), `grupper med for få kampe vises med antal: ${JSON.stringify(p.pending)}`);
     console.log('Mønstre:', g.lines.join(' | '));
+
+    // Gennemgang fra v1.18.0 (review.v 1) hentes igen af sig selv i lobbyen: modstanderen findes ud fra
+    // positionerne (klientens lane/role siger NONE/SUPPORT), guld/CS ved 10 min, rute for mid og resultatet.
+    let sy;
+    for (let i = 0; i < 40 && !((sy = (await st()).reviews.find((x) => x.champion === 'Syndra'))?.review); i++) await wait(500);
+    assert(sy?.review, `v1-gennemgangen blev hentet igen: ${JSON.stringify(sy)}`);
+    assert.strictEqual(sy.review.opp?.name, 'Katarina', 'lane-modstander ud fra positionerne');
+    assert.strictEqual(sy.review.oppBy, 'position');
+    assert.strictEqual(sy.review.jg?.name, 'Viego');
+    assert.deepStrictEqual(sy.review.gold.find((x) => x[0] === 10), [10, 400], 'guld mod modstanderen ved 10 min');
+    assert.deepStrictEqual(sy.review.at['10'], { cs: 60, oppCs: 50, gold: 400, xp: 0 });
+    assert.strictEqual(sy.review.path.length, 14, 'din position minut 1-14 også for mid');
+    assert.deepStrictEqual(sy.review.deaths.map((d) => [d.t, d.killer, d.by, d.n, d.zone, d.own, d.beforeItem]), [[360, 'Katarina', 'lane', 2, 'Mid', false, true]]);
+    assert.deepStrictEqual(sy.review.items.map((x) => [x.id, x.t]), [['6655', 700]], 'items fra live-data (klientens timeline har ingen køb)');
+    assert.strictEqual(sy.result, 'Sejr', 'manglende resultat udfyldt fra klienten');
+    const syHist = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games.find((x) => x.gameId === 6666);
+    assert.strictEqual(syHist.review.v, 2, 'gennemgangen er gemt i det nye format');
 
     // Ældre kamp: kampens id findes i klientens kamphistorik (samme champion + sluttidspunkt), gennemgangen hentes
     const r = await (await fetch(base + '/api/review-old', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
-    assert.strictEqual(r.found, 1, `ældre kampe: ${JSON.stringify(r)}`);
+    assert.deepStrictEqual([r.found, r.tried], [1, 1], `ældre kampe (kun Evelynn mangler nu): ${JSON.stringify(r)}`);
     const ev = (await st()).reviews.find((x) => x.champion === 'Evelynn');
     assert(ev?.review, 'gennemgang af den ældre kamp');
     assert.strictEqual(ev.review.path.length, 8, 'din rute minut 1-8');
     assert.deepStrictEqual(ev.review.path[0], [3300, 8000]);
     assert.strictEqual(ev.review.jg?.name, 'Lee Sin', 'fjendens jungler = den eneste med Smite');
+    assert.strictEqual(ev.review.opp?.name, 'Lee Sin', 'en junglers modstander er fjendens jungler');
+    assert.deepStrictEqual(ev.review.gold.find((x) => x[0] === 10), [10, 0]);
     assert.strictEqual(ev.review.jgPath.length, 8, 'fjendens junglers rute');
     assert.deepStrictEqual(ev.review.ganks.map((x) => [x.t, x.lane, x.kill, x.victim]), [[240, 'Top', true, 'Darius']], 'ganks i lanes før 10 min (ikke kills i junglen)');
-    assert.strictEqual(JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games[0].gameId, 5555, 'id gemt');
+    assert.strictEqual(JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games.find((x) => x.champion === 'Evelynn').gameId, 5555, 'id gemt');
 
     // Champion select: du låser LeBlanc mid -> 1-2 linjer om dine mønstre
     state.championId = 7;
@@ -1156,11 +1200,14 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(rv.review.jg?.name, 'Graves');
     assert.strictEqual(rv.review.gold.length, 13);
     assert.deepStrictEqual(rv.review.gold[10], [10, -500], 'guldforskel ved 10 min');
-    assert.deepStrictEqual(rv.review.items.map((i) => [i.id, i.t]), [['3020', 400], ['6655', 900]], 'første items (ITEM_UNDO fortryder et køb)');
-    assert.deepStrictEqual(rv.review.path, [], 'ingen jungle-rute for mid');
+    assert.strictEqual(rv.review.oppBy, 'live', 'modstanderen fra live-API\'et under kampen');
+    assert.deepStrictEqual(rv.review.at['10'], { cs: 60, oppCs: 70, gold: -500, xp: -200 }, 'guld/CS/XP ved 10 min');
+    assert.strictEqual(rv.review.team.length, 13, 'holdets guldforskel pr. minut');
+    assert.deepStrictEqual(rv.review.items.map((i) => i.id), g.buys.slice(0, 4).map((b) => b.id), 'første items fra live-data');
+    assert.strictEqual(rv.review.path.length, 12, 'din position minut 1-12 (kampen varede 12 min)');
     const hist = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games[0];
     assert.strictEqual(hist.gameId, 4242, 'kampens id gemt');
-    assert(!JSON.stringify(hist).includes('participantFrames') && JSON.stringify(hist.review).length < 2000, 'kun et kort uddrag i history.json');
+    assert(!JSON.stringify(hist).includes('participantFrames') && JSON.stringify(hist.review).length < 4000, 'kun et kort uddrag i history.json');
     // Video af dødsfaldet: liste i gennemgangen + afspilning kun af programmets egne klip
     assert.deepStrictEqual(rv.clips.map((c) => [c.t, c.killer, c.name]), [[1234, 'Darius', 'Replay 1.mp4']], JSON.stringify(rv.clips));
     const base8 = /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
