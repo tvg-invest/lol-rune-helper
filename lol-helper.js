@@ -2260,7 +2260,7 @@ function openFile(file) {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.17.0';
+const VERSION = '1.18.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 

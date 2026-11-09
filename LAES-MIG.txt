@@ -43,6 +43,50 @@ EFTER KAMPEN
 Vinduet viser en kampoversigt: resultat, KDA, CS/min, dine køb (og om de var blandt
 forslagene) + en tabel over dine champions. Gemmes i history.json ved siden af programmet.
 
+SPEJDER (NYT I 1.18)
+Når kampen starter, slår programmet din lane-modstander og fjendens jungler op på OP.GG:
+fx "Darius: 340 ranked-kampe, 61% WR denne sæson (68% af spillerens ranked-kampe) · Gold 2"
+eller "Ingen ranked-kampe på Darius denne sæson". Står i vinduet, i overlayet de første
+5 minutter, og stemmen siger det om lane-modstanderen. Kan det ikke slås op, vises intet.
+Slå fra med "scouting": false.
+
+FJENDENS JUNGLER (NYT I 1.18)
+I champion select og de første 4 minutter: fjendens junglers mest spillede første clear
+fra OP.GG og hvilken side de starter og slutter på, fx "Lee Sin (rød side): starter på
+bot-siden i 64% af kampene, første clear ender på top-siden i 70%". Ingen tidspunkter -
+kun det OP.GG's data viser. Slå fra med "enemyJungle": false.
+
+KAMPGENNEMGANG (NYT I 1.18)
+Efter kampen henter programmet kampens timeline fra League-klienten og viser: dine
+dødsfald på minimap'et, guld mod din lane-modstander minut for minut, dine første items
+og - når du spiller jungle - din rute og fjendens junglers rute de første 8 minutter og
+dine ganks før 10 min. Vælg kamp i listen. "Hent gennemgang af ældre kampe" henter ældre
+kampe, så længe klienten stadig har dem. Slå fra med "matchReview": false.
+
+DINE MØNSTRE (NYT I 1.18)
+Når du har mindst 10 kampe med samme champion og rolle, viser vinduet sammenhænge i dine
+egne kampe - altid med antal, fx "Første færdige item (din median 11:51): før: 8 af 15
+sejre - senere: 5 af 15". Det er sammenhænge, ikke årsager. I champion select står 1-2
+af dem for den champion du låser. Slå fra med "patterns": false.
+
+VIDEO AF DINE DØDSFALD MED OBS (VALGFRIT - SLÅET FRA SOM STANDARD)
+Har du ikke OBS, så gør ingenting: programmet rører ikke OBS, før du slår det til.
+1. Installer OBS Studio (gratis, version 28 eller nyere): https://obsproject.com
+2. Sæt en kilde op der optager spillet (fx "Spiloptagelse" / "Game Capture").
+3. OBS: Indstillinger -> Output -> Replay Buffer: slå "Aktivér replay buffer" til og sæt
+   "Maksimal replay-tid" til fx 30 sekunder. Vælg gerne optageformat "mp4" (Output ->
+   Optagelse), så klippet også kan afspilles i vinduet.
+4. OBS: Værktøjer -> WebSocket-serverindstillinger: slå "Aktivér WebSocket-server" til
+   (port 4455). Klik "Vis forbindelsesinfo" og kopier adgangskoden.
+5. Skriv adgangskoden i config.json: "obsPassword": "din-adgangskode"
+   (og "obsPort" hvis du har ændret porten). Genstart programmet.
+6. Klik "OBS-klip: fra" øverst i vinduet, så der står "OBS-klip: til" (eller sæt
+   "obsClips": true i config.json).
+Under kampen starter programmet replay bufferen, hvis den ikke kører. Når du dør, gemmes
+et klip ca. 3 sekunder efter. Efter kampen står klippene under "Dine dødsfald (video)" i
+kampgennemgangen med tid og drabsmand - klik "Afspil" eller "Åbn fil". Kører OBS ikke,
+står der én linje om det i vinduet (ingen fejlbeskeder i spillet).
+
 OPDATERINGER
 Når en ny version er udgivet, viser vinduet "Ny version ... - Opdater nu". Et klik henter
 den, tjekker at filen er den rigtige, udskifter programmet og genstarter. Starter den nye
@@ -163,6 +207,9 @@ INDSTILLINGER (config.json ved siden af programmet)
 - setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice / voice: true eller false
 - enemyAlerts: true = stemme/overlay om lane-modstanderens køb og level 6, "X er fed",
   FED-mærker og "har ult" (forbudt efter Overwolfs Riot-regler); false = slået fra
+- scouting / enemyJungle / matchReview / patterns: true eller false (standard true)
+- obsClips: true = video af dine dødsfald med OBS (standard false); obsPassword: OBS'
+  WebSocket-adgangskode; obsPort: standard 4455
 - flashKey: "keep", "D" eller "F"
 - openWindow: false hvis browservinduet ikke skal åbne ved start
 - remoteAccess: true = vinduet kan åbnes fra telefonen (via Tailscale)
