@@ -41,6 +41,7 @@ const DEFAULT_CONFIG = {
   matchReview: true,      // kampgennemgang efter kampen fra klientens timeline (kort, guldkurve, rute, items)
   patterns: true,         // dine mønstre på tværs af kampe (kun med mindst 10 kampe på champion + rolle)
   climbCheck: true,       // klatre-tjek: de kendte low elo-huller (dødsfald, vision, CS, objectives, tilt) målt i dine egne kampe
+  coach: true,            // coach: 3-5 konkrete ændringer i din spillestil (drage, roams, ganks, sidelanes) målt i dine kampe - kun før/efter kampen
   obsClips: false,        // video af dine dødsfald via OBS' replay buffer (OBS 28+ med WebSocket slået til)
   obsPassword: '',        // OBS WebSocket-adgangskode (logges aldrig)
   obsPort: 4455,
@@ -1861,8 +1862,20 @@ function participantFrame(frame, id) {
 // forventede ITEM_PURCHASED-events, som klientens timeline ikke har - de hentes igen (se reviewOlderGames).
 // v3 (v1.20.0) har også vision, Control Wards, CS pr. minut, objectives og dødstid (klatre-tjekket).
 // v2-gennemgange vises stadig (REVIEW_MIN) og opgraderes af sig selv, hvis klienten stadig har kampen.
-const REVIEW_VERSION = 3;
+// v4 (v1.21.0) har også coachens tal: hvem der stod ved de store monstre, roams, ganks med dødsfald bagefter
+// og dødsfald alene i en sidelane efter 20 min.
+const REVIEW_VERSION = 4;
 const REVIEW_MIN = 2;
+// "Tæt på" et sted (coachen): 3.000 enheder. Valgt ud fra kortet, ikke ud fra præstation: i Tobias' 51 kampe
+// døde dragen i median ved (9.837, 4.397) og Baron ved (5.007, 10.471); fra dragen er der ca. 3.100 enheder til
+// bot-lanens midterlinje og ca. 3.850 til mid, fra Baron ca. 3.700 til top og 3.850 til mid (LANE_LINES).
+// Inden for 3.000 = tættere på pitten end på nogen lane - dvs. i floden/junglen ved pitten, ikke i en lane.
+const COACH_NEAR = 3000;
+// Efter 20 min (Baron Nashor spawner ved 20:00 - League Wiki) tæller dødsfald alene i en sidelane.
+const COACH_LATE_SEC = 20 * 60;
+// Et gank "lykkes", når du får kill/assist og ikke selv dør inden for 30 sek. (en definition af "samme kamp").
+const GANK_FIGHT_SEC = 30;
+const EPIC_MONSTERS = ['DRAGON', 'HORDE', 'RIFTHERALD', 'BARON_NASHOR', 'ATAKHAN'];
 // Dødstid (sek.) efter League Wikis formel (wiki.leagueoflegends.com/en-us/Death): BRW pr. level
 // + BRW x TIF, hvor TIF vokser efter 15 min og har loft på 50 %.
 const BRW = [10, 10, 12, 12, 14, 16, 20, 25, 28, 32.5, 35, 37.5, 40, 42.5, 45, 47.5, 50, 52.5];
@@ -1995,7 +2008,7 @@ function buildReview(game, timeline, s) {
   const ganks = jungle ? kills.filter((e) => sec(e) < 600 && e.position && (e.killerId === me.id || (e.assistingParticipantIds || []).includes(me.id)))
     .map((e) => ({ t: sec(e), x: e.position.x, y: e.position.y, lane: laneAt(e.position.x, e.position.y), kill: e.killerId === me.id, victim: champOf(e.victimId) }))
     .filter((x) => x.lane) : [];
-  // Din position minut for minut: junglere 1-8 (første clear), lanere 1-14 (laning til tårnpladerne falder).
+  // Din position minut for minut: junglere 1-8 (første clear), lanere 1-14 (laning-fasen i programmets faser, PHASES).
   const pathTo = jungle ? 8 : 14;
   const span = frames.filter((f, i) => minute(f, i) >= 1 && minute(f, i) <= pathTo);
   // Dødstid: level fra minuttet før dødsfaldet (participantFrames.level) + wikiens formel.
@@ -2003,14 +2016,43 @@ function buildReview(game, timeline, s) {
   for (const d of deaths) { d.lvl = levelAt(d.t); d.dead = Math.round(respawnSeconds(d.lvl, d.t)); }
   const deadAt = (t) => deaths.some((d) => t >= d.t && t <= d.t + d.dead);
   const teamOf = (id) => parts.find((p) => p.id === id)?.team;
+  // Coach (v4): hvem der stod tæt på et sted omkring et tidspunkt. Timelinen har kun én position pr. minut, så
+  // "tæt på" = inden for COACH_NEAR enheder i minut-billedet lige før ELLER lige efter tidspunktet (højst ca.
+  // 30 sek. fra det ene af dem). Omtrentligt - derfor kun brugt til tællinger over mange kampe.
+  const ms = (f, i) => (typeof f.timestamp === 'number' ? f.timestamp : i * 60000);
+  const around = (t) => {
+    const k = frames.findIndex((f, i) => ms(f, i) > t * 1000);
+    return k === -1 ? [frames[frames.length - 1]] : k === 0 ? [frames[0]] : [frames[k - 1], frames[k]];
+  };
+  const nearAt = (id, x, y, t) => around(t).some((f) => { const p = pos(f, id); return p && Math.hypot(p[0] - x, p[1] - y) <= COACH_NEAR; });
   const objectives = events.filter((e) => e.type === 'ELITE_MONSTER_KILL' || e.type === 'BUILDING_KILL').map((e) => {
     const t = sec(e);
     const k = e.type === 'ELITE_MONSTER_KILL' ? e.monsterType : e.buildingType === 'INHIBITOR_BUILDING' ? 'INHIBITOR' : 'TOWER';
     // Monstre: holdet til den der fik det sidste slag. Bygninger: teamId er ejeren, så det andet hold tog den.
     const takenBy = e.type === 'ELITE_MONSTER_KILL' ? teamOf(e.killerId) : (e.teamId === 100 ? 200 : e.teamId === 200 ? 100 : null);
     if (!k || !takenBy) return null;
-    return { t, k, mine: takenBy === me.team, dead: deadAt(t) };
+    const o = { t, k, mine: takenBy === me.team, dead: deadAt(t) };
+    // Store monstre: var du (i live) tæt på, og hvor mange fra hvert hold stod tæt på (dig medregnet).
+    if (EPIC_MONSTERS.includes(k) && e.position && typeof e.position.x === 'number') {
+      const { x, y } = e.position;
+      o.near = !o.dead && nearAt(me.id, x, y, t);
+      o.al = parts.filter((p) => p.team === me.team && nearAt(p.id, x, y, t)).length;
+      o.en = parts.filter((p) => p.team !== me.team && nearAt(p.id, x, y, t)).length;
+    }
+    return o;
   }).filter(Boolean);
+  // Dødsfald i en sidelane (top/bot) efter Baron er kommet (20 min) uden en holdkammerat tæt på.
+  for (const d of deaths) {
+    if (d.t >= COACH_LATE_SEC && (d.zone === 'Top' || d.zone === 'Bot') && d.x != null) {
+      d.alone = !parts.some((p) => p.team === me.team && p.id !== me.id && nearAt(p.id, d.x, d.y, d.t));
+    }
+  }
+  // Roams (ikke-junglere): kills/assists før 14 min i en anden lane end din egen (positionen på drabet).
+  const roams = !jungle && me.lane ? kills.filter((e) => sec(e) < 840 && e.position && (e.killerId === me.id || (e.assistingParticipantIds || []).includes(me.id)))
+    .map((e) => ({ t: sec(e), lane: laneAt(e.position.x, e.position.y), kill: e.killerId === me.id }))
+    .filter((x) => x.lane && x.lane !== me.lane) : [];
+  // Ganks: døde du selv inden for 30 sek. efter?
+  for (const gk of ganks) gk.died = deaths.some((d) => d.t >= gk.t && d.t <= gk.t + GANK_FIGHT_SEC);
   const st = game.participants.find((p) => p.participantId === me.id)?.stats || {};
   const num = (x) => (typeof x === 'number' ? x : null);
   const teamKills = (game.participants || []).filter((p) => p.teamId === me.team).reduce((a, p) => a + (p.stats?.kills || 0), 0);
@@ -2044,6 +2086,7 @@ function buildReview(game, timeline, s) {
     pathTo,
     jgPath: jungle && jg ? frames.filter((f, i) => minute(f, i) >= 1 && minute(f, i) <= 8).map((f) => pos(f, jg.id)).filter(Boolean) : [],
     ganks,
+    roams,
   };
 }
 
@@ -2186,6 +2229,7 @@ function reviewView() {
         // Klientens timeline har ingen køb - de første færdige items kommer fra live-API'et under kampen.
         items: firstBuys(g).map((x) => ({ ...item(x.id), t: x.t })),
         climb: app.cfg.climbCheck ? safeView(() => gameLeaks(g)) : null,
+        coach: app.cfg.coach ? safeView(() => coachGame(g)) : null,
       } : null,
       clips: (g.deathLog || []).filter((d) => d.clip).map((d) => ({ t: d.t, killer: d.killer, file: d.clip, name: path.basename(d.clip) })),
     };
@@ -2731,6 +2775,252 @@ function climbFocus(position) {
   return focus || guard ? { focus, guard } : null;
 }
 
+// ---------- Coach: de 3-5 vigtigste ændringer i din spillestil ----------
+// Konkrete råd som en coach ville sige dem ("Vær ved dragen"), hvert med: et tal fra dine egne kampe (med antal),
+// en kilde til selve rådet (docs/research-coach.md) og én ting du kan gøre i næste kamp. Rådene sorteres efter
+// hvor meget de hænger sammen med dine nederlag: forskellen i sejre mellem kampe på hver side af din egen median
+// (som klatre-tjekket). Sammenhænge, ikke bevis for årsag. Ingen faste tærskler; "tæt på" er en kortafstand
+// (COACH_NEAR). Kun før og efter kampen - under kampen viser programmet stadig kun fakta og valg.
+
+const COACH_URL = 'https://github.com/tvg-invest/lol-rune-helper/blob/worktree-build-helper/docs/research-coach.md';
+const COACH_MIN_GAMES = PATTERN_MIN_GAMES;
+// Voidgrubs dør som flere events lige efter hinanden: samme slags monster inden for 60 sek. = ét objective.
+const COACH_MERGE_SEC = 60;
+const coachReady = (g) => g.review?.v >= 4 && knownResult(g);
+function epicTakes(r, kinds) {
+  const out = [];
+  const list = (r?.objectives || []).filter((o) => kinds.includes(o.k) && typeof o.near === 'boolean').sort((a, b) => a.t - b.t);
+  for (const o of list) {
+    const last = out[out.length - 1];
+    if (last && last.k === o.k && o.t - last.t <= COACH_MERGE_SEC) { last.near = last.near || o.near; last.dead = last.dead && o.dead; continue; }
+    out.push({ ...o });
+  }
+  return out;
+}
+const TOPSIDE = ['HORDE', 'RIFTHERALD', 'BARON_NASHOR'];
+// Dødsfald hvor fjenden tog et stort monster, mens du stadig var død (dødstid efter League Wikis formel).
+const objDeaths = (r) => (r.deaths || []).filter((d) => typeof d.dead === 'number'
+  && epicTakes(r, EPIC_MONSTERS).some((o) => !o.mine && o.t >= d.t && o.t <= d.t + d.dead));
+const ALL_ROLES = POSITIONS;
+
+// Kilder til rådene (hentet og læst 9/11-2026 - se docs/research-coach.md).
+const SRC = {
+  midGuide: { name: 'dodge.gg mid lane guide 2026: "Before Dragon, Baron, or Grubs, shove the mid wave" og "Always push the wave before leaving lane"', url: 'https://www.dodge.gg/en-US/lol/news/mid-lane-guide-2026' },
+  midRoam: { name: 'Dignitas, mid-roaming-guide: "It is best to roam when you have lane priority over your opponent"', url: 'https://dignitas.gg/articles/leave-lane-win-game-a-mid-laners-guide-to-roaming-league-of-legends' },
+  jgGuide: { name: 'dodge.gg jungle guide 2026: "Your laner has CC to chain with yours - a gank without follow-up CC usually fails"', url: 'https://www.dodge.gg/en-US/lol/news/jungle-guide-2026' },
+  timing: { name: 'Dignitas, timing af objectives: "All these details should be accounted for within about a minute before the objective spawns"', url: 'https://dignitas.gg/articles/blogs/League-of-Legends/14839/a-guide-on-timing-and-tracking-objectives-in-league-of-legends' },
+  setup: { name: 'metabot.gg objective-guide: "Set up 60-90 seconds early" og vær "shoved in before Rift Herald or a Dragon spawns"', url: 'https://metabot.gg/en/league/guides/objectives-dragon-baron-herald-grubs' },
+  recall: { name: 'Dignitas, recall-guide: at recalle 30 sek. før dragen spawner efterlader holdet med en mand for lidt', url: 'https://dignitas.gg/articles/summoner-phone-home-a-guide-to-recalls' },
+  macro: { name: 'Dignitas, mid/late game-guide: "prioritize being with your team" og "Taking the risk of overstaying is how most people give up their leads"', url: 'https://dignitas.gg/articles/macro-game-level-up-a-mid-to-late-game-league-of-legends-guide' },
+  split: { name: 'Dignitas, split pushing 101: "If you aren\'t warding or watching your minimap and are just mindlessly pushing, you\'re literally asking to lose the game"', url: 'https://dignitas.gg/articles/blogs/League-of-Legends/14349/split-pushing-101-an-in-depth-league-of-legends-guide' },
+  topTp: { name: 'Dignitas, Teleport i top: Teleport til bot-ganks og til drage- eller Herald-kampe', url: 'https://dignitas.gg/articles/blogs/League-of-Legends/9558/the-uses-of-top-lane-teleport' },
+  sins: { name: 'Dignitas "Sins of Silver": "Kills alone don\'t close games"; tårnplader er permanente og giver 120 g (patch 26.1)', url: 'https://dignitas.gg/articles/sins-of-silver-mistakes-low-elo-players-insist-on-making' },
+  deaths: { name: 'amitilted.com (65.569 spiller-kampe, NA, okt. 2026): tabte kampe har 2-3 flere dødsfald end vundne i alle ranks og roller', url: 'https://amitilted.com/stats/deaths' },
+};
+
+// Holdets side af sagen: tog dit hold monsteret med og uden dig, og var I flere/færre end fjenden ved pitten.
+function pitTeam(games, kinds, where) {
+  const takes = games.flatMap((g) => epicTakes(g.review, kinds));
+  const w = takes.filter((o) => o.near); const wo = takes.filter((o) => !o.near);
+  if (w.length < 3 || wo.length < 3) return null;
+  const fewer = wo.filter((o) => typeof o.al === 'number' && typeof o.en === 'number' && o.al < o.en).length;
+  return `Med dig ved ${where} tog dit hold den i ${w.filter((o) => o.mine).length} af ${w.length} - uden dig i ${wo.filter((o) => o.mine).length} af ${wo.length}` +
+    ` (og uden dig var I færre end fjenden ved ${where} i ${fewer} af de ${wo.length}).`;
+}
+// Hvor dine ganks gik hen, og hvor ofte du selv døde lige efter.
+function gankLanes(games) {
+  const gs = games.flatMap((g) => g.review.ganks || []);
+  if (!gs.length) return null;
+  const n = (l) => gs.filter((x) => x.lane === l).length;
+  return `Dine kills/assists i lanes før 10 min: ${n('Top')} top, ${n('Mid')} mid, ${n('Bot')} bot - i ${gs.filter((x) => x.died).length} af de ${gs.length} døde du selv inden for ${GANK_FIGHT_SEC} sek.`;
+}
+
+// De målbare råd. kind 'share' = "X af Y" (højere er bedre), 'count' = antal pr. kamp (low: true = færre er bedre).
+// do[rolle] = én konkret ting til næste kamp (fra kilden). roles = hvilke roller rådet gælder for.
+const COACH_ADVICE = [
+  { key: 'dragon', kind: 'share', title: 'Vær ved dragen', unit: 'drager', roles: ALL_ROLES,
+    get: (g) => { const xs = epicTakes(g.review, ['DRAGON']); return xs.length ? { hit: xs.filter((o) => o.near).length, of: xs.length } : null; },
+    extra: (games) => pitTeam(games, ['DRAGON'], 'dragen'),
+    do: {
+      MID: 'Skub mid-bølgen ind under deres tårn ca. et minut før dragen spawner, og gå så mod floden ved dragen - før deres mid gør det.',
+      JUNGLE: 'Læg din clear, så du står ved dragen når den spawner (første gang 5:00, så hvert 5. min), og start den først når bot eller mid har skubbet.',
+      TOP: 'Hav Teleport klar når dragen spawner, og brug den til drage-kampen frem for at skubbe videre i top.',
+      ADC: 'Skub bot-bølgen ind ca. et minut før dragen, recall i god tid, og gå til pitten sammen med din support.',
+      SUPPORT: 'Ward floden ved dragen ca. et minut før den spawner, og få din ADC med derhen efter et skub.',
+    },
+    src: { MID: 'midGuide', JUNGLE: 'timing', TOP: 'topTp', ADC: 'recall', SUPPORT: 'setup' } },
+  { key: 'topside', kind: 'share', title: 'Vær ved voidgrubs, Herald og Baron', unit: 'voidgrubs/Herald/Baron', roles: ALL_ROLES,
+    get: (g) => { const xs = epicTakes(g.review, TOPSIDE); return xs.length ? { hit: xs.filter((o) => o.near).length, of: xs.length } : null; },
+    extra: (games) => pitTeam(games, TOPSIDE, 'pitten'),
+    do: {
+      MID: 'Skub mid før voidgrubs (8:00), Herald (15:00) og Baron (20:00), og gå mod top-siden af floden, så holdet er flere end dem.',
+      JUNGLE: 'Planlæg ruten mod top-siden til voidgrubs ved 8:00 og Herald ved 15:00, når top eller mid har skubbet.',
+      TOP: 'Skub top-bølgen før voidgrubs og Herald, så du kan gå direkte til pitten (den ligger på din side af kortet).',
+      ADC: 'Efter 20 min: følg holdet til Baron - skub bot-bølgen først, gå så med midt gennem junglen.',
+      SUPPORT: 'Ward top-siden af floden ca. et minut før voidgrubs, Herald og Baron, og gå med holdet derhen.',
+    },
+    src: { MID: 'midGuide', JUNGLE: 'jgGuide', TOP: 'setup', ADC: 'macro', SUPPORT: 'setup' } },
+  { key: 'objDeath', kind: 'count', low: true, title: 'Dø ikke lige før et objective', unit: 'dødsfald der gav fjenden et stort monster', roles: ALL_ROLES,
+    get: (g) => (Array.isArray(g.review?.objectives) ? objDeaths(g.review).length : null),
+    do: { ALL: 'Når dragen eller Baron spawner inden for et minut: tag ingen risiko alene - recall i god tid og kom tilbage med fuldt liv, i stedet for at farme dybt på deres halvdel.' },
+    src: { ALL: 'timing' } },
+  { key: 'sideAlone', kind: 'count', low: true, title: 'Bliv ikke alene i en sidelane sent', unit: 'dødsfald alene i en sidelane efter 20 min', roles: ALL_ROLES,
+    get: (g) => ((g.review?.dur || 0) >= COACH_LATE_SEC && (g.review.deaths || []).every((d) => d.t < COACH_LATE_SEC || !(d.zone === 'Top' || d.zone === 'Bot') || typeof d.alone === 'boolean')
+      ? g.review.deaths.filter((d) => d.alone).length : null),
+    do: { ALL: 'Efter 20 min: når Baron eller dragen er oppe, eller du ikke kan se mindst 3 fjender på kortet, så gå til holdet i midten i stedet for at skubbe en sidelane alene.',
+      TOP: 'Efter 20 min: split kun når du kan se fjenderne på kortet og har ward foran dig - ellers gå til holdet, før Baron eller dragen spawner.' },
+    src: { ALL: 'macro', TOP: 'split' } },
+  { key: 'outnumbered', kind: 'count', low: true, title: 'Undgå at blive fanget 1 mod 2', unit: 'dødsfald mod 2+ fjender', roles: ALL_ROLES,
+    get: (g) => (Array.isArray(g.review?.deaths) ? g.review.deaths.filter((d) => d.n >= 2).length : null),
+    do: { ALL: 'Når 2 eller flere fjender ikke kan ses på kortet, så træk dig mod dit tårn eller holdet, før du farmer videre eller går ind i en busk.' },
+    src: { ALL: 'deaths' } },
+  { key: 'roam', kind: 'count', low: false, title: 'Roam mere', unit: 'kills/assists i andre lanes før 14 min', roles: ['MID', 'TOP', 'SUPPORT'],
+    get: (g) => (Array.isArray(g.review?.roams) ? g.review.roams.length : null),
+    do: {
+      MID: 'Skub bølgen ind under deres tårn (kanon-bølgen er et godt tidspunkt), og gå så bot eller top - bot hvis dragen snart spawner.',
+      TOP: 'Brug Teleport til en bot-gank eller drage-kamp, når den er klar og din bølge er skubbet.',
+      SUPPORT: 'Efter et skub i bot: gå med din jungler eller til mid, når din ADC er sikker eller recaller.',
+    },
+    src: { MID: 'midGuide', TOP: 'topTp', SUPPORT: 'midRoam' } },
+  { key: 'gank', kind: 'count', low: false, title: 'Gank lanes der kan følge op', unit: 'lykkede ganks før 10 min', roles: ['JUNGLE'],
+    extra: gankLanes,
+    get: (g) => (Array.isArray(g.review?.ganks) && g.review.ganks.every((x) => typeof x.died === 'boolean') ? g.review.ganks.filter((x) => !x.died).length : null),
+    do: { JUNGLE: 'Gank den lane hvor din laner har CC og bølgen skubber mod jeres tårn - og gå videre til en anden lane, hvis din laner har lavt liv eller fjenden har en stor bølge.' },
+    src: { JUNGLE: 'jgGuide' } },
+  { key: 'convert', kind: 'count', low: false, title: 'Omsæt din føring', unit: 'tårne og store monstre til dit hold 10-20 min (når du var foran ved 10)', roles: ALL_ROLES,
+    get: (g) => {
+      const r = g.review; const a = r?.at?.[10]?.gold;
+      if (typeof a !== 'number' || a <= 0 || (r.dur || 0) < COACH_LATE_SEC || !Array.isArray(r.objectives)) return null;
+      const towers = r.objectives.filter((o) => o.k === 'TOWER' && o.mine && o.t >= 600 && o.t < COACH_LATE_SEC).length;
+      return towers + epicTakes(r, EPIC_MONSTERS).filter((o) => o.mine && o.t >= 600 && o.t < COACH_LATE_SEC).length;
+    },
+    do: { ALL: 'Når du er foran efter lanen, så slå tårnet i din lane (pladerne er permanente og giver 120 g) og gå med holdet til næste drage i stedet for at jagte kills alene.' },
+    src: { ALL: 'sins' } },
+];
+const adviceDo = (a, role) => a.do[role] || a.do.ALL || Object.values(a.do)[0];
+const adviceSrc = (a, role) => SRC[a.src[role] || a.src.ALL || Object.values(a.src)[0]];
+// Tal pr. kamp til median-splittet: andel for "X af Y", ellers antal.
+const coachValue = (a, g) => { const v = a.get(g); return v == null ? null : a.kind === 'share' ? v.hit / v.of : v; };
+
+// Gruppen et råd måles i: champion + rolle med mindst 10 færdige kampe, ellers hele rollen.
+function coachGroup(position, championId) {
+  const role = srGames().filter((g) => g.position === position && coachReady(g));
+  const champ = championId ? role.filter((g) => g.championId === Number(championId)) : [];
+  if (champ.length >= COACH_MIN_GAMES) return { games: champ, scope: `dine ${champ[0].champion} ${position}-kampe` };
+  return { games: role, scope: `dine ${position}-kampe` };
+}
+
+// Ét råd målt i gruppen: median-split (sejre på hver side) + samlede tal i sejre og nederlag.
+function coachSplit(a, games, exclude = null) {
+  const xs = games.filter((g) => g !== exclude).map((g) => ({ g, raw: a.get(g), v: coachValue(a, g) })).filter((x) => typeof x.v === 'number' && Number.isFinite(x.v));
+  if (xs.length < COACH_MIN_GAMES) return null;
+  const med = median(xs.map((x) => x.v));
+  const worse = (v) => (a.kind === 'share' || !a.low ? v < med : v > med);
+  const bad = xs.filter((x) => worse(x.v)).map((x) => x.g);
+  const good = xs.filter((x) => !worse(x.v)).map((x) => x.g);
+  const won = xs.filter((x) => x.g.result === 'Sejr'); const lost = xs.filter((x) => x.g.result === 'Nederlag');
+  const sum = (ys, f) => ys.reduce((s, x) => s + f(x), 0);
+  const agg = a.kind === 'share'
+    ? { lossHit: sum(lost, (x) => x.raw.hit), lossOf: sum(lost, (x) => x.raw.of), winHit: sum(won, (x) => x.raw.hit), winOf: sum(won, (x) => x.raw.of) }
+    : { lossSum: sum(lost, (x) => x.raw), winSum: sum(won, (x) => x.raw) };
+  // Peger dine sejre og nederlag samme vej som rådet? (andel/antal pr. kamp i nederlag er værst)
+  const lossRate = a.kind === 'share' ? agg.lossHit / (agg.lossOf || 1) : agg.lossSum / (lost.length || 1);
+  const winRate = a.kind === 'share' ? agg.winHit / (agg.winOf || 1) : agg.winSum / (won.length || 1);
+  const agrees = lost.length >= 3 && won.length >= 3 && (a.kind === 'share' || !a.low ? lossRate < winRate : lossRate > winRate);
+  const cost = bad.length >= 3 && good.length >= 3 ? winsOf(good) / good.length - winsOf(bad) / bad.length : null;
+  return { a, med, n: xs.length, worse, bad: bad.length, badWins: winsOf(bad), good: good.length, goodWins: winsOf(good), wins: won.length, losses: lost.length, agg, agrees, cost, values: xs };
+}
+const cpct = (x) => `${Math.round(x * 100)} %`;
+// "Du var ved 4 af 17 drager i dine nederlag mod 11 af 15 i sejrene" / "6 i 9 nederlag mod 1 i 8 sejre".
+function coachEvidence(s) {
+  const { a, agg } = s;
+  if (a.kind === 'share') return `Du var ved ${agg.lossHit} af ${agg.lossOf} ${a.unit} i dine nederlag mod ${agg.winHit} af ${agg.winOf} i dine sejre.`;
+  const per = (n, k) => decs(n / k);
+  return `${a.unit[0].toUpperCase()}${a.unit.slice(1)}: ${agg.lossSum} i ${s.losses} nederlag (${per(agg.lossSum, s.losses)} pr. kamp) mod ${agg.winSum} i ${s.wins} sejre (${per(agg.winSum, s.wins)} pr. kamp).`;
+}
+function coachSplitText(s) {
+  const { a } = s;
+  const med = a.kind === 'share' ? cpct(s.med) : decs(s.med);
+  const side = a.kind === 'share' || !a.low ? 'under' : 'over';
+  return `Kampe ${side} din median (${med}): ${s.badWins} af ${s.bad} sejre - ellers ${s.goodWins} af ${s.good}.`;
+}
+function adviceItem(s, role, scope) {
+  const src = adviceSrc(s.a, role);
+  return { key: s.a.key, title: s.a.title, evidence: coachEvidence(s), extra: s.a.extra ? s.a.extra(s.values.map((x) => x.g)) : null, split: coachSplitText(s), scope, games: s.n,
+    next: adviceDo(s.a, role), source: src?.name || null, url: src?.url || null };
+}
+
+// Rådene for en rolle (og champion), sorteret efter hvor meget de hænger sammen med dine nederlag.
+function coachFor(position, championId = null) {
+  const { games, scope } = coachGroup(position, championId);
+  if (games.length < COACH_MIN_GAMES) return { role: position, scope, games: games.length, need: COACH_MIN_GAMES - games.length, advice: [] };
+  const advice = COACH_ADVICE.filter((a) => a.roles.includes(position)).map((a) => coachSplit(a, games))
+    .filter((s) => s && s.agrees && s.cost != null && s.cost > 0).sort((x, y) => y.cost - x.cost);
+  return { role: position, scope, games: games.length, need: 0, advice: advice.slice(0, 5).map((s) => adviceItem(s, position, scope)) };
+}
+
+// Kampens tal for ét råd ("I denne kamp: 0 af 3 drager").
+function coachGameText(a, g) {
+  const v = a.get(g);
+  if (a.kind === 'share') return `I denne kamp var du ved ${v.hit} af ${v.of} ${a.unit}.`;
+  if (a.key === 'convert') return `I denne kamp var du foran ved 10 min (+${gnum(g.review.at[10].gold)} g), og dit hold tog ${v} tårne/store monstre mellem 10 og 20 min.`;
+  return `I denne kamp: ${v} ${a.unit}.`;
+}
+// Efter kampen: op til 3 råd hvor kampen lå på den dårlige side af din median.
+function coachGame(g) {
+  if (!coachReady(g)) return null;
+  const { games, scope } = coachGroup(g.position, g.championId);
+  const others = games.filter((x) => x !== g);
+  if (others.length < COACH_MIN_GAMES) return { need: COACH_MIN_GAMES - others.length, role: g.position, advice: [] };
+  const out = [];
+  for (const a of COACH_ADVICE.filter((x) => x.roles.includes(g.position))) {
+    const v = coachValue(a, g);
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    const s = coachSplit(a, others);
+    if (!s || !s.agrees || !(s.cost > 0) || !s.worse(v)) continue;
+    out.push({ ...adviceItem(s, g.position, scope), game: coachGameText(a, g), cost: s.cost });
+  }
+  out.sort((x, y) => y.cost - x.cost);
+  return { role: g.position, need: 0, advice: out.slice(0, 3).map(({ cost, ...x }) => x) };
+}
+
+// Det der ikke kan måles fra klientens timeline (én position pr. minut, kun kills/bygninger/monstre).
+const COACH_UNMEASURED = [
+  'Teleport-brug (timelinen viser ikke summoner spells)',
+  'facecheck af buske og vision før du går ind (ingen ward-events i timelinen)',
+  'tracking af fjendens jungler og lane-prio (kun én position pr. minut)',
+  'recall-timing (kun omtrent: du kan stå i base på et minut-billede)',
+];
+
+// Kortet "Din coach": din mest spillede rolle (seneste 20 kampe) og de andre roller med antal.
+function topChampion(position) {
+  const n = new Map();
+  for (const g of srGames().filter((x) => x.position === position && coachReady(x))) n.set(g.championId, (n.get(g.championId) || 0) + 1);
+  return [...n].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+}
+function coachView() {
+  if (!app.cfg.coach) return null;
+  const main = mainRole();
+  if (!main) return null;
+  const roles = [...new Set(srGames().slice(0, 20).map((g) => g.position).filter(Boolean))];
+  return {
+    main: coachFor(main, topChampion(main)),
+    others: roles.filter((r) => r !== main).map((r) => { const c = coachFor(r); return { role: r, games: c.games, need: c.need, top: c.advice[0] || null }; }),
+    minGames: COACH_MIN_GAMES,
+    near: COACH_NEAR,
+    unmeasured: COACH_UNMEASURED,
+    sources: COACH_URL,
+  };
+}
+// Champion select: én linje for rollen/championen du har låst.
+function coachPick(position, championId) {
+  if (!app.cfg.coach || !position) return null;
+  const c = coachFor(position, championId);
+  if (!c.advice.length) return c.need ? { need: c.need, role: position } : null;
+  const a = c.advice[0];
+  return { title: a.title, evidence: a.evidence, next: a.next, url: a.url, scope: c.scope };
+}
+
 // ---------- OBS: video af dine dødsfald (kun med obsClips: true) ----------
 // OBS WebSocket v5 (indbygget i OBS 28+). Node's indbyggede WebSocket-klient (Node 22) - ingen ekstra pakker.
 // Med obsClips slået fra kaldes intet her: ingen forbindelse, ingen beskeder.
@@ -2896,7 +3186,7 @@ function openFile(file) {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.20.0';
+const VERSION = '1.21.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -4062,6 +4352,8 @@ function viewModel() {
     reviews: app.live ? null : safeView(reviewView),
     patterns: app.live ? null : safeView(patternsView),
     climb: app.live ? null : safeView(climbView),
+    // Coachen: kun før og efter kampen (under kampen kun fakta og valg).
+    coach: app.live ? null : safeView(coachView),
     // Tilt-vagten også i champion select før du låser (draften).
     climbGuard: app.live || !app.cfg.climbCheck ? null : safeView(() => tiltGuard()),
     obsClips: Boolean(app.cfg.obsClips),
@@ -4071,6 +4363,10 @@ function viewModel() {
   if (app.cfg.patterns) {
     const p = safeView(() => patternsFor(pick.championId, b.position));
     if (p) base.patternsPick = { games: p.games, minGames: PATTERN_MIN_GAMES, lines: p.lines.slice(0, 2).map((l) => l.text) };
+  }
+  if (app.cfg.coach && !app.live) {
+    const c = safeView(() => coachPick(b.position, pick.championId));
+    if (c) base.coachPick = c;
   }
   if (app.cfg.climbCheck) {
     const f = safeView(() => climbFocus(b.position));

@@ -210,6 +210,10 @@
   .climb-tip { margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: var(--panel2); border-left: 4px solid var(--blue); font-size: 13px; }
   .climb-guard { margin: 4px 0 10px; padding: 8px 12px; border-radius: 8px; background: rgba(200,170,110,.12); border-left: 4px solid var(--gold); font-size: 13px; }
   .climb-src { font-size: 11px; color: var(--muted); }
+  .coach-item { margin: 10px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--panel2); border-left: 4px solid var(--gold); }
+  .coach-item h3 { margin: 0 0 4px; font-size: 15px; color: var(--gold2); }
+  .coach-next { margin-top: 6px; font-size: 13px; }
+  .coach-num { font-size: 13px; }
   .phone { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
   .phone .qr { background: #fff; padding: 8px; border-radius: 8px; }
   .phone a { color: var(--gold2); word-break: break-all; font-size: 12px; }
@@ -498,6 +502,7 @@ function reviewCard(s) {
       r.team && r.team.length > 1 ? [el('div', { class: 'plan-sub' }, 'Holdets guldforskel pr. minut'), goldChart(r.team)] : null,
       r.items.length ? [el('div', { class: 'plan-sub' }, 'Dine første færdige items (fra live-data under kampen)'),
         el('div', { class: 'buys' }, r.items.map((it) => el('div', { class: 'buy' }, img(it.icon, it.name), clock(it.t))))] : null,
+      coachGameBlock(r.coach),
       climbGameBlock(r.climb),
     ] : el('div', { class: 'muted' }, g.outdated
       ? 'Gennemgangen er lavet med en ældre version (uden lane-modstander og guld). Den hentes igen af sig selv, når klienten er ledig - eller klik herunder.'
@@ -557,6 +562,50 @@ function patternsPickCard(p) {
   return el('div', { class: 'card' }, el('h2', {}, `Dine mønstre (${p.games} kampe)`),
     el('ul', { class: 'notes', style: 'margin-top:0' }, p.lines.map((l) => el('li', {}, l))),
     el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' }, 'Sammenhænge i dine egne kampe - ikke årsager.'));
+}
+
+// ---------- Coach: de vigtigste ændringer i din spillestil (før og efter kampen - aldrig under) ----------
+const COACH_POS_NOTE = 'Timelinen har én position pr. minut, så "ved dragen" er omtrentligt: inden for 3.000 enheder af stedet hvor monsteret døde, i minut-billedet lige før eller lige efter.';
+function coachItem(a, n, withGame) {
+  return el('div', { class: 'coach-item' },
+    el('h3', {}, `${n}. ${a.title}`),
+    withGame && a.game ? el('div', { class: 'coach-num' }, el('b', {}, a.game)) : null,
+    el('div', { class: 'coach-num' }, a.evidence),
+    a.extra ? el('div', { class: 'coach-num muted' }, a.extra) : null,
+    el('div', { class: 'muted', style: 'font-size:12px' }, `${a.split} (${a.scope}, ${a.games} kampe)`),
+    el('div', { class: 'coach-next' }, el('b', {}, 'Næste kamp: '), a.next),
+    a.url ? el('div', { class: 'climb-src', style: 'margin-top:3px' }, a.source, ' - ', srcLink(a.url)) : null);
+}
+const needText = (role, need) => `Spil ${need} kamp${need === 1 ? '' : 'e'} mere med rollen ${role} (med kampgennemgang), så kan coachen måle dine råd.`;
+// Kampgennemgangen: de op til 3 vigtigste ting fra netop denne kamp.
+function coachGameBlock(c) {
+  if (!c) return null;
+  return [el('div', { class: 'plan-sub' }, 'Coach: 3 ting fra denne kamp'),
+    c.need ? el('div', { class: 'muted', style: 'font-size:13px;margin-top:4px' }, needText(c.role, c.need))
+      : c.advice.length ? c.advice.map((a, i) => coachItem(a, i + 1, true))
+      : el('div', { class: 'muted', style: 'font-size:13px;margin-top:4px' }, 'Ingen af coachens punkter lå på den dårlige side af din median i denne kamp.')];
+}
+function coachCard(c) {
+  if (!c) return null;
+  const m = c.main;
+  return el('div', { class: 'card' }, el('h2', {}, 'Din coach: de 5 vigtigste ændringer'),
+    el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:4px' },
+      `Målt i ${m.scope} (${m.games} kampe med kampgennemgang), sorteret efter hvor meget de hænger sammen med dine nederlag. Rådene vises kun før og efter kampen.`),
+    m.need ? el('div', { style: 'font-size:13px' }, needText(m.role, m.need))
+      : m.advice.length ? m.advice.map((a, i) => coachItem(a, i + 1, false))
+      : el('div', { class: 'muted', style: 'font-size:13px' }, 'Ingen af de målte råd skiller dine sejre fra dine nederlag endnu.'),
+    c.others.length ? [el('div', { class: 'plan-sub' }, 'Dine andre roller'),
+      el('ul', { class: 'notes' }, c.others.map((o) => el('li', {}, `${o.role}: `, o.need ? needText(o.role, o.need)
+        : o.top ? [el('b', {}, o.top.title), ` - ${o.top.evidence} Næste kamp: ${o.top.next} `, srcLink(o.top.url)] : 'ingen af rådene skiller sejre fra nederlag endnu.')))] : null,
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:8px' }, COACH_POS_NOTE, ' Sammenhænge i dine egne kampe (med antal) - ikke bevis for årsag. Kan ikke måles: ',
+      c.unmeasured.join(', '), '. ', srcLink(c.sources, 'Kilder og metode')));
+}
+// Champion select: én linje for rollen/championen.
+function coachPickCard(p) {
+  if (!p) return null;
+  return el('div', { class: 'card' }, el('h2', {}, 'Coach'),
+    p.need ? el('div', { class: 'muted', style: 'font-size:13px' }, needText(p.role, p.need))
+      : el('div', { style: 'font-size:13px' }, el('b', {}, `${p.title}: `), p.next, ' ', el('span', { class: 'muted' }, `(${p.evidence}) `), srcLink(p.url)));
 }
 
 // ---------- Klatre-tjek (de kendte low elo-huller i dine egne kampe) ----------
@@ -987,6 +1036,7 @@ function renderInto(s) {
       s.draftStatus ? enemyJungleCard(s.enemyJungle) : null,
       guardBox(s.climbGuard),
       reviewCard(s),
+      coachCard(s.coach),
       climbCard(s.climb),
       patternsCard(s.patterns),
       historyCards(s),
@@ -1005,6 +1055,7 @@ function renderInto(s) {
     s.position !== 'ARAM' ? el('div', { class: 'roles' },
       el('button', { class: role ? '' : 'active', onclick: () => post('/api/role', { position: null }) }, 'Auto'),
       s.positions.map((p) => el('button', { class: role === p ? 'active' : '', onclick: () => post('/api/role', { position: p }) }, p))) : null,
+    coachPickCard(s.coachPick),
     climbPickCard(s.climbPick),
     patternsPickCard(s.patternsPick),
     gameplanCard(s.plan),

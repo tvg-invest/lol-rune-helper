@@ -223,6 +223,20 @@ målt i dine egne kampe med din egen median som skillelinje:
 Intet nyt under kampen. Ældre gennemgange hentes igen i det nye format i lobbyen, så
 længe klienten har kampene. Slå fra med "climbCheck": false.
 
+DIN COACH (NYT I 1.21)
+3-5 konkrete ændringer i din spillestil, som en coach ville sige dem, målt i dine egne
+kampe (kilder i docs/research-coach.md). Fx "Vær ved dragen: du var ved 26 af 75 drager
+i dine nederlag mod 13 af 25 i dine sejre. Næste kamp: skub mid-bølgen ind ca. et minut
+før dragen spawner, og gå så mod dragen."
+- Råd: Vær ved dragen / ved voidgrubs, Herald og Baron, Dø ikke lige før et objective,
+  Bliv ikke alene i en sidelane sent, Undgå 1 mod 2, Roam mere (mid/top/support),
+  Gank lanes der kan følge op (jungle), Omsæt din føring.
+- Kortet "Din coach": de 5 vigtigste for din mest spillede rolle. Kampgennemgangen:
+  3 ting fra netop den kamp. Champion select: én linje for rollen/championen.
+- Kræver 10 kampe med kampgennemgang i rollen - ellers "Spil N kampe mere med rollen".
+- Positionerne i klientens timeline er pr. minut, så "ved dragen" er omtrentligt.
+- Kun før og efter kampen - intet under kampen. Slå fra med "coach": false.
+
 Vil du bruge et navn i stedet for IP (fx Tailscale MagicDNS), så skriv det i
 "remoteHosts": ["min-pc"].
 
@@ -232,7 +246,7 @@ INDSTILLINGER (config.json ved siden af programmet)
 - setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice / voice: true eller false
 - enemyAlerts: true = stemme/overlay om lane-modstanderens køb og level 6, "X er fed",
   FED-mærker og "har ult" (forbudt efter Overwolfs Riot-regler); false = slået fra
-- scouting / enemyJungle / matchReview / patterns / climbCheck: true eller false (standard true)
+- scouting / enemyJungle / matchReview / patterns / climbCheck / coach: true eller false (standard true)
 - obsClips: true = video af dine dødsfald med OBS (standard false); obsPassword: OBS'
   WebSocket-adgangskode; obsPort: standard 4455
 - flashKey: "keep", "D" eller "F"

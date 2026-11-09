@@ -430,7 +430,7 @@ async function patternsTest(cmd, args, baseEnv, tmp) {
     assert.deepStrictEqual(sy.review.items.map((x) => [x.id, x.t]), [['6655', 700]], 'items fra live-data (klientens timeline har ingen køb)');
     assert.strictEqual(sy.result, 'Sejr', 'manglende resultat udfyldt fra klienten');
     const syHist = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games.find((x) => x.gameId === 6666);
-    assert.strictEqual(syHist.review.v, 3, 'gennemgangen er gemt i det nye format');
+    assert.strictEqual(syHist.review.v, 4, 'gennemgangen er gemt i det nye format');
     assert(syHist.review.stats && Array.isArray(syHist.review.csm) && Array.isArray(syHist.review.objectives), 'v3: stats, CS pr. minut og objectives');
 
     // Klatre-tjekket: de 12 LeBlanc-kampe (v2-gennemgange vises stadig) + tilt fra klientens kamphistorik.
@@ -491,6 +491,174 @@ async function patternsTest(cmd, args, baseEnv, tmp) {
     throw e;
   } finally {
     state.phase2 = 'Lobby';
+    child.kill();
+  }
+}
+
+// Coachen: falske kampe i klientens RIGTIGE format (lcuGame/lcuTimeline), der udløser hvert råd.
+// Sejre og nederlag adskiller sig på præcis de ting coachen måler:
+//   MID-sejre: ved dragen (minut-billedet før/efter), roam-kill i bot før 14 min, holdet tager tårne 10-20 min.
+//   MID-nederlag: bliver i mid (3.840 enheder fra dragen), dør lige før fjendens drage, dør mod 2 fjender,
+//                 dør alene i top-lanen efter 20 min.
+//   JUNGLE-sejre: gank i top uden at dø bagefter. JUNGLE-nederlag: gank i top og dør selv 15 sek. efter.
+// Kampene ligger i historikken med en v3-gennemgang (uden coachens tal) og hentes igen fra klienten i lobbyen.
+const DRAGON_PIT = { x: 9800, y: 4400 };
+const POS = { mid: { x: 7400, y: 7400 }, top: { x: 1300, y: 10000 }, bot: { x: 10000, y: 1300 }, jg: { x: 5000, y: 9500 }, base: { x: 500, y: 500 }, ebase: { x: 14300, y: 14300 } };
+function coachMatch(gameId, role, win) {
+  const meChamp = role === 'MID' ? 7 : 64;
+  // id 1 = dig. MID: 3 er din jungler. JUNGLE: 3 er din mid. Fjenderne: 6 mid, 7 jungle, 8 top, 9-10 bot.
+  const players = team10([[1, meChamp, 'NONE', 'SUPPORT', role === 'JUNGLE'], [2, 86, 'TOP', 'SOLO'], [3, role === 'MID' ? 254 : 103, 'JUNGLE', 'NONE', role === 'MID'],
+    [4, 222, 'BOTTOM', 'CARRY'], [5, 89, 'BOTTOM', 'SUPPORT'], [6, 238, 'MIDDLE', 'SOLO'], [7, 234, 'JUNGLE', 'NONE', true], [8, 122, 'TOP', 'SOLO'],
+    [9, 202, 'BOTTOM', 'CARRY'], [10, 16, 'BOTTOM', 'SUPPORT']]);
+  players[win ? 0 : 5].win = true;
+  const ev = [];
+  const dragon = (t, killerId) => ({ type: 'ELITE_MONSTER_KILL', timestamp: t, killerId, assistingParticipantIds: [], monsterType: 'DRAGON', monsterSubType: 'FIRE_DRAGON', position: DRAGON_PIT });
+  const tower = (t, ownerTeam, x, y) => ({ type: 'BUILDING_KILL', timestamp: t, killerId: 0, assistingParticipantIds: [], teamId: ownerTeam, buildingType: 'TOWER_BUILDING', towerType: 'OUTER_TURRET', laneType: 'MID_LANE', position: { x, y } });
+  if (role === 'MID') {
+    if (win) {
+      ev.push(dragon(320000, 3), dragon(620000, 3));
+      ev.push(kill(420000, 1, 9, 10000, 1300, [4])); // roam til bot før 14 min
+      ev.push(tower(720000, 200, 8900, 8900), tower(900000, 200, 10500, 1100)); // holdet tager tårne 10-20 min
+    } else {
+      ev.push(kill(305000, 6, 1, 7400, 7400), dragon(310000, 7)); // dør 5:05, fjenden tager dragen 5:10 mens du er død
+      ev.push(dragon(620000, 7));
+      ev.push(kill(800000, 6, 1, 7400, 7400, [7])); // mod 2 fjender
+      ev.push(kill(1320000, 8, 1, 1300, 10000)); // alene i top-lanen efter 20 min
+    }
+  } else if (win) {
+    ev.push(kill(210000, 1, 8, 1300, 10000, [2]), dragon(620000, 1)); // gank i top, ingen død bagefter
+  } else {
+    ev.push(kill(210000, 2, 8, 1300, 10000, [1]), kill(225000, 7, 1, 1400, 10100)); // gank i top - du dør 15 sek. efter
+    ev.push(dragon(620000, 7));
+  }
+  const atDragon = (m) => role === 'MID' && win && [5, 6, 10, 11].includes(m);
+  const frame = (m, id) => {
+    let p;
+    if (id === 1) {
+      if (role === 'MID') p = atDragon(m) ? DRAGON_PIT : m === 22 || m === 23 ? POS.top : m >= 2 ? POS.mid : POS.base;
+      else p = m >= 2 ? POS.jg : POS.base;
+    } else if (id === 3) p = role === 'MID' ? POS.jg : (m >= 2 ? POS.mid : POS.base);
+    else if (id === 6) p = m >= 2 ? POS.mid : POS.ebase;
+    else if (id === 2 || id === 8) p = POS.top;
+    else if (id === 7) p = POS.jg;
+    else p = POS.bot;
+    // Sent i kampen står dine holdkammerater samlet i bot (langt fra top-lanen).
+    if (m >= 21 && id >= 2 && id <= 5) p = POS.bot;
+    // Lane-guld: du er foran din lane-modstander (6 / fjendens jungler 7) ved 10 min.
+    return { totalGold: 500 + m * (id === 1 ? 420 : 380), minionsKilled: m * (id === 1 ? 7 : 6), level: Math.min(18, 1 + Math.floor(m / 2)), position: p };
+  };
+  return {
+    game: lcuGame({ gameId, duration: 1560, players }),
+    timeline: lcuTimeline({ minutes: 26, ids: players.map((p) => p.id), events: ev, frame }),
+  };
+}
+
+async function coachTest(cmd, args, baseEnv, tmp) {
+  const dir = path.join(tmp, 'coach');
+  fs.mkdirSync(dir);
+  const games = [];
+  const start = Date.parse('2026-11-05T18:00:00Z');
+  const add = (gameId, role, win, i) => {
+    MATCHES[gameId] = coachMatch(gameId, role, win);
+    games.push({ date: new Date(start - i * 3600e3).toISOString(), championId: role === 'MID' ? 7 : 64, champion: role === 'MID' ? 'LeBlanc' : 'Lee Sin', gameMode: 'CLASSIC',
+      mapNumber: 11, position: role, result: win ? 'Sejr' : 'Nederlag', duration: 1560, kills: 3, deaths: 3, assists: 3, cs: 180, csPerMin: 6.9, items: [], buys: [], gameId,
+      review: { v: 3, side: 'BLUE', deaths: [], gold: [], team: [], at: {}, path: [], jgPath: [], ganks: [], objectives: [] } });
+  };
+  // 12 MID-kampe (LeBlanc, 6 sejre) og 11 JUNGLE-kampe (Lee Sin, 6 sejre) - nyeste først: en MID-sejr og et MID-nederlag.
+  for (let i = 0; i < 12; i++) add(7000 + i, 'MID', i % 2 === 0, i);
+  for (let i = 0; i < 11; i++) add(7100 + i, 'JUNGLE', i % 2 === 0, 12 + i);
+  // 3 TOP-kampe med coachens tal (v4) - for få til råd: "Spil 7 kampe mere med rollen".
+  for (let i = 0; i < 3; i++) {
+    games.push({ date: new Date(start - (30 + i) * 3600e3).toISOString(), championId: 23, champion: 'Tryndamere', gameMode: 'CLASSIC', mapNumber: 11, position: 'TOP',
+      result: i ? 'Nederlag' : 'Sejr', duration: 1800, kills: 1, deaths: 1, assists: 1, cs: 200, csPerMin: 7, items: [], buys: [],
+      review: { v: 4, side: 'BLUE', dur: 1800, deaths: [], gold: [], team: [], at: {}, path: [], jgPath: [], ganks: [], roams: [], objectives: [] } });
+  }
+  fs.writeFileSync(path.join(dir, 'history.json'), JSON.stringify({ games }));
+  fs.writeFileSync(path.join(dir, 'config.json'), '{}');
+  state.phase2 = 'Lobby';
+  state.championId = 0; state.pickCompleted = false; state.enemies = [];
+  const env = { ...baseEnv, LOL_HELPER_HISTORY: path.join(dir, 'history.json'), LOL_HELPER_CONFIG: path.join(dir, 'config.json'),
+    LOL_HELPER_SHAPES: path.join(dir, 'lcu-shapes.json'), LOL_HELPER_LCU: baseEnv.LOL_HELPER_LCU.replace(/:[^:]+$/, ':testpw2'), LOL_HELPER_REMOTE: '' };
+  const child = spawn(cmd, args, { env });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  try {
+    await waitFor(() => out.includes('venter på champion select'), 30000, 'coach-kopien starter');
+    const base = /Vindue: (http:\/\/127\.0\.0\.1:\d+)/.exec(out)[1];
+    const st = async () => (await fetch(base + '/state')).json();
+    // v3-gennemgangene hentes igen af sig selv i lobbyen (v4 har coachens tal).
+    let coach;
+    const ready = (c) => c?.main?.advice?.length && c.others.find((o) => o.role === 'JUNGLE')?.top;
+    for (let i = 0; i < 60 && !ready(coach = (await st()).coach); i++) await wait(500);
+    assert(coach?.main?.advice?.length, `coach-kort: ${JSON.stringify(coach)}\n${out}`);
+    const saved = JSON.parse(fs.readFileSync(env.LOL_HELPER_HISTORY, 'utf8')).games;
+    assert(saved.filter((g) => g.gameId >= 7000).every((g) => g.review.v === 4), 'alle 23 kampe hentet igen i v4');
+    const m = coach.main;
+    assert.strictEqual(m.role, 'MID');
+    assert.strictEqual(m.scope, 'dine LeBlanc MID-kampe', 'championen har 10+ kampe i rollen');
+    assert.strictEqual(m.games, 12);
+    const keys = m.advice.map((a) => a.key);
+    assert(keys.length >= 3 && keys.length <= 5, `3-5 råd: ${keys}`);
+    for (const k of ['dragon', 'objDeath', 'sideAlone', 'outnumbered', 'roam', 'convert']) assert(keys.includes(k) || keys.length === 5, `råd ${k} mangler: ${keys}`);
+    assert(m.advice.every((a) => /\d+ (af|i) \d+/.test(a.evidence) && a.next && /^https:\/\//.test(a.url) && a.source), `tal + næste kamp + kilde: ${JSON.stringify(m.advice, null, 1)}`);
+    const dragon = m.advice.find((a) => a.key === 'dragon');
+    if (dragon) {
+      assert.strictEqual(dragon.title, 'Vær ved dragen');
+      assert.strictEqual(dragon.evidence, 'Du var ved 0 af 12 drager i dine nederlag mod 12 af 12 i dine sejre.');
+      assert(/^Skub mid-bølgen/.test(dragon.next), 'MID-rådet om dragen');
+    }
+    const od = m.advice.find((a) => a.key === 'objDeath');
+    if (od) assert.strictEqual(od.evidence, 'Dødsfald der gav fjenden et stort monster: 6 i 6 nederlag (1 pr. kamp) mod 0 i 6 sejre (0 pr. kamp).');
+    const alone = m.advice.find((a) => a.key === 'sideAlone');
+    if (alone) assert.strictEqual(alone.evidence, 'Dødsfald alene i en sidelane efter 20 min: 6 i 6 nederlag (1 pr. kamp) mod 0 i 6 sejre (0 pr. kamp).');
+    assert(!keys.includes('gank'), 'ganks er kun et jungle-råd');
+    // Jungle: ganks (lykkede = ingen død inden for 30 sek.) - og ikke roams.
+    const jg = coach.others.find((o) => o.role === 'JUNGLE');
+    assert(jg && jg.games === 11 && jg.top, `jungle-rollen: ${JSON.stringify(coach.others)}`);
+    const top = coach.others.find((o) => o.role === 'TOP');
+    assert(!top, 'TOP er ikke blandt de seneste 20 kampe');
+    console.log('Coach (MID):', m.advice.map((a) => `${a.title} - ${a.evidence}`).join(' | '));
+    console.log('Coach (JUNGLE):', jg.top.title, '-', jg.top.evidence);
+
+    // Efter kampen: den nyeste kamp (MID-sejr) har intet på den dårlige side; nederlaget (nr. 2) har op til 3 råd.
+    const rv = (await st()).reviews;
+    const winRv = rv.find((x) => x.date === games[0].date);
+    assert.deepStrictEqual(winRv.review.coach?.advice, [], `en god kamp: ${JSON.stringify(winRv.review.coach)}`);
+    const lossRv = rv.find((x) => x.date === games[1].date);
+    const ga = lossRv.review.coach?.advice || [];
+    assert(ga.length === 3, `3 ting fra kampen: ${JSON.stringify(lossRv.review.coach)}`);
+    assert(ga.every((a) => /^I denne kamp/.test(a.game) && a.next && a.url), JSON.stringify(ga));
+    console.log('Coach efter kampen:', ga.map((a) => `${a.title}: ${a.game}`).join(' | '));
+    // Jungle-nederlaget: ganks i kampgennemgangen har died = true.
+    const jgHist = saved.find((g) => g.gameId === 7101);
+    assert.deepStrictEqual(jgHist.review.ganks.map((x) => [x.lane, x.died]), [['Top', true]], 'gank i top, død 15 sek. efter');
+    assert.deepStrictEqual(saved.find((g) => g.gameId === 7100).review.ganks.map((x) => [x.lane, x.died]), [['Top', false]]);
+    assert.deepStrictEqual(saved.find((g) => g.gameId === 7000).review.roams, [{ t: 420, lane: 'Bot', kill: true }], 'roam-kill i bot');
+    assert.deepStrictEqual(saved.find((g) => g.gameId === 7001).review.deaths.filter((d) => d.alone).map((d) => [d.t, d.zone]), [[1320, 'Top']], 'alene i top efter 20 min');
+    assert(JSON.stringify(saved.find((g) => g.gameId === 7001).review).length < 6000, 'kort uddrag i history.json');
+
+    // Champion select: du låser LeBlanc mid -> én coach-linje (rollen + championen).
+    state.championId = 7;
+    state.pickCompleted = true;
+    state.phase2 = 'ChampSelect';
+    let pick = null;
+    for (let i = 0; i < 60 && !(pick = (await st()).coachPick); i++) await wait(500);
+    assert(pick && pick.title === m.advice[0].title && pick.next && pick.url && pick.scope === 'dine LeBlanc MID-kampe', `coach i champion select: ${JSON.stringify(pick)}`);
+    console.log('Coach i champion select:', `${pick.title}: ${pick.next}`);
+    // Tving rollen TOP: kun 3 kampe med coachens tal -> "Spil 7 kampe mere".
+    await fetch(base + '/api/role', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ position: 'TOP' }) });
+    let topPick = null;
+    for (let i = 0; i < 40 && !((topPick = (await st()).coachPick)?.need); i++) await wait(500);
+    assert.deepStrictEqual(topPick, { need: 7, role: 'TOP' }, `for få TOP-kampe: ${JSON.stringify(topPick)}`);
+    await fetch(base + '/api/role', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ position: null }) });
+    assert(!/Fejl/.test(out), `ingen fejl i coach-kopien: ${out}`);
+  } catch (e) {
+    console.log(out);
+    throw e;
+  } finally {
+    state.phase2 = 'Lobby';
+    state.championId = 0; state.pickCompleted = false;
     child.kill();
   }
 }
@@ -977,7 +1145,9 @@ server.listen(0, '127.0.0.1', async () => {
     assert(!out.includes(OBS_PASSWORD), 'adgangskoden logges aldrig');
     assert.strictEqual(obsLog.connections, 1, 'én forbindelse');
     // Lanes lige nu: alle 5 lanes med styrkeforhold
-    const lanes = (await gui('GET', '/state')).body.live.lanes;
+    const liveState = (await gui('GET', '/state')).body;
+    assert.strictEqual(liveState.coach, null, 'ingen coach-råd under kampen (kun før og efter)');
+    const lanes = liveState.live.lanes;
     assert.deepStrictEqual(lanes?.rows.map((r) => r.lane), ['Top', 'Jungle', 'Mid', 'Bot', 'Support'], JSON.stringify(lanes));
     assert(!lanes.jungle && lanes.rows[2].me && lanes.rows[2].label === 'Fordel Zed', JSON.stringify(lanes.rows[2]));
     assert.strictEqual(lanes.rows[0].label, 'Fordel Darius', JSON.stringify(lanes.rows[0]));
@@ -1271,6 +1441,9 @@ server.listen(0, '127.0.0.1', async () => {
 
     // 8p) Dine mønstre + ældre kampes gennemgang: en ekstra kopi af programmet med en syntetisk historik
     await patternsTest(cmd, args, env, tmp);
+
+    // 8q) Coachen: 3-5 konkrete råd fra falske kampe i klientens rigtige format (endnu en kopi af programmet)
+    await coachTest(cmd, args, env, tmp);
 
     // 9) Telefon-adgang: kræver nøgle udefra, POST kun som JSON
     if (process.env.NO_REMOTE) throw new Error('SKIP_REMOTE');

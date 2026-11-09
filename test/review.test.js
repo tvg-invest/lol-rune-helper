@@ -78,7 +78,7 @@ const live = H.buildReview(game, tl, { championId: 103, position: 'MID', puuid: 
 assert.deepStrictEqual([live.opp, live.oppBy], ['122', 'live']);
 
 // 6) v3 (klatre-tjek): dødstid efter wikiens formel, objectives med hold og "mens du var død", stats og CS pr. minut.
-const K = vm.runInContext('({ respawnSeconds, gameLeaks, metricSplit, CLIMB_METRICS, streakStats, tiltGuard, tiltThreshold, climbView, climbFocus, history, app, deathPhases, leadLine })', ctx);
+const K = vm.runInContext('({ respawnSeconds, gameLeaks, metricSplit, CLIMB_METRICS, streakStats, tiltGuard, tiltThreshold, climbView, climbFocus, history, app, deathPhases, leadLine, COACH_ADVICE, coachSplit, coachFor, coachGame, epicTakes })', ctx);
 assert.strictEqual(K.respawnSeconds(1, 60), 10);
 assert.strictEqual(K.respawnSeconds(18, 14 * 60), 52.5, 'ingen TIF før 15 min');
 assert(Math.abs(K.respawnSeconds(10, 20 * 60) - 32.5 * (1 + 10 * 0.425 / 100)) < 1e-9, 'TIF 15-30 min: ceil(2 x (min - 15)) x 0,425 %');
@@ -97,10 +97,12 @@ assert(Math.abs(K.respawnSeconds(18, 60 * 60) - 52.5 * 1.5) < 1e-9, 'loft på 50
     ].map((e) => ({ assistingParticipantIds: [], ...e })),
     frame: (m, id) => ({ totalGold: 500 + m * 400, minionsKilled: m * 6, level: Math.min(18, 1 + Math.floor(m / 2)), position: posOf(id) }) });
   const r3 = H.buildReview(g3, tl3, { championId: 103, position: 'MID', puuid: 'p3' });
-  assert.strictEqual(r3.v, 3);
+  assert.strictEqual(r3.v, H.REVIEW_VERSION);
   assert.strictEqual(r3.dur, 1500);
   assert.deepStrictEqual(r3.deaths.map((d) => [d.t, d.n, d.lvl, d.dead]), [[600, 2, 6, 16]], 'level 6 ved 10:00 -> 16 sek. dødstid');
-  assert.deepStrictEqual(r3.objectives, [{ t: 610, k: 'DRAGON', mine: false, dead: true }, { t: 900, k: 'HORDE', mine: true, dead: false }, { t: 1200, k: 'TOWER', mine: false, dead: false }]);
+  // v4: store monstre har near (du, i live, inden for 3.000 enheder i minut-billedet før/efter) og al/en (hvor mange fra hvert hold stod tæt på).
+  // Bot-lanen (10.000, 1.300) er 3.106 enheder fra dragen (9.800, 4.400) - for langt væk. Begge junglere står ved voidgrubs.
+  assert.deepStrictEqual(r3.objectives, [{ t: 610, k: 'DRAGON', mine: false, dead: true, near: false, al: 0, en: 0 }, { t: 900, k: 'HORDE', mine: true, dead: false, near: false, al: 1, en: 1 }, { t: 1200, k: 'TOWER', mine: false, dead: false }]);
   assert.deepStrictEqual([r3.stats.vision, r3.stats.controlWards, r3.stats.cs, r3.stats.teamKills], [20, 1, 160, 8]);
   assert.strictEqual(r3.csm.length, 26);
   assert.strictEqual(r3.csm[14], 84);
@@ -156,5 +158,58 @@ assert.strictEqual(view.costs.length, 3);
 assert(view.trends.length === 0, 'udvikling kræver 15 kampe');
 const focus = JSON.parse(JSON.stringify(K.climbFocus('MID')));
 assert(focus.focus && focus.guard, JSON.stringify(focus));
+
+// 8) Coachen: hvert råd målt i en syntetisk v4-historik, hvor sejre og nederlag adskiller sig på netop det råd.
+{
+  K.app.cfg = { ...K.app.cfg, coach: true };
+  // JUNGLE-kampene adskiller sig kun på ganks (alt andet som en sejr), MID-kampene på alt andet.
+  const mk = (i, role, result) => {
+    const win = role === "JUNGLE" ? true : result; const gankWin = result;
+    const o = (t, k, mine, near) => ({ t, k, mine, dead: false, near, al: near ? 3 : 1, en: 2 });
+    return {
+      date: new Date(Date.parse('2026-11-01T20:00:00Z') - i * 3600e3).toISOString(), championId: role === 'MID' ? 7 : 64, champion: role === 'MID' ? 'LeBlanc' : 'Lee Sin',
+      gameMode: 'CLASSIC', position: role, result: result ? 'Sejr' : 'Nederlag', duration: 1800, buys: [],
+      review: { v: 4, dur: 1800, at: { 10: { gold: 300 } },
+        deaths: win ? [] : [{ t: 290, dead: 30, n: 2, zone: 'Mid' }, { t: 1500, dead: 40, n: 1, zone: 'Top', alone: true, x: 1300, y: 10000 }],
+        // Voidgrubs: 3 events inden for 60 sek. = ét objective.
+        objectives: [o(300, 'DRAGON', win, win), o(480, 'HORDE', win, win), o(490, 'HORDE', win, win), o(500, 'HORDE', win, win),
+          ...(win ? [{ t: 700, k: 'TOWER', mine: true, dead: false }] : [])],
+        roams: win ? [{ t: 400, lane: 'Bot', kill: true }] : [],
+        ganks: gankWin ? [{ t: 200, lane: 'Top', kill: true, died: false }] : [{ t: 200, lane: 'Top', kill: false, died: true }] } };
+  };
+  const coachGames = [];
+  for (let i = 0; i < 12; i++) coachGames.push(mk(i, 'MID', i % 2 === 0));
+  for (let i = 0; i < 12; i++) coachGames.push(mk(12 + i, 'JUNGLE', i % 2 === 0));
+  K.history.games.splice(0, K.history.games.length, ...coachGames);
+  assert.strictEqual(K.epicTakes(coachGames[0].review, ['HORDE']).length, 1, 'voidgrubs lige efter hinanden tæller som ét');
+  const mids = coachGames.filter((g) => g.position === 'MID');
+  const jgs = coachGames.filter((g) => g.position === 'JUNGLE');
+  for (const a of K.COACH_ADVICE) {
+    const s = K.coachSplit(a, a.roles.includes('MID') ? mids : jgs);
+    assert(s && s.agrees && s.cost === 1, `rådet ${a.key} udløses: ${JSON.stringify(s && { agg: s.agg, cost: s.cost, agrees: s.agrees })}`);
+  }
+  const midC = JSON.parse(JSON.stringify(K.coachFor('MID', 7)));
+  assert.strictEqual(midC.advice.length, 5, 'højst 5 råd');
+  assert.strictEqual(midC.scope, 'dine LeBlanc MID-kampe');
+  assert.deepStrictEqual(midC.advice.map((a) => a.key), ['dragon', 'topside', 'objDeath', 'sideAlone', 'outnumbered'], 'lige stærke råd i fast rækkefølge');
+  assert.strictEqual(midC.advice[0].evidence, 'Du var ved 0 af 6 drager i dine nederlag mod 6 af 6 i dine sejre.');
+  assert.strictEqual(midC.advice[0].extra, 'Med dig ved dragen tog dit hold den i 6 af 6 - uden dig i 0 af 6 (og uden dig var I færre end fjenden ved dragen i 6 af de 6).');
+  assert.strictEqual(midC.advice[0].split, 'Kampe under din median (50 %): 0 af 6 sejre - ellers 6 af 6.');
+  assert(midC.advice.every((a) => a.next && /^https:\/\//.test(a.url) && a.source), 'næste kamp + kilde');
+  const jgC = JSON.parse(JSON.stringify(K.coachFor('JUNGLE', 64)));
+  assert(jgC.advice.some((a) => a.key === 'gank') && !jgC.advice.some((a) => a.key === 'roam'), 'ganks for junglere, roams kun for lanere');
+  const gank = jgC.advice.find((a) => a.key === 'gank');
+  assert.strictEqual(gank.extra, 'Dine kills/assists i lanes før 10 min: 12 top, 0 mid, 0 bot - i 6 af de 12 døde du selv inden for 30 sek.');
+  const conv = K.coachSplit(K.COACH_ADVICE.find((a) => a.key === 'convert'), mids);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(conv.agg)), { lossSum: 0, winSum: 6 }, 'kun objectives mellem 10 og 20 min tæller (tårnet ved 11:40, ikke dragen ved 5:00)');
+  // Efter kampen: et nederlag har 3 råd med kampens egne tal; en sejr ingen.
+  const lossGame = JSON.parse(JSON.stringify(K.coachGame(mids[1])));
+  assert.strictEqual(lossGame.advice.length, 3);
+  assert.strictEqual(lossGame.advice[0].game, 'I denne kamp var du ved 0 af 1 drager.');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(K.coachGame(mids[0]))).advice, []);
+  // For få kampe i rollen: "spil N kampe mere".
+  K.history.games.splice(0, K.history.games.length, ...mids.slice(0, 4));
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(K.coachFor('MID', 7))), { role: 'MID', scope: 'dine MID-kampe', games: 4, need: 6, advice: [] });
+}
 
 console.log('Kampgennemgang (rigtigt format): alle tests bestået');
