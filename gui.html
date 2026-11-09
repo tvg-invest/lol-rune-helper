@@ -200,7 +200,7 @@
   .review-top { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-start; }
   .minimap { width: 100%; max-width: 300px; aspect-ratio: 1; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); display: block; }
   .review-side { flex: 1; min-width: 220px; }
-  .goldchart { width: 100%; height: 130px; display: block; background: var(--panel2); border-radius: 8px; border: 1px solid var(--line); }
+  .goldchart { width: 100%; height: auto; display: block; background: var(--panel2); border-radius: 8px; border: 1px solid var(--line); }
   .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-top: 4px; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
   .clips { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
@@ -232,7 +232,7 @@ function el(tag, attrs, ...children) {
     else if (k === 'class') node.className = v;
     else node.setAttribute(k, v);
   }
-  for (const c of children.flat()) if (c != null && c !== false) node.append(c.nodeType ? c : String(c));
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) node.append(c.nodeType ? c : String(c));
   return node;
 }
 const img = (src, alt, cls) => src ? el('img', { src, alt, title: alt, class: cls }) : null;
@@ -425,7 +425,7 @@ function goldChart(gold) {
   const last = gold[gold.length - 1];
   const ticks = [];
   for (let t = 5; t <= maxT; t += 5) ticks.push(svg('text', { x: x(t), y: H - 3, 'font-size': 10, fill: '#8b95a7', 'text-anchor': 'middle' }, `${t}`));
-  return svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'goldchart', preserveAspectRatio: 'none', role: 'img', 'aria-label': 'Guldforskel' },
+  return svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'goldchart', role: 'img', 'aria-label': 'Guldforskel' },
     svg('line', { x1: P, x2: W - P, y1: H / 2, y2: H / 2, stroke: '#263142', 'stroke-width': 1 }),
     svg('text', { x: 4, y: 12, 'font-size': 10, fill: '#3fbf7f' }, `+${num(Math.round(maxAbs))} g`),
     svg('text', { x: 4, y: H - 14, 'font-size': 10, fill: '#e84057' }, `-${num(Math.round(maxAbs))} g`),
