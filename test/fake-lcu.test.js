@@ -1814,6 +1814,9 @@ server.listen(0, '127.0.0.1', async () => {
     // Lanes lige nu: alle 5 lanes med styrkeforhold
     const liveState = (await gui('GET', '/state')).body;
     assert.strictEqual(liveState.coach, null, 'ingen coach-råd under kampen (kun før og efter)');
+    // Objective-vagt: drage dræbt 10:00 -> ny 15:00 (oppe ved 20:34), Baron 20:00 (oppe), Herald væk efter 19:45
+    const objs = liveState.live.objectives;
+    assert.deepStrictEqual(objs.list.map((o) => [o.name, o.text]), [['Drage', 'oppe nu'], ['Baron', 'oppe nu']], JSON.stringify(objs));
     const lanes = liveState.live.lanes;
     assert.deepStrictEqual(lanes?.rows.map((r) => r.lane), ['Top', 'Jungle', 'Mid', 'Bot', 'Support'], JSON.stringify(lanes));
     assert(!lanes.jungle && lanes.rows[2].me && lanes.rows[2].label === 'Fordel Zed', JSON.stringify(lanes.rows[2]));

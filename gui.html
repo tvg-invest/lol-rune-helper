@@ -35,6 +35,13 @@
     .grid { grid-template-columns: minmax(0, 1fr); }
     header .right { margin-left: 0; text-align: left; flex-basis: 100%; }
   }
+  .objectives .obj-list { display: flex; gap: 8px; flex-wrap: wrap; }
+  .objectives .obj { display: flex; flex-direction: column; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); min-width: 120px; }
+  .objectives .obj span { font-size: 18px; font-weight: 600; }
+  .objectives .obj.soon { border-color: var(--gold); }
+  .objectives .obj.soon span { color: var(--gold2); }
+  .objectives .obj.up { border-color: #6fbf8a; }
+  .objectives .obj.up span { color: #6fbf8a; }
   .wincons .wc-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .wincons .wc-label { width: 104px; font-size: 12px; color: var(--muted); flex: none; }
   .wincons .wc-row.enemy .wc-label { color: #e07a6a; }
@@ -929,6 +936,7 @@ function historyCards(s) {
   if (!h) return [];
   const g = h.last;
   return [
+    winconHistoryCard(h.wincon),
     el('div', { class: 'card' }, el('h2', {}, 'Seneste kamp'),
       el('div', { class: 'crow', style: 'margin-bottom:12px' }, img(g.icon, g.champion),
         el('div', { class: 't' }, el('div', { class: 'n' }, `${g.champion} ${g.position ? '· ' + g.position : ''}`),
@@ -986,6 +994,25 @@ function runesCard(s) {
     el('div', { class: 'tree' }, img(opt.primary.icon, opt.primary.name, 'style'), opt.primaryRunes.map((r, i) => runeEl(r, i === 0))),
     el('div', { class: 'tree' }, img(opt.secondary.icon, opt.secondary.name, 'style'), opt.secondaryRunes.map((r) => runeEl(r))),
     el('div', { class: 'shards' }, opt.shards.map((x) => el('span', { class: 'pill' }, x))));
+}
+
+// ---------- Objective-vagt: timere + næste skridt ----------
+function objectivesCard(o) {
+  if (!o || (!o.list.length && !o.lines.length)) return null;
+  return el('div', { class: 'card objectives' },
+    el('h2', {}, 'Objectives'),
+    el('div', { class: 'obj-list' }, o.list.map((x) => el('div', { class: 'obj' + (x.up ? ' up' : x.soon ? ' soon' : '') },
+      el('b', {}, x.name), el('span', {}, x.text), el('small', { class: 'muted' }, x.side === 'bot' ? 'bot-siden' : 'top-siden')))),
+    o.lines.length ? el('ul', { class: 'notes', style: 'margin-top:10px' }, o.lines.map((l) => el('li', {}, l))) : null,
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:8px' }, 'Timere: League Wiki (patch 26.1) + kill-feedet. Elder efter en drage-sjæl beregnes ikke.'));
+}
+
+function winconHistoryCard(w) {
+  if (!w) return null;
+  return el('div', { class: 'card' }, el('h2', {}, 'Deres wincon og dine kampe'),
+    w.lines.length ? el('ul', { class: 'notes' }, w.lines.map((l) => el('li', {}, l)))
+      : el('div', { class: 'muted', style: 'font-size:13px' }, `Kommer efter ${w.minGames} kampe med wincon-data (${w.games} indtil nu).`),
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' }, 'Kun sammenhænge i dine egne kampe - ikke bevis for årsag.'));
 }
 
 // ---------- Wincons: hvem bærer hvert hold ----------
@@ -1291,6 +1318,7 @@ function renderLive(s) {
         el('div', { class: 'meta' }, `${clock(L.gameTime)} · ${L.gameMode || ''} · ${L.me.kills}/${L.me.deaths}/${L.me.assists}`), statusLine(s), obsLine(s), matchupLine(L.matchup), skillLine(L)),
       el('div', { class: 'right' }, el('div', { class: 'gold' }, gold(L.gold)), el('div', { class: 'meta' }, 'dit guld'))),
     adviceCard(L),
+    objectivesCard(L.objectives),
     winconsCard(s.wincons),
     scoutCard(L.scout),
     L.gameTime < 240 ? enemyJungleCard(s.enemyJungle) : null, // de første 4 min

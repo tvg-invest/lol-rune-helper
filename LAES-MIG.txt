@@ -283,6 +283,19 @@ stiger typisk de første ca. 20 kampe på en champion). I champion select står 
 når du hover: "LeBlanc: din bedste MID-champion (9 af 15)" eller "Ny champion for dig:
 0 kampe i rollen". Slå fra med "championPool": false.
 
+OBJECTIVES OG "OMSÆT FØRINGEN" (NYT I 1.25)
+Under kampen står et kort med de næste objectives: drage, voidgrubs, Rift Herald og Baron,
+med nedtælling (timere fra League Wiki, patch 26.1, og kill-feedet). Halvandet minut før
+siger stemmen "Drage om halvandet minut - køb nu og vær klar", og er du død, når den
+spawner, siger den det også. Er du foran din lane-modstander (6-25 min), står et konkret
+næste skridt: pres tårnet, hjælp en anden lane eller gå til næste objective. Slå fra med
+"objectiveCoach": false.
+
+DERES WINCON I KAMPGENNEMGANGEN (NYT I 1.25)
+Efter kampen står under "Læring", hvordan deres wincon endte, og hvem den dræbte. Efter 6
+kampe med data viser kortet "Deres wincon og dine kampe", hvor ofte du vandt, når deres
+wincon blev holdt nede, mod når den kom foran.
+
 WINCONS (NYT I 1.24)
 I champion select og under kampen: hvem der bærer hvert hold. "Deres wincon" er den
 champion, der ikke må blive fed; "Farligst tidligt" er en snowballer; "Jeres wincon" er den
@@ -309,7 +322,7 @@ INDSTILLINGER (config.json ved siden af programmet)
 - setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice / voice: true eller false
 - enemyAlerts: true = stemme/overlay om lane-modstanderens køb og level 6, "X er fed",
   FED-mærker og "har ult" (forbudt efter Overwolfs Riot-regler); false = slået fra
-- scouting / enemyJungle / matchReview / patterns / climbCheck / coach / championPool / wincons: true eller false (standard true)
+- scouting / enemyJungle / matchReview / patterns / climbCheck / coach / championPool / wincons / objectiveCoach: true eller false (standard true)
 - myRunes: dine egne rune-sider (sættes i vinduet under "Mine runer")
 - replayJump: sættes af knappen "Slå replay-spring til/fra" - ret den ikke selv
 - obsClips: true = video af dine dødsfald med OBS (standard false); obsPassword: OBS'

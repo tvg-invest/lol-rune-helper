@@ -48,6 +48,7 @@ const DEFAULT_CONFIG = {
   // "Se det i replayet": hop til øjeblikket i League's eget replay. Kræver EnableReplayApi=1 i League's game.cfg,
   // som programmet KUN sætter når du slår "Replay-spring" til i vinduet (med backup - samme knap slår det fra igen).
   replayJump: false,
+  objectiveCoach: true,   // objective-vagt: drage/voidgrubs/Herald/Baron-timere + stemme 1,5 min før, og "omsæt føringen" når du er foran
   wincons: true,          // wincons: hvem bærer hvert hold (champion select + live-status) og hvem der ikke må blive fed
   myRunes: {},            // dine egne rune-sider pr. champion-id (sættes i vinduet under "Mine runer") - bruges før OP.GG's
   championPool: true,     // "Din champion-pulje": win rate, form og mastery pr. champion i hver rolle + én linje i champion select
@@ -1373,7 +1374,8 @@ function trackOpponent(L, events = []) {
     plan.balance.pending = null;
     if (bal.side !== 'even' && L.gameTime - plan.balance.spokenAt >= 45) {
       plan.balance.spokenAt = L.gameTime;
-      add('balance', `${bal.side === 'me' ? `Fordel dig mod ${plan.opponent}` : bal.label}: ${bal.why.slice(0, 2).join(', ')}`);
+      const lead = bal.side === 'me' && app.cfg.objectiveCoach && L.objectives ? leadAdvice(L, L.objectives) : null;
+      add('balance', `${bal.side === 'me' ? `Fordel dig mod ${plan.opponent}` : bal.label}: ${bal.why.slice(0, 2).join(', ')}${lead ? ` - ${lead.short.replace(/^Du er foran - /, '')}` : ''}`);
     }
   }
   if (plan.seen) {
@@ -1832,11 +1834,14 @@ function winconsFromLive(L) {
 // Status i kampen: wincon-championens styrke (items, kills, level - samme mål som "fed") mod holdets gennemsnit.
 const WINCON_AHEAD = 1.2;
 const WINCON_BEHIND = 0.85;
-function winconStatus(p, team) {
+// De første 5 min er item-guld og level for små til at sige noget (kun kills tæller som fed).
+const WINCON_STATUS_FROM = 300;
+function winconStatus(p, team, gameTime = Infinity) {
   const avg = team.reduce((s, x) => s + Math.max(threatOf(x), 1), 0) / (team.length || 1);
   const ratio = Math.max(threatOf(p), 1) / avg;
   const fed = (p.kills - p.deaths >= 3 && p.kills >= 4) || (ratio >= 1.4 && p.kills >= 3);
-  const state = fed ? 'fed' : ratio >= WINCON_AHEAD ? 'ahead' : ratio <= WINCON_BEHIND ? 'behind' : 'even';
+  const early = gameTime < WINCON_STATUS_FROM;
+  const state = fed ? 'fed' : early ? 'even' : ratio >= WINCON_AHEAD ? 'ahead' : ratio <= WINCON_BEHIND ? 'behind' : 'even';
   return { state, ratio: Math.round(ratio * 100) / 100, kda: `${p.kills}/${p.deaths}/${p.assists}` };
 }
 
@@ -1848,9 +1853,9 @@ function winconLive(L, W) {
   const out = {};
   for (const [k, list] of [['ally', L.allies], ['enemy', L.enemies]]) {
     const p = W[k].wincon && find(list, W[k].wincon.id);
-    out[k] = p ? winconStatus(p, list) : null;
+    out[k] = p ? winconStatus(p, list, L.gameTime) : null;
     // En anden end wincon'en er blevet den stærkeste og fed: den bærer holdet nu.
-    const carry = list.filter((x) => x !== p).map((x) => ({ x, s: winconStatus(x, list) })).filter((o) => o.s.state === 'fed')
+    const carry = list.filter((x) => x !== p).map((x) => ({ x, s: winconStatus(x, list, L.gameTime) })).filter((o) => o.s.state === 'fed')
       .sort((a, b) => b.s.ratio - a.s.ratio)[0];
     out[`${k}New`] = carry ? { id: String(carry.x.champ?.key), name: carry.x.champ?.name || carry.x.name, icon: carry.x.champ?.icon, ...carry.s } : null;
   }
@@ -1902,6 +1907,142 @@ function winconsView() {
     advice: winconAdvice(W, live),
     live: Boolean(live),
   };
+}
+
+// ---------- Objective-vagt og "omsæt føringen" (under kampen) ----------
+// Timere fra League Wiki, patch 26.1 (docs/research-coach.md): drage 5:00 og 5 min efter den forrige er dræbt,
+// voidgrubs 8:00 (forsvinder 14:45), Rift Herald 15:00 (forsvinder 19:45), Baron 20:00 og 6 min efter den forrige.
+// Forberedelse 60-90 sek. før (dodge.gg/metabot). Elder (efter en drage-sjæl) beregnes ikke.
+const OBJ_TIMES = { DRAGON_FIRST: 300, DRAGON_RESPAWN: 300, GRUBS: 480, GRUBS_GONE: 885, HERALD: 900, HERALD_GONE: 1185, BARON_FIRST: 1200, BARON_RESPAWN: 360 };
+const OBJ_PREP_SEC = 90;   // "køb og vær klar" - halvandet minut før
+const OBJ_DEAD_SEC = 40;   // "du er død når den spawner" - tjekkes de sidste 40 sek.
+const LEAD_FROM = 6 * 60;  // "omsæt føringen" fra 6 min ...
+const LEAD_TO = 25 * 60;   // ... til 25 min (derefter er det teamfights)
+
+// events = live-API'ets kill-feed, score = drager pr. hold (analyzeLive).
+function objectiveTimers(events, gameTime, score) {
+  const ev = events || [];
+  const last = (name) => ev.filter((e) => e.EventName === name).reduce((a, e) => (!a || e.EventTime > a.EventTime ? e : a), null);
+  const out = [];
+  const soul = score && (score.ORDER?.dragons >= 4 || score.CHAOS?.dragons >= 4);
+  if (!soul) {
+    const ld = last('DragonKill');
+    out.push({ key: 'dragon', name: 'Drage', side: 'bot', at: ld ? ld.EventTime + OBJ_TIMES.DRAGON_RESPAWN : OBJ_TIMES.DRAGON_FIRST, gone: Infinity });
+  }
+  if (gameTime < OBJ_TIMES.GRUBS) out.push({ key: 'grubs', name: 'Voidgrubs', side: 'top', at: OBJ_TIMES.GRUBS, gone: OBJ_TIMES.GRUBS });
+  if (!last('HeraldKill')) out.push({ key: 'herald', name: 'Rift Herald', side: 'top', at: OBJ_TIMES.HERALD, gone: OBJ_TIMES.HERALD_GONE });
+  const lb = last('BaronKill');
+  out.push({ key: 'baron', name: 'Baron', side: 'top', at: lb ? lb.EventTime + OBJ_TIMES.BARON_RESPAWN : OBJ_TIMES.BARON_FIRST, gone: Infinity });
+  return out
+    .map((o) => ({ ...o, in: Math.round(o.at - gameTime), up: gameTime >= o.at }))
+    .filter((o) => !o.up || gameTime < o.gone)
+    .sort((a, b) => a.at - b.at);
+}
+
+// Det næste objective (kommer inden for sec sekunder eller er oppe nu).
+const nextObjective = (objs, sec) => objs.find((o) => o.up || o.in <= sec) || null;
+
+// Konkret næste skridt når du er foran din lane-modstander (din egen føring - ikke modstanderens items).
+function leadAdvice(L, objs) {
+  const opp = L.matchup?.player;
+  if (!opp || L.gameTime < LEAD_FROM || L.gameTime > LEAD_TO) return null;
+  const name = opp.champ?.name || opp.name;
+  const bal = balanceOf(L.me, opp, name);
+  if (bal.side !== 'me') return null;
+  const next = nextObjective(objs, 120);
+  const jungle = L.me.position === 'JUNGLE';
+  const why = bal.why.slice(0, 2).join(', ');
+  let text;
+  if (next) text = `${next.up ? `${next.name} er oppe` : `${next.name} om ${mmss(next.in)}`}: ${jungle ? 'tag den, mens du er foran' : `skub din wave og gå til ${next.name.toLowerCase() === 'drage' ? 'dragen' : next.name}`}.`;
+  else if (jungle) text = 'Tag fjendens camps eller gank den lane, der er foran - en føring skal blive til objectives.';
+  else text = 'Pres tårnet, eller skub og hjælp en anden lane - en føring skal blive til tårne og drager.';
+  return { text: `Du er foran ${name} (${why}). ${text}`, short: next ? `Du er foran - gå til ${next.name.toLowerCase() === 'drage' ? 'dragen' : next.name}` : 'Du er foran - pres tårnet eller hjælp en anden lane' };
+}
+
+function objectiveView(L) {
+  if (!app.cfg.objectiveCoach || !L?.objectives) return null;
+  const list = L.objectives.slice(0, 3).map((o) => ({ key: o.key, name: o.name, side: o.side, in: o.in, up: o.up,
+    text: o.up ? 'oppe nu' : `om ${mmss(o.in)}`, soon: !o.up && o.in <= OBJ_PREP_SEC }));
+  const lines = [];
+  const next = nextObjective(L.objectives, OBJ_PREP_SEC);
+  if (next) {
+    const respawn = L.me.isDead ? L.me.respawn : 0;
+    if (respawn && !next.up && respawn > next.in) lines.push(`Du er død, når ${next.name.toLowerCase() === 'drage' ? 'dragen' : next.name} spawner (${Math.round(respawn)} sek.) - ping holdet væk fra kampen.`);
+    else if (!next.up) lines.push(`${next.name} om ${mmss(next.in)}: køb nu, skub din wave og vær ved pitten i god tid. Dø ikke lige før.`);
+  }
+  const lead = leadAdvice(L, L.objectives);
+  if (lead) lines.push(lead.text);
+  return { list, lines };
+}
+
+// Stemmen (egen side + neutrale timere): halvandet minut før et objective, og hvis du er død når det spawner.
+function announceObjectives(L, say) {
+  if (!app.cfg.objectiveCoach || !L.objectives) return;
+  const done = app.objSpoken || (app.objSpoken = new Set());
+  for (const o of L.objectives) {
+    if (o.up) continue;
+    const id = `${o.key}@${o.at}`;
+    const the = o.name.toLowerCase() === 'drage' ? 'Dragen' : o.name;
+    if (o.in <= OBJ_PREP_SEC && o.in > OBJ_PREP_SEC - 20 && !done.has(`${id}:prep`)) {
+      if (say('objective', `${o.name} om halvandet minut - køb nu og vær klar`)) done.add(`${id}:prep`);
+    }
+    if (L.me.isDead && o.in <= OBJ_DEAD_SEC && o.in > 0 && L.me.respawn > o.in && !done.has(`${id}:dead`)) {
+      if (say('objective-dead', `${the} spawner før du er i live - ping holdet væk`)) done.add(`${id}:dead`);
+    }
+  }
+}
+
+// ---------- Wincon i kampgennemgangen ----------
+// Under kampen: deres wincons kills (hvem der døde) og den højeste status den nåede. Gemmes i history.json.
+const WINCON_RANK = { behind: 0, even: 1, ahead: 2, fed: 3 };
+function trackWincon(g, L, e) {
+  const W = app.wincons;
+  if (!W?.enemy?.wincon) return;
+  const ew = L.enemies.find((p) => String(p.champ?.key) === W.enemy.wincon.id);
+  const aw = W.ally.wincon && L.allies.find((p) => String(p.champ?.key) === W.ally.wincon.id);
+  if (!g.wincon) g.wincon = { enemy: { id: W.enemy.wincon.id, name: W.enemy.wincon.name, peak: null, kills: [] }, ally: aw ? { id: W.ally.wincon.id, name: W.ally.wincon.name, me: aw === L.me, peak: null } : null };
+  const w = g.wincon;
+  if (e && ew && e.KillerName && (e.KillerName === ew.key || e.KillerName === ew.name)) {
+    const victim = L.allies.find((p) => p.key === e.VictimName || p.name === e.VictimName);
+    if (victim) w.enemy.kills.push({ t: e.EventTime, victim: victim === L.me ? 'dig' : victim.champ?.name || victim.name });
+  }
+  if (!e) {
+    const peak = (side, p, team) => {
+      if (!p || !w[side]) return;
+      const st = winconStatus(p, team, L.gameTime);
+      if (!w[side].peak || WINCON_RANK[st.state] > WINCON_RANK[w[side].peak]) w[side].peak = st.state;
+      w[side].end = { state: st.state, kda: st.kda };
+    };
+    peak('enemy', ew, L.enemies);
+    peak('ally', aw, L.allies);
+  }
+}
+
+function winconLesson(w) {
+  if (!w?.enemy) return null;
+  const e = w.enemy;
+  const by = new Map();
+  for (const k of e.kills) by.set(k.victim, (by.get(k.victim) || 0) + 1);
+  const who = [...by].sort((a, b) => b[1] - a[1]).map(([v, n]) => `${v} ${n}`).join(', ');
+  return `Deres wincon ${e.name}: ${e.end ? `${e.end.kda} ved slut` : ''}${e.peak ? `, højst ${WINCON_STATE[e.peak]}` : ''}` +
+    (e.kills.length ? ` - ${e.kills.length} kills på jer (${who})` : ' - ingen kills på jer');
+}
+
+// På tværs af kampe: vinder du oftere, når deres wincon blev holdt nede? Kun tal, fra 6 kampe med data.
+const WINCON_MIN_GAMES = 6;
+function winconStats(games) {
+  const list = games.filter((g) => g.wincon?.enemy?.peak && g.result);
+  if (list.length < WINCON_MIN_GAMES) return { games: list.length, minGames: WINCON_MIN_GAMES, lines: [] };
+  const fed = list.filter((g) => ['fed', 'ahead'].includes(g.wincon.enemy.peak));
+  const held = list.filter((g) => !['fed', 'ahead'].includes(g.wincon.enemy.peak));
+  const wins = (xs) => xs.filter((g) => g.result === 'Sejr').length;
+  const lines = [];
+  if (fed.length) lines.push(`Når deres wincon kom foran eller blev fed: ${wins(fed)} sejre af ${fed.length} kampe.`);
+  if (held.length) lines.push(`Når deres wincon blev holdt nede: ${wins(held)} sejre af ${held.length} kampe.`);
+  const mine = list.flatMap((g) => g.wincon.enemy.kills).filter((k) => k.victim === 'dig').length;
+  const all = list.flatMap((g) => g.wincon.enemy.kills).length;
+  if (all) lines.push(`Af deres wincons ${all} kills på jer var ${mine} på dig.`);
+  return { games: list.length, minGames: WINCON_MIN_GAMES, lines };
 }
 
 // ---------- Anvend på klienten ----------
@@ -2139,6 +2280,7 @@ function trackGame(data, L) {
     if (e.EventName !== 'ChampionKill' || g.events.has(e.EventID)) continue;
     g.events.add(e.EventID);
     if (L.gameTime - (e.EventTime || 0) > 15) continue; // gamle kills (programmet startet midt i kampen)
+    try { trackWincon(g, L, e); } catch {}
     if (e.VictimName !== L.me.key && e.VictimName !== L.me.name) continue;
     const killer = L.enemies.find((p) => e.KillerName && (p.key === e.KillerName || p.name === e.KillerName));
     const what = killer ? killer.champ?.name || killer.name : /turret/i.test(e.KillerName || '') ? 'tårn' : /minion/i.test(e.KillerName || '') ? 'minions' : 'andet';
@@ -2174,6 +2316,7 @@ function trackGame(data, L) {
   // GameEnd-eventet har (efter Riots eksempler) et Result-felt; findes det ikke, er resultatet ukendt.
   const end = (data.events?.Events || []).find((e) => e.EventName === 'GameEnd');
   if (end?.Result) g.result = /win/i.test(end.Result) ? 'Sejr' : 'Nederlag';
+  try { trackWincon(g, L, null); } catch {}
   g.last = L;
 }
 
@@ -2275,6 +2418,11 @@ function finishGame() {
   // Klippene står nu i kampen selv - de midlertidige poster (gemt under kampen) er ikke længere nødvendige.
   history.pendingClips = history.pendingClips.filter((p) => !g.deaths.some((d) => d.clip === p.file));
   summary.lessons = lessonsFor(summary, srGames().filter((x) => x.championId === summary.championId).slice(0, 10));
+  if (g.wincon) {
+    summary.wincon = g.wincon;
+    const wl = winconLesson(g.wincon);
+    if (wl) summary.lessons.push(wl);
+  }
   // Til kampgennemgangen (kun id'er - selve timelinen gemmes ikke).
   if (g.gameId) summary.gameId = g.gameId;
   summary.team = g.team || null;
@@ -4454,7 +4602,7 @@ function poolPick(championId, position) {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.24.0';
+const VERSION = '1.25.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -4694,6 +4842,7 @@ function livePlayer(p) {
     assists: s.assists || 0,
     cs: s.creepScore || 0,
     isDead: Boolean(p.isDead),
+    respawn: Number(p.respawnTimer) || 0, // sekunder til du er i live igen (live-API'et)
     itemIds,
     itemGold,
     // Optagede inventory-pladser (0-5; plads 6 er trinket). En stak potions fylder én plads.
@@ -4905,7 +5054,9 @@ function analyzeLive(data, build) {
   const enemyIds = enemies.map((p) => p.champ?.key).filter(Boolean);
   const inventory = inventoryInfo(me, gold, mapNumber, data.gameData?.gameTime || 0, itemBuild, enemyIds);
   inventory.starter = starterAdvice(itemBuild, plan, me, gold, data.gameData?.gameTime || 0, mapNumber);
-  return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice, matchup, skill, inventory };
+  // Objective-timere kun på Summoner's Rift (map 11).
+  const objectives = mapNumber === 11 ? objectiveTimers(data.events?.Events, data.gameData?.gameTime || 0, score) : null;
+  return { me, allies, enemies, gold, gameTime: data.gameData?.gameTime || 0, gameMode: data.gameData?.gameMode, score, enemy, advice, matchup, skill, inventory, objectives };
 }
 
 // 2-3 forslag fra championens egen item-pulje, scoret efter popularitet + modstandernes faktiske builds.
@@ -5252,6 +5403,7 @@ function announce(L) {
   // Kun det vigtigste forslag (de står i prioriteret rækkefølge) - kort besked midt i en kamp.
   // Blev beskeden ikke sagt (samme slags for nylig), prøves den igen næste gang.
   if (newAfford.length && say('afford', `Råd til ${itemName(newAfford[0])}`)) newAfford.forEach((id) => v.afford.add(id));
+  announceObjectives(L, say);
   // Dit eget level 6 (egen tilstand - tilladt). Evelynn får også camouflage.
   let level6 = false;
   if (v.level < 6 && L.me.level >= 6) {
@@ -5347,6 +5499,7 @@ async function liveLoop() {
       app.liveBuild = null;
       app.voice = null;
       app.starterAnnounced = false;
+      app.objSpoken = null;
       log('Kampen er slut.');
       finishGame();
       broadcast();
@@ -5467,6 +5620,7 @@ function liveView() {
     scout: safeView(scoutView) || [],
     side: L.me.team === 'CHAOS' ? 'RED' : 'BLUE', // ORDER = blå side
     vision: visionView(L),
+    objectives: safeView(() => objectiveView(L)),
     lanes: laneView(L),
     allies: team(L.allies, L.me.team),
     enemies: team(L.enemies, enemySide),
@@ -5591,6 +5745,7 @@ function historyView() {
     per.set(g.champion, p);
   }
   return {
+    wincon: app.cfg.wincons ? winconStats(games) : null,
     last: { ...games[0], icon: dd.champions[games[0].championId]?.icon, items: (games[0].items || []).map(item), buys: (games[0].buys || []).map((b) => ({ ...b, ...item(b.id) })) },
     recent: games.slice(0, 10).map((g) => ({
       date: g.date, champion: g.champion, icon: dd.champions[g.championId]?.icon, result: g.result,

@@ -150,6 +150,12 @@ Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General 
 
 - **Din champion-pulje (`championPool`, standard til):** pr. rolle fra history.json (rollen fra live-API'et): sejre af kampe, form (sidste 5) og mastery pr. champion, "Du vinder mest med" (op til 3 med mindst én sejr, sorteret efter den nederste grænse af et 95 %-Wilson-interval, så 1 af 1 ikke slår 9 af 15), "få kampe" under 20 kampe (iTero: win rate krydser 50 % efter ca. 20 kampe/12.000 mastery), forskellige champions i dine sidste 20 kampe i rollen og dine 2 mest spillede mod resten. Klientens kamphistorik står samlet (dens rolle er upålidelig). I champion select én linje når du hover: "LeBlanc: din bedste MID-champion (9 af 15)" eller "Ny champion for dig: 0 kampe i rollen MID". Mastery: `GET /lol-champion-mastery/v1/local-player/champion-mastery` (`championPoints`, `championLevel`), hentet i lobbyen.
 
+## Objective-vagt, "omsæt føringen" og wincon i gennemgangen (v1.25)
+
+- **Objective-vagt (`objectiveCoach`, standard til):** timere fra League Wiki, patch 26.1 (docs/research-coach.md): drage 5:00 og 5 min efter `DragonKill`, voidgrubs 8:00 (kun nedtælling - live-API'et siger ikke om de er taget), Rift Herald 15:00-19:45 (væk efter `HeraldKill`), Baron 20:00 og 6 min efter `BaronKill`. Efter en drage-sjæl (4 drager) vises ingen drage-timer (Elder beregnes ikke). Kun map 11. Stemme 90-70 sek. før ("køb nu og vær klar") og, hvis du er død (`respawnTimer`) når den spawner, de sidste 40 sek. Én gang pr. objective; afvist af 8-sek.-grænsen prøves igen.
+- **Omsæt føringen:** 6-25 min, når `balanceOf` giver dig fordel mod lane-modstanderen: næste objective inden for 2 min -> "skub din wave og gå til dragen", ellers pres tårnet / hjælp en anden lane (jungle: fjendens camps/gank lanen der er foran). Står i kortet; stemmens "Fordel dig mod X" får næste skridt med (kun med `enemyAlerts`, som før).
+- **Wincon i kampgennemgangen:** deres wincons kills på jer (offer) og højeste status gemmes i history.json (`wincon`), én linje under "Læring". Status de første 5 min kun ud fra kills. Fra 6 kampe: sejre når deres wincon kom foran/blev fed mod når den blev holdt nede, og hvor mange af dens kills der var på dig.
+
 ## Wincons og Mine runer (v1.24)
 
 - **Wincons (`wincons`, standard til):** i champion select (fra `/lol-champ-select/v1/session`: dit holds `assignedPosition`, modstandernes roller fra OP.GG's rollefordeling som lane-modstanderen) og under kampen (roller fra live-API'et). Pr. champion: carry-vægt efter Data Dragons første tag (Marksman 3, Mage/Assassin 2,5, Fighter 2, Tank 1, Support 0,5; rollen SUPPORT x 0,4) + 10 x stigningen i win rate fra kampe under 25 min til 40+ min (OP.GG `game_lengths` i rollen, kun positiv). Højeste score = holdets wincon; en carry (vægt >= 2) hvis win rate falder mindst 3 procentpoint = "farligst tidligt". Holdenes gennemsnitlige stigning sammenlignes (mindst 1 procentpoint forskel). Under kampen: status ud fra `threatOf` (item-guld, kills, assists, level, dødsfald) mod holdets gennemsnit (Foran >= 1,2x, Bagud <= 0,85x, FED = samme regel som "fed"), og en anden der er fed, står som ny trussel. Stemme (med `enemyAlerts`): "X er fed - deres wincon" og "X, deres wincon, er ved at komme foran" (fra jævn/bagud). Kun regler og tal - ingen gæt om spillerne.
@@ -186,6 +192,7 @@ Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozi
 | `obsClips` | Video af dine dødsfald via OBS' replay buffer (standard `false`) |
 | `replayJump` | Sættes af knappen "Slå replay-spring til/fra" (ændrer `EnableReplayApi` i League's game.cfg med backup). Ret den ikke selv |
 | `championPool` | Din champion-pulje (win rate, form, mastery pr. rolle) + én linje i champion select |
+| `objectiveCoach` | Objective-timere + stemme 1,5 min før, og "omsæt føringen" når du er foran |
 | `wincons` | Wincons i champion select og under kampen (hvem bærer hvert hold, hvem må ikke blive fed) |
 | `myRunes` | Dine egne rune-sider pr. champion (sættes i vinduet under "Mine runer") |
 | `obsPassword` / `obsPort` | OBS WebSocket-adgangskode (logges aldrig) og port (standard 4455) |
