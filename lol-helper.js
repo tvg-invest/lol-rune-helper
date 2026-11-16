@@ -48,6 +48,7 @@ const DEFAULT_CONFIG = {
   // "Se det i replayet": hop til øjeblikket i League's eget replay. Kræver EnableReplayApi=1 i League's game.cfg,
   // som programmet KUN sætter når du slår "Replay-spring" til i vinduet (med backup - samme knap slår det fra igen).
   replayJump: false,
+  winEstimate: true,      // vinder-estimat når alle har låst (draft + din form), justeret med spillernes form i kampen; måles mod resultaterne
   objectiveCoach: true,   // objective-vagt: drage/voidgrubs/Herald/Baron-timere + stemme 1,5 min før, og "omsæt føringen" når du er foran
   wincons: true,          // wincons: hvem bærer hvert hold (champion select + live-status) og hvem der ikke må blive fed
   myRunes: {},            // dine egne rune-sider pr. champion-id (sættes i vinduet under "Mine runer") - bruges før OP.GG's
@@ -1770,7 +1771,8 @@ async function winconEntry(cfg, id, position) {
   const timing = curve == null ? null : curve >= WINCON_CURVE ? 'late' : curve <= -WINCON_CURVE ? 'early' : 'even';
   return {
     id: String(id), name: champ?.name || String(id), icon: champ?.icon || null, position: position || null,
-    cls, curve, timing, winRate: stats?.winRate ?? null,
+    cls, curve, timing, winRate: stats?.winRate ?? null, games: stats?.play ?? null,
+    counters: (build?.counters || []).map((c) => ({ champion_id: c.champion_id, play: c.play, win: c.win })),
     score: weight + Math.max(curve || 0, 0) * 10,
     weight,
   };
@@ -1795,12 +1797,14 @@ async function analyzeWincons(cfg, allies, enemies, myId) {
     return { wincon, early, members: list, avgCurve: curves.length ? curves.reduce((s, c) => s + c, 0) / curves.length : null, count: members.length };
   };
   const [ally, enemy] = await Promise.all([side(allies), side(enemies)]);
-  return { ally, enemy, myId: myId ? String(myId) : null };
+  const myPos = myId ? ally.members.find((m) => m.id === String(myId))?.position : null;
+  const estimate = cfg.winEstimate ? draftEstimate(ally.members, enemy.members, myId, myPos) : null;
+  return { ally, enemy, myId: myId ? String(myId) : null, estimate };
 }
 
 // Holdene fra champion select eller live -> analysen (i baggrunden; OP.GG-svarene caches i 6 timer).
 function updateWincons(allies, enemies, myId) {
-  if (!app.cfg.wincons || !allies.length || !enemies.length) return;
+  if ((!app.cfg.wincons && !app.cfg.winEstimate) || !allies.length || !enemies.length) return;
   const key = [allies, enemies].map((t) => t.map((m) => `${m.id}:${m.position || ''}`).sort().join(',')).join('|');
   if (key === app.winconKey) return;
   app.winconKey = key;
@@ -2043,6 +2047,120 @@ function winconStats(games) {
   const all = list.flatMap((g) => g.wincon.enemy.kills).length;
   if (all) lines.push(`Af deres wincons ${all} kills på jer var ${mine} på dig.`);
   return { games: list.length, minGames: WINCON_MIN_GAMES, lines };
+}
+
+// ---------- Vinder-estimat: hvem vinder ud fra draften (og spillerne når kampen er indlæst) ----------
+// Model (additiv på log-odds, som Bradley-Terry): hver champions win rate i rollen (OP.GG) for jer minus for dem,
+// + lane-matchups ud over championernes egen styrke (OP.GG counters), + din egen form på championen (dine kampe)
+// + i kampen: hver spillers win rate på championen denne sæson (OP.GG-spejder). Hvert led krympes mod 0 efter
+// antal kampe bag (få kampe = lille vægt). Tallet gemmes pr. kamp og sammenlignes med resultatet (kalibrering).
+const EST = { CHAMP_K: 2000, MATCHUP_K: 500, PLAYER_K: 20, OWN_MIN: 5, CALIB_SHOW: 10, CALIB_TRUST: 30 };
+const logit = (p) => Math.log(p / (1 - p));
+const sigmoid = (x) => 1 / (1 + Math.exp(-x));
+const clampP = (p) => Math.min(0.95, Math.max(0.05, p));
+const shrinkBy = (x, n, k) => x * (n / (n + k));
+const ppOf = (v) => (sigmoid(v) - 0.5); // et leds effekt alene, i procentpoint fra 50 %
+
+// members: winconEntry'er med winRate/games/counters/position. myId: din champion. Kræver 5 mod 5.
+function draftEstimate(ally, enemy, myId, myPosition, games = srGames()) {
+  if (ally.length !== 5 || enemy.length !== 5) return null;
+  const parts = [];
+  for (const [side, list, sign] of [['ally', ally, 1], ['enemy', enemy, -1]]) {
+    for (const m of list) {
+      if (m.winRate == null || !m.games) continue;
+      const v = sign * shrinkBy(logit(clampP(m.winRate)), m.games, EST.CHAMP_K);
+      parts.push({ kind: 'champ', side, label: `${side === 'ally' ? 'Jeres' : 'Deres'} ${m.name}${m.position ? ` (${m.position})` : ''}`, v, detail: `${pct(m.winRate)} WR i ${m.games.toLocaleString('da-DK')} kampe` });
+    }
+  }
+  for (const pos of POSITIONS) {
+    const a = ally.find((m) => m.position === pos);
+    const e = enemy.find((m) => m.position === pos);
+    if (!a || !e || a.winRate == null || e.winRate == null) continue;
+    const c = (a.counters || []).find((x) => String(x.champion_id) === String(e.id));
+    if (!c?.play) continue;
+    const m = c.win / c.play;
+    const resid = logit(clampP(m)) - (logit(clampP(a.winRate)) - logit(clampP(e.winRate)));
+    parts.push({ kind: 'lane', side: 'lane', label: `${pos}: jeres ${a.name} mod deres ${e.name}`, v: shrinkBy(resid, c.play, EST.MATCHUP_K), detail: `${pct(m)} WR i ${c.play.toLocaleString('da-DK')} kampe` });
+  }
+  const mine = myId && ally.find((m) => m.id === String(myId));
+  if (mine?.winRate != null) {
+    const own = games.filter((g) => String(g.championId) === String(myId) && g.result && (!myPosition || !g.position || g.position === myPosition));
+    if (own.length >= EST.OWN_MIN) {
+      const w = own.filter((g) => g.result === 'Sejr').length;
+      const v = shrinkBy(logit(clampP(w / own.length)) - logit(clampP(mine.winRate)), own.length, EST.PLAYER_K);
+      parts.push({ kind: 'me', side: 'ally', label: `Dig på ${mine.name}`, v, detail: `${w} sejre af ${own.length} kampe (dine kampe)` });
+    }
+  }
+  const total = parts.reduce((s, x) => s + x.v, 0);
+  return { p: sigmoid(total), total, parts };
+}
+
+// I kampen: spillernes egen win rate på championen (OP.GG ranked denne sæson), én gang pr. spiller pr. kamp.
+function ensurePlayerEstimate(L) {
+  const g = app.game;
+  const W = app.wincons;
+  if (!app.cfg.winEstimate || !g || !L || !W?.estimate) return;
+  if (!g.estPlayers) g.estPlayers = new Map();
+  const champWr = new Map([...W.ally.members, ...W.enemy.members].map((m) => [m.id, m.winRate]));
+  for (const p of [...L.allies, ...L.enemies]) {
+    if (p === L.me || p.isBot || !p.champ || !p.riot?.gameName || !p.riot?.tagLine || g.estPlayers.has(p.key)) continue;
+    const entry = { side: p.team === L.me.team ? 'ally' : 'enemy', champ: String(p.champ.key), name: p.champ.name, status: 'loading', part: null };
+    g.estPlayers.set(p.key, entry);
+    (async () => {
+      const region = await summonerRegion();
+      if (!region) { entry.status = 'none'; return; }
+      const s = await fetchSummonerScout(region, p.riot.gameName, p.riot.tagLine);
+      const c = s.ranked?.champs.find((x) => x.id === entry.champ);
+      const base = champWr.get(entry.champ);
+      entry.status = 'ok';
+      if (c?.play && base != null) {
+        const v = (entry.side === 'ally' ? 1 : -1) * shrinkBy(logit(clampP(c.win / c.play)) - logit(clampP(base)), c.play, EST.PLAYER_K);
+        entry.part = { kind: 'player', side: entry.side, label: `${entry.side === 'ally' ? 'Jeres' : 'Deres'} ${entry.name}-spiller`, v, detail: `${c.win} sejre af ${c.play} ranked-kampe på ${entry.name} denne sæson (OP.GG)` };
+      }
+      if (app.game === g) broadcast();
+    })().catch(() => { entry.status = 'none'; });
+  }
+}
+
+function currentEstimate() {
+  const W = app.wincons;
+  if (!app.cfg.winEstimate || !W?.estimate) return null;
+  const d = W.estimate;
+  const players = app.live && app.game?.estPlayers ? [...app.game.estPlayers.values()] : [];
+  const pparts = players.map((e) => e.part).filter(Boolean);
+  const live = players.length ? sigmoid(d.total + pparts.reduce((s, x) => s + x.v, 0)) : null;
+  return { draft: d.p, live, parts: [...d.parts, ...pparts], players: { done: players.filter((e) => e.status !== 'loading').length, total: players.length } };
+}
+
+// Hvor godt har estimatet ramt i dine kampe? Brier-score mod at sige 50 % hver gang (0,25).
+function estimateCalibration(games = srGames()) {
+  const list = games.filter((g) => g.result && typeof (g.winEstimate?.live ?? g.winEstimate?.draft) === 'number');
+  const n = list.length;
+  const out = { games: n, show: EST.CALIB_SHOW, trust: EST.CALIB_TRUST, lines: [], verdict: null };
+  if (n < EST.CALIB_SHOW) return out;
+  const p = (g) => g.winEstimate.live ?? g.winEstimate.draft;
+  const won = (g) => (g.result === 'Sejr' ? 1 : 0);
+  const brier = list.reduce((s, g) => s + (p(g) - won(g)) ** 2, 0) / n;
+  const bucket = (label, f) => {
+    const b = list.filter(f);
+    if (b.length) out.lines.push(`${label}: ${b.filter((g) => won(g)).length} sejre af ${b.length} (estimat i snit ${pct(b.reduce((s, g) => s + p(g), 0) / b.length)})`);
+  };
+  bucket('Favorit (over 52 %)', (g) => p(g) > 0.52);
+  bucket('Jævnt (48-52 %)', (g) => p(g) >= 0.48 && p(g) <= 0.52);
+  bucket('Underdog (under 48 %)', (g) => p(g) < 0.48);
+  out.brier = Math.round(brier * 1000) / 1000;
+  out.lines.push(`Brier-score ${String(out.brier).replace('.', ',')} (lavere er bedre; at sige 50 % hver gang giver 0,25).`);
+  if (n >= EST.CALIB_TRUST) out.verdict = brier < 0.25 ? 'Estimatet har ramt bedre end 50/50 i dine kampe.' : 'Estimatet har IKKE ramt bedre end at sige 50/50 i dine kampe - brug det ikke.';
+  else out.verdict = `For få kampe til en dom endnu (${n} af ${EST.CALIB_TRUST}).`;
+  return out;
+}
+
+function estimateView() {
+  const e = currentEstimate();
+  if (!e) return null;
+  const parts = [...e.parts].sort((a, b) => Math.abs(b.v) - Math.abs(a.v)).slice(0, 8)
+    .map((x) => ({ kind: x.kind, side: x.side, label: x.label, detail: x.detail, pp: Math.round(ppOf(x.v) * 1000) / 10 }));
+  return { draft: e.draft, live: e.live, players: e.players, parts, calibration: safeView(() => estimateCalibration()) };
 }
 
 // ---------- Anvend på klienten ----------
@@ -2317,6 +2435,7 @@ function trackGame(data, L) {
   const end = (data.events?.Events || []).find((e) => e.EventName === 'GameEnd');
   if (end?.Result) g.result = /win/i.test(end.Result) ? 'Sejr' : 'Nederlag';
   try { trackWincon(g, L, null); } catch {}
+  try { const est = currentEstimate(); if (est) g.winEstimate = { draft: Math.round(est.draft * 1000) / 1000, live: est.live == null ? null : Math.round(est.live * 1000) / 1000 }; } catch {}
   g.last = L;
 }
 
@@ -2418,6 +2537,7 @@ function finishGame() {
   // Klippene står nu i kampen selv - de midlertidige poster (gemt under kampen) er ikke længere nødvendige.
   history.pendingClips = history.pendingClips.filter((p) => !g.deaths.some((d) => d.clip === p.file));
   summary.lessons = lessonsFor(summary, srGames().filter((x) => x.championId === summary.championId).slice(0, 10));
+  if (g.winEstimate) summary.winEstimate = g.winEstimate;
   if (g.wincon) {
     summary.wincon = g.wincon;
     const wl = winconLesson(g.wincon);
@@ -4602,7 +4722,7 @@ function poolPick(championId, position) {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.25.0';
+const VERSION = '1.26.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -5453,7 +5573,7 @@ async function updateLive(data) {
     trackOpponent(app.live, data.events?.Events);
     announce(app.live);
     // Nye funktioner fejler stille - de må aldrig stoppe live-løkken.
-    for (const fn of [ensureScout, updateEnemyJungleLive, winconsFromLive]) {
+    for (const fn of [ensureScout, updateEnemyJungleLive, winconsFromLive, ensurePlayerEstimate]) {
       try { fn(app.live); } catch {}
     }
     if (app.cfg.obsClips) {
@@ -5746,6 +5866,7 @@ function historyView() {
   }
   return {
     wincon: app.cfg.wincons ? winconStats(games) : null,
+    estimate: app.cfg.winEstimate ? safeView(() => estimateCalibration(games)) : null,
     last: { ...games[0], icon: dd.champions[games[0].championId]?.icon, items: (games[0].items || []).map(item), buys: (games[0].buys || []).map((b) => ({ ...b, ...item(b.id) })) },
     recent: games.slice(0, 10).map((g) => ({
       date: g.date, champion: g.champion, icon: dd.champions[g.championId]?.icon, result: g.result,
@@ -5813,6 +5934,7 @@ function viewModel() {
     // Champion select: én linje om den champion du hover/har låst (din egen pulje i rollen).
     poolPick: app.live || !app.hover ? null : safeView(() => poolPick(app.hover.championId, app.hover.position)),
     wincons: safeView(winconsView),
+    estimate: app.cfg.winEstimate ? safeView(estimateView) : null,
     myRunes: app.live ? null : safeView(myRunesView),
   };
   if (!pick || !b || !rec) return base;

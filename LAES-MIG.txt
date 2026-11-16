@@ -283,6 +283,14 @@ stiger typisk de første ca. 20 kampe på en champion). I champion select står 
 når du hover: "LeBlanc: din bedste MID-champion (9 af 15)" eller "Ny champion for dig:
 0 kampe i rollen". Slå fra med "championPool": false.
 
+VINDER-ESTIMAT (NYT I 1.26)
+Når alle har låst, står "Jeres chance ca. X %" med grundene: hver champions win rate i
+rollen, lane-matchups og din egen form på championen. Når kampen er indlæst, lægges hver
+spillers win rate på sin champion denne sæson (OP.GG) oven i. Tallet gemmes for hver kamp,
+og efter 10 kampe viser vinduet, hvor godt det har ramt dine resultater (efter 30 kampe en
+dom: brug det eller lad være). Draften flytter typisk kun få procentpoint - det er ikke en
+grund til at dodge. Slå fra med "winEstimate": false.
+
 OBJECTIVES OG "OMSÆT FØRINGEN" (NYT I 1.25)
 Under kampen står et kort med de næste objectives: drage, voidgrubs, Rift Herald og Baron,
 med nedtælling (timere fra League Wiki, patch 26.1, og kill-feedet). Halvandet minut før
@@ -322,7 +330,7 @@ INDSTILLINGER (config.json ved siden af programmet)
 - setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice / voice: true eller false
 - enemyAlerts: true = stemme/overlay om lane-modstanderens køb og level 6, "X er fed",
   FED-mærker og "har ult" (forbudt efter Overwolfs Riot-regler); false = slået fra
-- scouting / enemyJungle / matchReview / patterns / climbCheck / coach / championPool / wincons / objectiveCoach: true eller false (standard true)
+- scouting / enemyJungle / matchReview / patterns / climbCheck / coach / championPool / wincons / objectiveCoach / winEstimate: true eller false (standard true)
 - myRunes: dine egne rune-sider (sættes i vinduet under "Mine runer")
 - replayJump: sættes af knappen "Slå replay-spring til/fra" - ret den ikke selv
 - obsClips: true = video af dine dødsfald med OBS (standard false); obsPassword: OBS'

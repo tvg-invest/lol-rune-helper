@@ -150,6 +150,12 @@ Riots regler ([Game Policy](https://developer.riotgames.com/docs/lol), [General 
 
 - **Din champion-pulje (`championPool`, standard til):** pr. rolle fra history.json (rollen fra live-API'et): sejre af kampe, form (sidste 5) og mastery pr. champion, "Du vinder mest med" (op til 3 med mindst én sejr, sorteret efter den nederste grænse af et 95 %-Wilson-interval, så 1 af 1 ikke slår 9 af 15), "få kampe" under 20 kampe (iTero: win rate krydser 50 % efter ca. 20 kampe/12.000 mastery), forskellige champions i dine sidste 20 kampe i rollen og dine 2 mest spillede mod resten. Klientens kamphistorik står samlet (dens rolle er upålidelig). I champion select én linje når du hover: "LeBlanc: din bedste MID-champion (9 af 15)" eller "Ny champion for dig: 0 kampe i rollen MID". Mastery: `GET /lol-champion-mastery/v1/local-player/champion-mastery` (`championPoints`, `championLevel`), hentet i lobbyen.
 
+## Vinder-estimat (v1.26)
+
+`winEstimate` (standard til). Additiv model på log-odds (Bradley-Terry-agtig): for hver champion logit(win rate i rollen, OP.GG) - jeres plus, deres minus - krympet med n/(n+2000); lane-matchups (OP.GG `counters` for jeres champion i rollen mod deres i samme rolle) kun den del der ikke allerede ligger i championernes styrke, krympet n/(n+500); din form på championen i rollen (history.json, fra 5 kampe) krympet n/(n+20). Kræver 5 mod 5 med roller (modstanderne fra OP.GG's rollefordeling). I kampen: hver anden spillers ranked-sæson på championen (OP.GG-spejderen, aldrig dig selv), krympet n/(n+20). Estimatet gemmes pr. kamp (`winEstimate: {draft, live}`), og kalibreringen (favorit/jævnt/underdog + Brier-score mod 0,25) vises fra 10 kampe med dom fra 30.
+
+Testet bagud på 50 af Tobias' rigtige ranked-kampe (patch 16.21-16.22, OP.GG GLOBAL-data fra 17/11-2026, uden formleddet): rigtig side i 31 af 50, Brier 0,244 mod 0,25; favorit (>52 %) vandt 10 af 19, underdog (<48 %) 5 af 18. Få kampe - derfor måles det videre i appen.
+
 ## Objective-vagt, "omsæt føringen" og wincon i gennemgangen (v1.25)
 
 - **Objective-vagt (`objectiveCoach`, standard til):** timere fra League Wiki, patch 26.1 (docs/research-coach.md): drage 5:00 og 5 min efter `DragonKill`, voidgrubs 8:00 (kun nedtælling - live-API'et siger ikke om de er taget), Rift Herald 15:00-19:45 (væk efter `HeraldKill`), Baron 20:00 og 6 min efter `BaronKill`. Efter en drage-sjæl (4 drager) vises ingen drage-timer (Elder beregnes ikke). Kun map 11. Stemme 90-70 sek. før ("køb nu og vær klar") og, hvis du er død (`respawnTimer`) når den spawner, de sidste 40 sek. Én gang pr. objective; afvist af 8-sek.-grænsen prøves igen.
@@ -192,6 +198,7 @@ Knappen "Overlay" åbner et [Document Picture-in-Picture](https://developer.mozi
 | `obsClips` | Video af dine dødsfald via OBS' replay buffer (standard `false`) |
 | `replayJump` | Sættes af knappen "Slå replay-spring til/fra" (ændrer `EnableReplayApi` i League's game.cfg med backup). Ret den ikke selv |
 | `championPool` | Din champion-pulje (win rate, form, mastery pr. rolle) + én linje i champion select |
+| `winEstimate` | Vinder-estimat når alle har låst + spillernes form i kampen, målt mod dine resultater |
 | `objectiveCoach` | Objective-timere + stemme 1,5 min før, og "omsæt føringen" når du er foran |
 | `wincons` | Wincons i champion select og under kampen (hvem bærer hvert hold, hvem må ikke blive fed) |
 | `myRunes` | Dine egne rune-sider pr. champion (sættes i vinduet under "Mine runer") |

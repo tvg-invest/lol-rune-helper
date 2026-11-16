@@ -1687,7 +1687,13 @@ server.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(jgScout.rank, 'Master 120 LP');
     assert.strictEqual(jgScout.role, 'jungle');
     assert(scoutCalls.some((c) => c.game_name === 'Fedzed' && c.tag_line === 'EUW' && c.region === 'EUNE'), JSON.stringify(scoutCalls));
-    assert(!scoutCalls.some((c) => ['Topper', 'Mig', 'Jungle', 'Bot', 'Tank'].includes(c.game_name)), 'kun lane-modstander og jungler');
+    assert.strictEqual(sc.length, 2, 'spejder-kortet viser kun lane-modstander og jungler');
+    assert(!scoutCalls.some((c) => c.game_name === 'Mig'), 'du selv slås aldrig op');
+    // Vinder-estimatet: de andre spillere slås op (deres sæson på championen), når draft-estimatet er klar
+    await waitFor(() => ['Topper', 'Jungle', 'Bot', 'Tank'].every((n) => scoutCalls.some((c) => c.game_name === n)), 30000, 'vinder-estimat: alle andre spillere slået op');
+    const est = (await gui('GET', '/state')).body.estimate;
+    assert(est && typeof est.draft === 'number' && est.draft > 0 && est.draft < 1, `estimat: ${JSON.stringify(est)}`);
+    console.log('Vinder-estimat:', Math.round(est.draft * 100) + '%', est.live != null ? `(live ${Math.round(est.live * 100)}%)` : '');
     await waitFor(() => said().includes('Zed: 340 kampe, 61 procent win rate'), 10000, 'spejder-stemme');
     const ejLive = (await gui('GET', '/state')).body.enemyJungle;
     assert(ejLive && ejLive.guessed === false && ejLive.sides[0].side === 'RED' && ejLive.champion.name === 'Graves', `fjendens jungler live: ${JSON.stringify(ejLive)}`);

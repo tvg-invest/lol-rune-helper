@@ -35,6 +35,12 @@
     .grid { grid-template-columns: minmax(0, 1fr); }
     header .right { margin-left: 0; text-align: left; flex-basis: 100%; }
   }
+  .estimate .est-p { font-size: 18px; font-weight: 700; color: var(--gold2); }
+  .estimate .est-p.good { color: var(--green); } .estimate .est-p.bad { color: var(--red); }
+  .estimate .est-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 10px; background: var(--panel2); }
+  .estimate .est-bar .a { background: #6fbf8a; }
+  .estimate .est-bar .b { background: #e07a6a; }
+  .estimate .est-parts li { font-size: 13px; }
   .objectives .obj-list { display: flex; gap: 8px; flex-wrap: wrap; }
   .objectives .obj { display: flex; flex-direction: column; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); min-width: 120px; }
   .objectives .obj span { font-size: 18px; font-weight: 600; }
@@ -388,6 +394,7 @@ function renderDraft(s) {
         d.myBanTurn ? el('div', { class: 'turn' }, 'DIN TUR TIL AT BANNE') : null)),
     poolPickLine(s.poolPick),
     guardBox(s.climbGuard),
+    estimateCard(s.estimate),
     winconsCard(s.wincons),
     el('div', { class: 'grid' },
       el('div', {},
@@ -937,6 +944,7 @@ function historyCards(s) {
   const g = h.last;
   return [
     winconHistoryCard(h.wincon),
+    estimateHistoryCard(h.estimate),
     el('div', { class: 'card' }, el('h2', {}, 'Seneste kamp'),
       el('div', { class: 'crow', style: 'margin-bottom:12px' }, img(g.icon, g.champion),
         el('div', { class: 't' }, el('div', { class: 'n' }, `${g.champion} ${g.position ? '· ' + g.position : ''}`),
@@ -994,6 +1002,31 @@ function runesCard(s) {
     el('div', { class: 'tree' }, img(opt.primary.icon, opt.primary.name, 'style'), opt.primaryRunes.map((r, i) => runeEl(r, i === 0))),
     el('div', { class: 'tree' }, img(opt.secondary.icon, opt.secondary.name, 'style'), opt.secondaryRunes.map((r) => runeEl(r))),
     el('div', { class: 'shards' }, opt.shards.map((x) => el('span', { class: 'pill' }, x))));
+}
+
+// ---------- Vinder-estimat ----------
+function estimateCard(e) {
+  if (!e) return null;
+  const p = e.live != null ? e.live : e.draft;
+  const ppTxt = (x) => `${x > 0 ? '+' : ''}${String(x).replace('.', ',')} pp`;
+  const c = e.calibration;
+  return el('div', { class: 'card estimate' },
+    el('div', { class: 'plan-head' }, el('h2', { style: 'margin:0' }, 'Vinder-estimat'),
+      el('span', { class: 'est-p ' + (p > 0.52 ? 'good' : p < 0.48 ? 'bad' : '') , style: 'margin-left:auto' }, `Jeres chance ca. ${Math.round(p * 100)} %`)),
+    el('div', { class: 'est-bar' }, el('div', { class: 'a', style: `width:${p * 100}%` }), el('div', { class: 'b', style: `width:${(1 - p) * 100}%` })),
+    e.live != null ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, `Draft alene: ${Math.round(e.draft * 100)} % · med spillernes form på championerne: ${Math.round(e.live * 100)} %` + (e.players.total && e.players.done < e.players.total ? ` (henter ${e.players.total - e.players.done} spillere...)` : '')) : null,
+    el('ul', { class: 'notes est-parts', style: 'margin-top:8px' }, e.parts.map((x) => el('li', {},
+      el('b', { class: x.pp > 0 ? 'good' : x.pp < 0 ? 'bad' : '' }, ppTxt(x.pp)), ' ', x.label, el('span', { class: 'muted' }, ` - ${x.detail}`)))),
+    c ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' },
+      c.games < c.show ? `Træfsikkerhed måles i dine kampe: ${c.games} af ${c.show} kampe indtil nu.` : `${c.verdict} ${c.lines[c.lines.length - 1]}`) : null,
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' }, 'Draften flytter typisk kun få procentpoint - et estimat, ikke en grund til at dodge. Kilder: OP.GG (champion- og matchup-win rates, spillernes sæson) + dine egne kampe.'));
+}
+
+function estimateHistoryCard(c) {
+  if (!c) return null;
+  return el('div', { class: 'card' }, el('h2', {}, 'Vinder-estimatets træfsikkerhed'),
+    c.games < c.show ? el('div', { class: 'muted', style: 'font-size:13px' }, `Vises efter ${c.show} kampe med estimat (${c.games} indtil nu).`)
+      : [el('ul', { class: 'notes' }, c.lines.map((l) => el('li', {}, l))), el('div', { style: 'font-size:13px;margin-top:6px' }, c.verdict)]);
 }
 
 // ---------- Objective-vagt: timere + næste skridt ----------
@@ -1319,6 +1352,7 @@ function renderLive(s) {
       el('div', { class: 'right' }, el('div', { class: 'gold' }, gold(L.gold)), el('div', { class: 'meta' }, 'dit guld'))),
     adviceCard(L),
     objectivesCard(L.objectives),
+    estimateCard(s.estimate),
     winconsCard(s.wincons),
     scoutCard(L.scout),
     L.gameTime < 240 ? enemyJungleCard(s.enemyJungle) : null, // de første 4 min
@@ -1436,6 +1470,7 @@ function renderInto(s) {
     climbPickCard(s.climbPick),
     patternsPickCard(s.patternsPick),
     runeEditorCard(),
+    estimateCard(s.estimate),
     winconsCard(s.wincons),
     gameplanCard(s.plan),
     enemyJungleCard(s.enemyJungle),
