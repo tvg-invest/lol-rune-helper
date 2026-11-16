@@ -283,6 +283,23 @@ stiger typisk de første ca. 20 kampe på en champion). I champion select står 
 når du hover: "LeBlanc: din bedste MID-champion (9 af 15)" eller "Ny champion for dig:
 0 kampe i rollen". Slå fra med "championPool": false.
 
+WINCONS (NYT I 1.24)
+I champion select og under kampen: hvem der bærer hvert hold. "Deres wincon" er den
+champion, der ikke må blive fed; "Farligst tidligt" er en snowballer; "Jeres wincon" er den
+I skal spille omkring (står "dig", hvis det er dig). Reglen står i kortet: carry-klasse
+(marksman > mage/assassin > fighter > tank > support) + hvor meget championens win rate
+stiger fra kampe under 25 min til 40+ min (OP.GG). Under kampen står status (Foran/FED/
+Jævn/Bagud ud fra items, kills og level som på TAB), og bliver en anden fed, står den som
+den nye trussel. Med stemmen: "X, deres wincon, er ved at komme foran". Slå fra med
+"wincons": false.
+
+MINE RUNER (NYT I 1.24)
+Din egen rune-side pr. champion (fx Manaflow Band på LeBlanc). Klik "Lav min egen
+<champion>-side" ved runerne i champion select, eller find championen under "Mine runer"
+på startskærmen. Vælg runerne og tryk "Gem". Du kan også rette auto-siden i League-klienten
+og trykke "Gem siden fra klienten i stedet". Din side sættes automatisk, når du låser
+championen; OP.GG's sider ligger stadig som faner. Gemmes i config.json ("myRunes").
+
 Vil du bruge et navn i stedet for IP (fx Tailscale MagicDNS), så skriv det i
 "remoteHosts": ["min-pc"].
 
@@ -292,7 +309,8 @@ INDSTILLINGER (config.json ved siden af programmet)
 - setRunes / setSpells / setItemSet / adaptToEnemies / liveAdvice / voice: true eller false
 - enemyAlerts: true = stemme/overlay om lane-modstanderens køb og level 6, "X er fed",
   FED-mærker og "har ult" (forbudt efter Overwolfs Riot-regler); false = slået fra
-- scouting / enemyJungle / matchReview / patterns / climbCheck / coach / championPool: true eller false (standard true)
+- scouting / enemyJungle / matchReview / patterns / climbCheck / coach / championPool / wincons: true eller false (standard true)
+- myRunes: dine egne rune-sider (sættes i vinduet under "Mine runer")
 - replayJump: sættes af knappen "Slå replay-spring til/fra" - ret den ikke selv
 - obsClips: true = video af dine dødsfald med OBS (standard false); obsPassword: OBS'
   WebSocket-adgangskode; obsPort: standard 4455

@@ -1516,6 +1516,51 @@ server.listen(0, '127.0.0.1', async () => {
     state.pages = state.pages.filter((p) => p.id !== 50);
     state.maxPages = 1;
 
+    // 4m) Mine runer: gem din egen Ahri-side med Manaflow Band -> sættes med det samme og står først; slet -> OP.GG igen
+    {
+      const MINE = { primary_page_id: 8100, primary_rune_ids: [8112, 8143, 8140, 8105], secondary_page_id: 8200, secondary_rune_ids: [8226, 8210], stat_mod_ids: [5008, 5008, 5001] };
+      const trees = (await gui('GET', '/api/rune-trees')).body;
+      assert(trees.trees.length >= 5 && trees.shards.length === 3, 'rune-træ til editoren');
+      assert(trees.champions.some((c) => c.id === 103 && c.name === 'Ahri'));
+      const start = (await gui('POST', '/api/rune-start', { championId: 103 })).body;
+      assert.strictEqual(start.source, 'opgg', 'editoren starter fra den side der vises nu');
+      assert.strictEqual(start.page.primary_rune_ids.length, 4);
+      assert.strictEqual((await gui('POST', '/api/my-runes', { championId: 103, page: { ...MINE, secondary_rune_ids: [8226, 8224] } })).status, 400, 'to runer fra samme række afvises');
+      assert.strictEqual((await gui('POST', '/api/my-runes', { championId: 99999, page: MINE })).status, 400, 'ukendt champion afvises');
+      const before = runePosts();
+      const saved = await gui('POST', '/api/my-runes', { championId: 103, page: MINE });
+      assert.strictEqual(saved.status, 200, JSON.stringify(saved.body));
+      assert.strictEqual(saved.body.applied, true, 'sat i klienten med det samme');
+      assert.strictEqual(runePosts(), before + 1);
+      assert.deepStrictEqual(autoPage().selectedPerkIds, [8112, 8143, 8140, 8105, 8226, 8210, 5008, 5008, 5001], 'Manaflow Band på auto-siden');
+      st = (await gui('GET', '/state')).body;
+      assert.strictEqual(st.runeOptions[0].mine, true);
+      assert.strictEqual(st.runeIndex, 0);
+      assert(st.myRunes.some((r) => r.championId === 103 && r.runes.includes('Manaflow Band')), 'listen "Mine runer"');
+      const conf = JSON.parse(fs.readFileSync(env.LOL_HELPER_CONFIG, 'utf8').replace(/^﻿/, ''));
+      assert.deepStrictEqual(conf.myRunes['103'].secondary_rune_ids, [8226, 8210], 'gemt i config.json');
+      assert.strictEqual(conf.remoteLan, true, 'resten af config.json bevares');
+      // Gem siden fra klienten (du har rettet auto-siden i klienten)
+      const fromClient = await gui('POST', '/api/my-runes', { championId: 103, fromClient: true });
+      assert.strictEqual(fromClient.status, 200);
+      assert.deepStrictEqual(fromClient.body.page.secondary_rune_ids, [8226, 8210]);
+      // Wincons: dit hold (Ahri) og deres 5 - hvert kort har en wincon med begrundelse
+      for (let i = 0; i < 40 && !(st = (await gui('GET', '/state')).body).wincons?.enemy?.wincon; i++) await wait(500);
+      assert(st.wincons?.enemy?.wincon, `wincons: ${JSON.stringify(st.wincons)}`);
+      assert([122, 238, 202, 104, 266].map(String).includes(st.wincons.enemy.wincon.id), 'deres wincon er en af deres champions');
+      assert.strictEqual(st.wincons.ally.wincon.name, 'Ahri');
+      assert.strictEqual(st.wincons.ally.wincon.me, true);
+      assert(st.wincons.advice.some((l) => /må ikke blive fed|er fed|ved at komme foran/.test(l)), st.wincons.advice.join(' | '));
+      assert(st.wincons.advice.some((l) => /Du er jeres wincon/.test(l)));
+      console.log('Wincons:', st.wincons.enemy.wincon.name, '-', st.wincons.enemy.wincon.reasons.join(' · '));
+      // Slet: OP.GG's side igen
+      const del = await gui('POST', '/api/my-runes', { championId: 103, page: null });
+      assert.strictEqual(del.status, 200);
+      st = (await gui('GET', '/state')).body;
+      assert(!st.runeOptions[0].mine);
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(env.LOL_HELPER_CONFIG, 'utf8').replace(/^﻿/, '')).myRunes, {});
+    }
+
     // 4b) Du ændrer selv rune-siden, og vælger så Zed som modstander manuelt -> din side røres ikke
     autoPage().selectedPerkIds = [...autoPage().selectedPerkIds].reverse();
     const postsBeforeManual = runePosts();

@@ -48,6 +48,8 @@ const DEFAULT_CONFIG = {
   // "Se det i replayet": hop til øjeblikket i League's eget replay. Kræver EnableReplayApi=1 i League's game.cfg,
   // som programmet KUN sætter når du slår "Replay-spring" til i vinduet (med backup - samme knap slår det fra igen).
   replayJump: false,
+  wincons: true,          // wincons: hvem bærer hvert hold (champion select + live-status) og hvem der ikke må blive fed
+  myRunes: {},            // dine egne rune-sider pr. champion-id (sættes i vinduet under "Mine runer") - bruges før OP.GG's
   championPool: true,     // "Din champion-pulje": win rate, form og mastery pr. champion i hver rolle + én linje i champion select
   openWindow: true,       // åbn vinduet i browseren ved start
   remoteAccess: false,    // true = vinduet kan åbnes fra telefonen via Tailscale med en hemmelig nøgle
@@ -318,6 +320,7 @@ async function loadStaticData() {
     return it.tags.includes('Boots') || it.from.some((c) => bootsOf(c, seen));
   };
   for (const id of Object.keys(dd.items)) dd.items[id].boots = bootsOf(id);
+  dd.trees = styles.map((st) => ({ id: st.id, name: st.name, slots: st.slots.map((sl) => sl.runes.map((r) => r.id)) }));
   for (const style of styles) {
     dd.runes[style.id] = { name: style.name, icon: `https://ddragon.leagueoflegends.com/cdn/img/${style.icon}` };
     for (const slot of style.slots) {
@@ -1541,7 +1544,7 @@ function itemBlock(type, ids) {
 // Matchup-data bruges kun når der er nok kampe bag (ellers er tallene støj).
 const MATCHUP_MIN_GAMES = 150;
 
-function recommend(build, cfg, enemyIds, matchup, mapNumber = 11) {
+function recommend(build, cfg, enemyIds, matchup, mapNumber = 11, championId = null) {
   const enemy = cfg.adaptToEnemies && enemyIds.length ? analyzeEnemies(enemyIds) : null;
   const blocks = [];
   const notes = [];
@@ -1595,19 +1598,310 @@ function recommend(build, cfg, enemyIds, matchup, mapNumber = 11) {
   // Control Ward kan ikke købes i ARAM (map 12).
   blocks.push(itemBlock('Forbrug', [2003, 2055].filter((id) => dd.items[id]?.maps[mapNumber] !== false)));
 
-  const pagesOf = (b) => {
-    const pages = (b?.rune_pages || []).flatMap((p) => p.builds || []);
-    return pages.length ? pages : b?.runes || [];
-  };
+  const pagesOf = runePagesOf;
   let runeOptions = rankOptions(pagesOf(build), cfg).slice(0, 3);
   // Bedste rune-side i matchuppet først (fx "Mod Zed"), hvis der er nok kampe.
   const mRune = rankOptions(pagesOf(matchup?.build), cfg).find((r) => r.play >= MATCHUP_MIN_GAMES);
   if (mRune) {
     runeOptions = [{ ...mRune, matchup: vsName }, ...runeOptions.filter((r) => perkKey(r) !== perkKey(mRune))].slice(0, 3);
   }
+  // Din egen side (Mine runer) står altid først og sættes automatisk - OP.GG's sider ligger som faner ved siden af.
+  const mine = myRunePage(championId);
+  if (mine) runeOptions = [mine, ...runeOptions.filter((r) => perkKey(r) !== perkKey(mine))].slice(0, 4);
   const spells = rankOptions(build.summoner_spells, { buildChoice: 'popular' })[0]?.ids || null;
 
   return { blocks, notes, skills, runeOptions, spells, enemy, matchup: matchup && { id: matchup.id, name: vsName, stats: matchup.stats, manual: matchup.manual } };
+}
+
+// ---------- Mine runer: din egen rune-side pr. champion (config.myRunes) ----------
+// Samme form som OP.GG's rune-sider, så din side kan stå som første valg ved siden af dem.
+// Shards pr. række (offense, flex, defense) - de findes ikke i Data Dragon.
+const SHARD_ROWS = [[5008, 5005, 5007], [5008, 5010, 5001], [5011, 5013, 5001]];
+
+function runePagesOf(b) {
+  const pages = (b?.rune_pages || []).flatMap((p) => p.builds || []);
+  return pages.length ? pages : b?.runes || [];
+}
+
+// Tjekker at siden kan sættes på den nuværende patch (Data Dragon): keystone + 3 runer i hovedgrenen,
+// 2 runer fra forskellige rækker i den anden gren og én shard i hver række. Fejl har en dansk forklaring.
+function validRunePage(p) {
+  const n = Number;
+  const tree = (id) => (dd.trees || []).find((t) => t.id === n(id));
+  const primary = tree(p?.primary_page_id);
+  const secondary = tree(p?.secondary_page_id);
+  if (!primary || !secondary) throw new Error('ukendt rune-gren');
+  if (primary === secondary) throw new Error('de to grene skal være forskellige');
+  const pr = (p.primary_rune_ids || []).map(n);
+  if (pr.length !== 4 || pr.some((id, i) => !primary.slots[i]?.includes(id))) throw new Error(`vælg én rune i hver række i ${primary.name}`);
+  const row = (id) => secondary.slots.findIndex((s, i) => i > 0 && s.includes(id));
+  const sr = (p.secondary_rune_ids || []).map(n).sort((a, b) => row(a) - row(b));
+  if (sr.length !== 2 || sr.some((id) => row(id) < 1) || row(sr[0]) === row(sr[1])) throw new Error(`vælg 2 runer fra forskellige rækker i ${secondary.name}`);
+  const sh = (p.stat_mod_ids || []).map(n);
+  if (sh.length !== 3 || sh.some((id, i) => !SHARD_ROWS[i].includes(id))) throw new Error('vælg én shard i hver række');
+  return { primary_page_id: primary.id, primary_rune_ids: pr, secondary_page_id: secondary.id, secondary_rune_ids: sr, stat_mod_ids: sh };
+}
+
+// Klientens rune-side (/lol-perks/v1/currentpage) -> samme form.
+function pageFromClient(page) {
+  const ids = (page?.selectedPerkIds || []).map(Number);
+  return { primary_page_id: page?.primaryStyleId, primary_rune_ids: ids.slice(0, 4), secondary_page_id: page?.subStyleId, secondary_rune_ids: ids.slice(4, 6), stat_mod_ids: ids.slice(6, 9) };
+}
+
+const myRunesWarned = new Set();
+function myRunePage(championId) {
+  const saved = championId ? app.cfg.myRunes?.[String(championId)] : null;
+  if (!saved) return null;
+  try {
+    return { ...validRunePage(saved), mine: true, play: 0, win: 0 };
+  } catch (e) {
+    if (!myRunesWarned.has(String(championId))) {
+      myRunesWarned.add(String(championId));
+      log(`Din rune-side til ${dd.champions[championId]?.name || championId} passer ikke til denne patch (${e.message}) - bruger OP.GG's. Ret den under "Mine runer".`);
+    }
+    return null;
+  }
+}
+
+function saveMyRunes(championId, page) {
+  const all = { ...(app.cfg.myRunes || {}) };
+  if (page) all[String(championId)] = page;
+  else delete all[String(championId)];
+  if (!saveConfigValue('myRunes', all)) throw new Error('Kunne ikke gemme i config.json (se loggen)');
+  app.cfg = { ...app.cfg, myRunes: all };
+  myRunesWarned.delete(String(championId));
+  log(page ? `Din rune-side til ${dd.champions[championId]?.name || championId} er gemt - den sættes automatisk fremover.`
+    : `Din rune-side til ${dd.champions[championId]?.name || championId} er slettet - bruger OP.GG's igen.`);
+}
+
+// Gemt/slettet side til den champion du står med i champion select: sæt den med det samme.
+async function reapplyMyRunes(championId) {
+  if (app.live || !app.pick || app.pick.championId !== championId || !app.build || !app.rec) return false;
+  app.rec = recommend(app.build.build, app.cfg, app.pick.enemyIds, app.lastMatchup || null, app.pick.gameMode === 'ARAM' ? 12 : 11, championId);
+  if (!app.cfg.setRunes || !app.client || !app.rec.runeOptions.length) return false;
+  await applyRuneChoice(0);
+  return true;
+}
+
+// Startpunkt i rune-editoren: din gemte side, ellers den side der vises nu, ellers OP.GG's bedste.
+async function runeStartPage(championId) {
+  const saved = app.cfg.myRunes?.[String(championId)];
+  if (saved) { try { return { page: validRunePage(saved), source: 'mine' }; } catch {} }
+  if (app.pick?.championId === championId && app.rec?.runeOptions?.length) {
+    const r = app.rec.runeOptions[app.runeIndex] || app.rec.runeOptions[0];
+    try { return { page: validRunePage(r), source: 'opgg' }; } catch {}
+  }
+  const { build } = await getBuild(app.cfg, championId, null, 'CLASSIC');
+  for (const r of rankOptions(runePagesOf(build), app.cfg)) {
+    try { return { page: validRunePage(r), source: 'opgg' }; } catch {}
+  }
+  return { page: null, source: null };
+}
+
+function runeTreesView() {
+  const rune = (id) => ({ id, name: runeName(id), icon: dd.runes[id]?.icon || null });
+  return {
+    trees: (dd.trees || []).map((t) => ({ ...rune(t.id), slots: t.slots.map((s) => s.map(rune)) })),
+    shards: SHARD_ROWS.map((r) => r.map(rune)),
+    champions: Object.values(dd.champions).map((c) => ({ id: Number(c.key), name: c.name, icon: c.icon })).sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
+
+function myRunesView() {
+  const rune = (id) => ({ name: runeName(id), icon: dd.runes[id]?.icon || null });
+  return Object.entries(app.cfg.myRunes || {}).map(([id, p]) => ({
+    championId: Number(id),
+    champion: champView(id),
+    keystone: rune(p.primary_rune_ids?.[0]),
+    secondary: rune(p.secondary_page_id),
+    runes: [...(p.primary_rune_ids || []).slice(1), ...(p.secondary_rune_ids || [])].map((r) => runeName(r)),
+  })).sort((a, b) => a.champion.name.localeCompare(b.champion.name));
+}
+
+// ---------- Wincons: hvem bærer hvert hold ----------
+// Regel (vises i vinduet): carry-vægt efter championens klasse (Data Dragon) + hvor meget dens win rate stiger
+// fra korte til lange kampe (OP.GG game_lengths i rollen). Højeste score = holdets wincon.
+// Champions hvis win rate falder tydeligt i lange kampe, står som "farligst tidligt".
+const CARRY_WEIGHT = { Marksman: 3, Mage: 2.5, Assassin: 2.5, Fighter: 2, Tank: 1, Support: 0.5 };
+const CLASS_DA = { Marksman: 'marksman', Mage: 'mage', Assassin: 'assassin', Fighter: 'fighter', Tank: 'tank', Support: 'support' };
+const WINCON_CURVE = 0.03; // 3 procentpoint fra <25 min til 40+ min = tydeligt tidlig/sen champion
+const TEAM_CURVE_DIFF = 0.01; // holdenes gennemsnit skal være mindst 1 procentpoint fra hinanden
+const pp = (x) => `${x > 0 ? '+' : ''}${(x * 100).toFixed(1).replace('.', ',')} procentpoint`;
+
+// Win rate i 40+ min-kampe minus win rate i kampe under 25 min (null uden data).
+function curveOf(build) {
+  const g = (build?.game_lengths || []).filter((x) => typeof x.rate === 'number');
+  return g.length >= 2 ? g[g.length - 1].rate - g[0].rate : null;
+}
+
+// Holdets roller: de kendte (champion select/live) + OP.GG's rollefordeling for resten (som laneOpponent).
+async function teamRoles(cfg, members) {
+  const roles = new Map();
+  for (const m of members) if (POSITIONS.includes(m.position) && ![...roles.values()].includes(m.position)) roles.set(m.id, m.position);
+  const free = members.filter((m) => !roles.has(m.id)).map((m) => m.id);
+  if (!free.length) return roles;
+  const open = POSITIONS.filter((p) => ![...roles.values()].includes(p));
+  const rates = await roleRates(cfg, free);
+  let best = { score: -1, roles: [] };
+  const assign = (i, used, score) => {
+    if (i === free.length) { if (score > best.score) best = { score, roles: [...used] }; return; }
+    for (const pos of open) {
+      if (used.includes(pos)) continue;
+      used.push(pos);
+      assign(i + 1, used, score + (rates[free[i]]?.[pos] || 0));
+      used.pop();
+    }
+  };
+  assign(0, [], 0);
+  free.forEach((id, i) => { if (best.roles[i]) roles.set(id, best.roles[i]); });
+  return roles;
+}
+
+async function winconEntry(cfg, id, position) {
+  const champ = dd.champions[id];
+  const build = POSITIONS.includes(position) ? await fetchBuild(cfg.region, 'ranked', id, position).catch(() => null) : null;
+  const cls = champ?.tags?.[0] || null;
+  let weight = CARRY_WEIGHT[cls] ?? 1;
+  if (position === 'SUPPORT') weight *= 0.4; // få guld: sjældent den der bærer
+  const curve = curveOf(build);
+  const stats = build ? roleStats({ build, position }) : null;
+  const timing = curve == null ? null : curve >= WINCON_CURVE ? 'late' : curve <= -WINCON_CURVE ? 'early' : 'even';
+  return {
+    id: String(id), name: champ?.name || String(id), icon: champ?.icon || null, position: position || null,
+    cls, curve, timing, winRate: stats?.winRate ?? null,
+    score: weight + Math.max(curve || 0, 0) * 10,
+    weight,
+  };
+}
+
+function winconReasons(e) {
+  const out = [];
+  if (e.cls) out.push(`${CLASS_DA[e.cls] || e.cls}${e.position ? ` (${e.position})` : ''}`);
+  if (e.curve != null) out.push(`win rate ${pp(e.curve)} fra kampe under 25 min til 40+ min (OP.GG)`);
+  return out;
+}
+
+async function analyzeWincons(cfg, allies, enemies, myId) {
+  const side = async (members) => {
+    const roles = await teamRoles(cfg, members);
+    const list = await Promise.all(members.map((m) => winconEntry(cfg, m.id, roles.get(m.id) || null)));
+    const sorted = [...list].sort((a, b) => b.score - a.score || (b.winRate || 0) - (a.winRate || 0));
+    const wincon = sorted[0] || null;
+    // Farligst tidligt: en carry hvis win rate falder tydeligt i lange kampe (snowballer) - hvis ikke allerede wincon.
+    const early = list.filter((e) => e !== wincon && e.timing === 'early' && e.weight >= 2).sort((a, b) => a.curve - b.curve)[0] || null;
+    const curves = list.map((e) => e.curve).filter((c) => c != null);
+    return { wincon, early, members: list, avgCurve: curves.length ? curves.reduce((s, c) => s + c, 0) / curves.length : null, count: members.length };
+  };
+  const [ally, enemy] = await Promise.all([side(allies), side(enemies)]);
+  return { ally, enemy, myId: myId ? String(myId) : null };
+}
+
+// Holdene fra champion select eller live -> analysen (i baggrunden; OP.GG-svarene caches i 6 timer).
+function updateWincons(allies, enemies, myId) {
+  if (!app.cfg.wincons || !allies.length || !enemies.length) return;
+  const key = [allies, enemies].map((t) => t.map((m) => `${m.id}:${m.position || ''}`).sort().join(',')).join('|');
+  if (key === app.winconKey) return;
+  app.winconKey = key;
+  analyzeWincons(app.cfg, allies, enemies, myId)
+    .then((w) => {
+      if (app.winconKey !== key) return;
+      // Samme wincons som før (fx kun rollerne blev kendt i kampen): ingen ny log-linje.
+      const names = `${w.ally.wincon?.name}|${w.enemy.wincon?.name}`;
+      if (names !== app.wincons?.names) log(`Wincons: jeres ${w.ally.wincon?.name || '?'}, deres ${w.enemy.wincon?.name || '?'}.`);
+      app.wincons = { ...w, names };
+      broadcast();
+    })
+    .catch((e) => log(`Wincon-analysen fejlede: ${e.message}`));
+}
+
+function winconsFromSession(session) {
+  const pos = (m) => POSITION_MAP[m.assignedPosition] || null;
+  const allies = (session.myTeam || []).filter((m) => m.championId > 0).map((m) => ({ id: m.championId, position: pos(m) }));
+  const enemies = (session.theirTeam || []).filter((m) => m.championId > 0).map((m) => ({ id: m.championId, position: null }));
+  const me = session.myTeam?.find((m) => m.cellId === session.localPlayerCellId);
+  updateWincons(allies, enemies, me?.championId > 0 ? me.championId : null);
+}
+
+function winconsFromLive(L) {
+  const m = (p) => ({ id: Number(p.champ?.key), position: LIVE_POSITION[p.position] || null });
+  const allies = L.allies.filter((p) => p.champ).map(m);
+  const enemies = L.enemies.filter((p) => p.champ).map(m);
+  updateWincons(allies, enemies, L.me.champ?.key);
+}
+
+// Status i kampen: wincon-championens styrke (items, kills, level - samme mål som "fed") mod holdets gennemsnit.
+const WINCON_AHEAD = 1.2;
+const WINCON_BEHIND = 0.85;
+function winconStatus(p, team) {
+  const avg = team.reduce((s, x) => s + Math.max(threatOf(x), 1), 0) / (team.length || 1);
+  const ratio = Math.max(threatOf(p), 1) / avg;
+  const fed = (p.kills - p.deaths >= 3 && p.kills >= 4) || (ratio >= 1.4 && p.kills >= 3);
+  const state = fed ? 'fed' : ratio >= WINCON_AHEAD ? 'ahead' : ratio <= WINCON_BEHIND ? 'behind' : 'even';
+  return { state, ratio: Math.round(ratio * 100) / 100, kda: `${p.kills}/${p.deaths}/${p.assists}` };
+}
+
+const WINCON_STATE = { fed: 'FED', ahead: 'Foran', even: 'Jævn', behind: 'Bagud' };
+
+function winconLive(L, W) {
+  if (!L || !W) return null;
+  const find = (list, id) => list.find((p) => String(p.champ?.key) === String(id));
+  const out = {};
+  for (const [k, list] of [['ally', L.allies], ['enemy', L.enemies]]) {
+    const p = W[k].wincon && find(list, W[k].wincon.id);
+    out[k] = p ? winconStatus(p, list) : null;
+    // En anden end wincon'en er blevet den stærkeste og fed: den bærer holdet nu.
+    const carry = list.filter((x) => x !== p).map((x) => ({ x, s: winconStatus(x, list) })).filter((o) => o.s.state === 'fed')
+      .sort((a, b) => b.s.ratio - a.s.ratio)[0];
+    out[`${k}New`] = carry ? { id: String(carry.x.champ?.key), name: carry.x.champ?.name || carry.x.name, icon: carry.x.champ?.icon, ...carry.s } : null;
+  }
+  return out;
+}
+
+// Konkrete råd ud fra analysen (+ status i kampen). Kun regler, ingen gæt om spillerne.
+function winconAdvice(W, live) {
+  const lines = [];
+  const ew = W.enemy.wincon;
+  const aw = W.ally.wincon;
+  if (ew) {
+    const st = live?.enemy?.state;
+    if (st === 'fed') lines.push(`${ew.name} er fed: kæmp ikke uden at have flere med, og fokusér ${ew.name} i teamfights.`);
+    else if (st === 'ahead') lines.push(`${ew.name} er ved at komme foran: giv ikke flere kills - spil sikkert i den side af kortet.`);
+    else lines.push(`${ew.name} må ikke blive fed: ingen 1-mod-1 du ikke er sikker på at vinde, og ward hvor ${ew.name} går.`);
+    if (ew.timing === 'late') lines.push(`${ew.name} bliver stærkere med tiden: tag drager, grubs og tårne tidligt, og afslut før 30-35 min hvis I kan.`);
+    if (ew.timing === 'early') lines.push(`${ew.name} er stærkest tidligt: overlev de første 15 min, så falder truslen.`);
+  }
+  if (W.enemy.early) lines.push(`${W.enemy.early.name} er farligst tidligt (snowballer) - giv ingen tidlige kills.`);
+  if (live?.enemyNew) lines.push(`${live.enemyNew.name} (${live.enemyNew.kda}) bærer dem nu - behandl ${live.enemyNew.name} som deres wincon.`);
+  if (aw) {
+    if (aw.id === W.myId) lines.push('Du er jeres wincon: dine dødsfald koster mest - farm sikkert og vær med i de store kampe.');
+    else if (live?.ally?.state === 'behind') lines.push(`Jeres wincon ${aw.name} er bagud: hjælp ${aw.name} med farm og vision, eller find en anden der kan bære.`);
+    else lines.push(`Spil omkring ${aw.name}: vær klar når ${aw.name} kæmper, og giv ${aw.name} plads til at farme.`);
+  }
+  if (live?.allyNew && live.allyNew.id !== W.myId) lines.push(`${live.allyNew.name} (${live.allyNew.kda}) er jeres stærkeste lige nu - spil omkring ${live.allyNew.name}.`);
+  const a = W.ally.avgCurve;
+  const e = W.enemy.avgCurve;
+  if (a != null && e != null) {
+    if (a - e >= TEAM_CURVE_DIFF) lines.push(`Jeres hold skalerer bedre (gennemsnit ${pp(a)} mod ${pp(e)}): spil sikkert tidligt - kampen bliver lettere jo længere den varer.`);
+    else if (e - a >= TEAM_CURVE_DIFF) lines.push(`Deres hold skalerer bedre (gennemsnit ${pp(e)} mod ${pp(a)}): pres tidligt - objectives og tårne før 25 min.`);
+  }
+  return lines;
+}
+
+function winconsView() {
+  const W = app.wincons;
+  if (!W || !app.cfg.wincons) return null;
+  const live = app.live ? winconLive(app.live, W) : null;
+  const entry = (e, st) => e && {
+    id: e.id, name: e.name, icon: e.icon, position: e.position, timing: e.timing,
+    reasons: winconReasons(e), me: e.id === W.myId,
+    state: st ? { ...st, label: WINCON_STATE[st.state] } : null,
+  };
+  return {
+    ally: { wincon: entry(W.ally.wincon, live?.ally), early: entry(W.ally.early), count: W.ally.count },
+    enemy: { wincon: entry(W.enemy.wincon, live?.enemy), early: entry(W.enemy.early), count: W.enemy.count },
+    advice: winconAdvice(W, live),
+    live: Boolean(live),
+  };
 }
 
 // ---------- Anvend på klienten ----------
@@ -1894,6 +2188,9 @@ function clearPick() {
   app.jungleKey = null;
   app.enemyJungle = null;
   app.ejKey = null;
+  app.wincons = null;
+  app.winconKey = null;
+  app.lastMatchup = null;
 }
 
 const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
@@ -4157,7 +4454,7 @@ function poolPick(championId, position) {
 
 // ---------- Opdateringer ----------
 
-const VERSION = '1.23.0';
+const VERSION = '1.24.0';
 const UPDATE_URL = process.env.LOL_HELPER_UPDATE_URL || 'https://api.github.com/repos/tvg-invest/lol-rune-helper/releases/latest';
 const UPDATE_ASSET = { win32: 'LoL-Rune-Helper.exe', darwin: 'LoL-Rune-Helper-mac' }[process.platform];
 
@@ -4934,15 +5231,20 @@ function announce(L) {
     }
   }
   const fed = new Set(L.enemy.fed.map((p) => p.champ?.name || p.name));
+  // Deres wincon (champion select-analysen): status i kampen.
+  const enemyWincon = app.cfg.wincons && app.wincons?.enemy?.wincon ? app.wincons.enemy.wincon.name : null;
+  const winconState = enemyWincon ? winconLive(L, app.wincons)?.enemy?.state || null : null;
   if (!v || !v.core) {
     // Første gang i kampen (eller efter opdatering): intet at annoncere, bare husk tilstanden.
-    app.voice = { afford: new Set(afford), skillNext: L.skill.next, core, level: L.me.level, fed };
+    app.voice = { afford: new Set(afford), skillNext: L.skill.next, core, level: L.me.level, fed, winconState };
     return;
   }
   // "X er fed" (kun med enemyAlerts): nye modstandere med høj KDA siden sidst.
   if (app.cfg.enemyAlerts) {
     const newFed = [...fed].filter((n) => !v.fed?.has(n));
-    if (newFed.length) say('fed', `${newFed.join(' og ')} er fed`);
+    if (newFed.length) say('fed', `${newFed.join(' og ')} er fed${enemyWincon && newFed.includes(enemyWincon) ? ` - ${newFed.length > 1 ? `${enemyWincon} er ` : ''}deres wincon` : ''}`);
+    // Tidlig advarsel: deres wincon går fra jævn/bagud til foran (fed siges ovenfor).
+    if (winconState === 'ahead' && ['even', 'behind'].includes(v.winconState)) say('wincon', `${enemyWincon}, deres wincon, er ved at komme foran`);
   }
   // "Råd til": et forslag du ikke længere har råd til, må siges igen senere. Et der bare falder ud af listen, glemmes ikke.
   for (const a of L.advice) if (!a.canAfford) v.afford.delete(a.id);
@@ -4965,7 +5267,7 @@ function announce(L) {
   const newCore = core.filter((c) => !v.core.includes(c));
   const done = core.filter((c) => v.core.includes(c));
   if (newCore.length && say('core', `${itemName(newCore[0])} færdig - ${done.length + 1} af ${coreList.length} i dit core build`)) done.push(newCore[0]);
-  app.voice = { afford: v.afford, skillNext, core: done, level: L.me.level, fed };
+  app.voice = { afford: v.afford, skillNext, core: done, level: L.me.level, fed, winconState: winconState || v.winconState };
 }
 
 async function updateLive(data) {
@@ -4999,7 +5301,7 @@ async function updateLive(data) {
     trackOpponent(app.live, data.events?.Events);
     announce(app.live);
     // Nye funktioner fejler stille - de må aldrig stoppe live-løkken.
-    for (const fn of [ensureScout, updateEnemyJungleLive]) {
+    for (const fn of [ensureScout, updateEnemyJungleLive, winconsFromLive]) {
       try { fn(app.live); } catch {}
     }
     if (app.cfg.obsClips) {
@@ -5355,6 +5657,8 @@ function viewModel() {
     pool: app.live ? null : safeView(championPoolView),
     // Champion select: én linje om den champion du hover/har låst (din egen pulje i rollen).
     poolPick: app.live || !app.hover ? null : safeView(() => poolPick(app.hover.championId, app.hover.position)),
+    wincons: safeView(winconsView),
+    myRunes: app.live ? null : safeView(myRunesView),
   };
   if (!pick || !b || !rec) return base;
   if (app.cfg.patterns) {
@@ -5388,15 +5692,17 @@ function viewModel() {
     winRate: stats?.winRate,
     statsScope: stats?.scope,
     runeIndex: app.runeIndex,
+    championId: pick.championId,
     runeOptions: rec.runeOptions.map((r) => ({
       primary: rune(r.primary_page_id),
       secondary: rune(r.secondary_page_id),
       primaryRunes: r.primary_rune_ids.map(rune),
       secondaryRunes: r.secondary_rune_ids.map(rune),
       shards: r.stat_mod_ids.map(runeName),
-      games: r.play,
-      winRate: r.win / r.play,
+      games: r.mine ? null : r.play,
+      winRate: r.mine ? null : r.win / r.play,
       matchup: r.matchup || null,
+      mine: Boolean(r.mine),
     })),
     matchup: rec.matchup && {
       id: rec.matchup.id,
@@ -5642,6 +5948,39 @@ async function handleRequest(req, res, html) {
       return json(500, { error: e.message });
     }
   }
+  // Mine runer: træet til editoren, startside for en champion, og gem/slet din side.
+  if (req.method === 'GET' && req.url === '/api/rune-trees') return json(200, runeTreesView());
+  if (req.method === 'POST' && req.url === '/api/rune-start') {
+    const championId = Number((await readBody(req)).championId);
+    if (!dd.champions[championId]) return json(400, { error: 'Ukendt champion' });
+    try {
+      return json(200, await runeStartPage(championId));
+    } catch (e) {
+      return json(200, { page: null, source: null, error: `Kunne ikke hente OP.GG's side (${e.message})` });
+    }
+  }
+  if (req.method === 'POST' && req.url === '/api/my-runes') {
+    const { championId: rawId, page, fromClient } = await readBody(req);
+    const championId = Number(rawId);
+    if (!dd.champions[championId]) return json(400, { error: 'Ukendt champion' });
+    let clean = null;
+    try {
+      if (fromClient) {
+        if (!app.client) throw new Error('League-klienten kører ikke');
+        clean = validRunePage(pageFromClient(await lcu(app.client, 'GET', '/lol-perks/v1/currentpage')));
+      } else if (page) clean = validRunePage(page);
+    } catch (e) {
+      return json(400, { error: `Siden kan ikke gemmes: ${e.message}` });
+    }
+    try {
+      saveMyRunes(championId, clean);
+      const applied = await serial(() => reapplyMyRunes(championId)).catch((e) => { log(`Fejl (runer): ${e.message}`); return false; });
+      broadcast();
+      return json(200, { ok: true, applied, page: clean });
+    } catch (e) {
+      return json(500, { error: e.message });
+    }
+  }
   if (req.method === 'POST' && req.url === '/api/role') {
     const { position } = await readBody(req);
     if (position !== null && !POSITIONS.includes(position)) return json(400, { error: 'Ukendt rolle' });
@@ -5880,7 +6219,8 @@ async function applyRec(pick, matchup, fullApply) {
     try { await fn(); } catch (e) { log(`Fejl (${what}): ${e.message}`); }
   };
   const prevMatchup = app.rec?.matchup?.id ?? null;
-  app.rec = recommend(app.build.build, cfg, pick.enemyIds, matchup, pick.gameMode === 'ARAM' ? 12 : 11);
+  app.lastMatchup = matchup;
+  app.rec = recommend(app.build.build, cfg, pick.enemyIds, matchup, pick.gameMode === 'ARAM' ? 12 : 11, pick.championId);
   const matchupChanged = (app.rec.matchup?.id ?? null) !== prevMatchup;
   // Rune-valgene kan være omrokeret (matchup-side først) - peg på den side der faktisk er sat.
   if (app.appliedPerks) app.runeIndex = app.rec.runeOptions.findIndex((r) => perkKey(r) === app.appliedPerks);
@@ -6037,6 +6377,7 @@ async function tick() {
   const pickPending = (session.actions || []).flat()
     .some((a) => a.actorCellId === session.localPlayerCellId && a.type === 'pick' && !a.completed);
   try { updateEnemyJungleSelect(session, me); } catch {}
+  try { winconsFromSession(session); } catch {}
   if (!(me?.championId > 0) || pickPending) {
     setStatus('Champion select - venter på at du låser en champion.');
     if (me) updateDraft(session, me);

@@ -35,6 +35,34 @@
     .grid { grid-template-columns: minmax(0, 1fr); }
     header .right { margin-left: 0; text-align: left; flex-basis: 100%; }
   }
+  .wincons .wc-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .wincons .wc-label { width: 104px; font-size: 12px; color: var(--muted); flex: none; }
+  .wincons .wc-row.enemy .wc-label { color: #e07a6a; }
+  .wincons .wc-row.ally .wc-label { color: #6fbf8a; }
+  .wincons .wc-ic { width: 34px; height: 34px; border-radius: 6px; flex: none; }
+  .wincons .t .n { font-weight: 600; }
+  .wincons .t .r { font-size: 12px; color: var(--muted); }
+  .wc-state { margin-left: 8px; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+  .wc-state.fed { background: #7a2a22; color: #fff; border-color: #7a2a22; }
+  .wc-state.ahead { color: #e0a96a; border-color: #e0a96a; }
+  .wc-state.behind { color: #6fbf8a; border-color: #6fbf8a; }
+  .runeedit .rtrees { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 8px; }
+  .runeedit .rtree { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px 4px 4px; opacity: .55; }
+  .runeedit .rtree img { width: 22px; height: 22px; }
+  .runeedit .rtree.on, .runeedit .rpick.on, .runeedit .rshard.on { opacity: 1; border-color: var(--gold); }
+  .runeedit .rrow { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0; }
+  .runeedit .rpick { display: flex; flex-direction: column; align-items: center; width: 78px; padding: 4px; font-size: 10.5px; line-height: 1.2; opacity: .4; filter: grayscale(.8); }
+  .runeedit .rpick.on { filter: none; }
+  .runeedit .rpick img { width: 34px; height: 34px; object-fit: contain; margin-bottom: 3px; }
+  .runeedit .rrow.keys .rpick img { width: 42px; height: 42px; }
+  .runeedit .rshard { cursor: pointer; opacity: .55; }
+  .runeedit button.primary { background: var(--gold); color: #111; border-color: var(--gold); font-weight: 600; }
+  .runeedit button:disabled { opacity: .5; cursor: default; }
+  .rsearch { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel2); color: var(--text); width: 220px; max-width: 100%; }
+  .rhits { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .rhits button { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 10px 3px 3px; }
+  .rhits img { width: 24px; height: 24px; border-radius: 4px; }
+  img.mini, .crow img.mini { width: 16px; height: 16px; vertical-align: -3px; }
   .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
   .tab { display: flex; align-items: center; gap: 6px; padding: 5px 10px 5px 5px; }
   .tab img { width: 26px; height: 26px; }
@@ -353,6 +381,7 @@ function renderDraft(s) {
         d.myBanTurn ? el('div', { class: 'turn' }, 'DIN TUR TIL AT BANNE') : null)),
     poolPickLine(s.poolPick),
     guardBox(s.climbGuard),
+    winconsCard(s.wincons),
     el('div', { class: 'grid' },
       el('div', {},
         el('div', { class: 'card' }, el('h2', {}, d.bansFor ? `Ban-forslag til ${d.bansFor.name}` : 'Ban-forslag'),
@@ -945,16 +974,164 @@ function runesCard(s) {
     },
       img(r.primaryRunes[0].icon, r.primaryRunes[0].name),
       img(r.secondary.icon, r.secondary.name, 'sub'),
-      el('span', {}, r.primaryRunes[0].name, ' ', el('small', {}, pct(r.winRate) + ' · ' + num(r.games)),
-        r.matchup ? el('small', { class: 'diff' }, 'Mod ' + r.matchup) : diffOf(i) ? el('small', { class: 'diff' }, 'med ' + diffOf(i)) : null))));
+      el('span', {}, r.primaryRunes[0].name, ' ', r.mine ? el('small', {}, 'din side') : el('small', {}, pct(r.winRate) + ' · ' + num(r.games)),
+        r.mine ? el('small', { class: 'diff' }, 'Mine runer') : r.matchup ? el('small', { class: 'diff' }, 'Mod ' + r.matchup) : diffOf(i) ? el('small', { class: 'diff' }, 'med ' + diffOf(i)) : null))));
   if (!opt) return el('div', { class: 'card' }, el('h2', {}, 'Runer'), el('div', { class: 'muted' }, 'Ingen rune-data.'));
   const runeEl = (r, key) => el('div', { class: 'rune' + (key ? ' keystone' : '') }, img(r.icon, r.name), r.name);
   return el('div', { class: 'card' },
-    el('h2', {}, 'Runer'),
+    el('div', { class: 'plan-head' }, el('h2', { style: 'margin:0' }, 'Runer'),
+      el('button', { style: 'margin-left:auto;font-size:12px;padding:4px 10px', onclick: () => openRuneEditor(s.championId) },
+        opt.mine ? 'Ret min side' : `Lav min egen ${s.champion.name}-side`)),
     tabs,
     el('div', { class: 'tree' }, img(opt.primary.icon, opt.primary.name, 'style'), opt.primaryRunes.map((r, i) => runeEl(r, i === 0))),
     el('div', { class: 'tree' }, img(opt.secondary.icon, opt.secondary.name, 'style'), opt.secondaryRunes.map((r) => runeEl(r))),
     el('div', { class: 'shards' }, opt.shards.map((x) => el('span', { class: 'pill' }, x))));
+}
+
+// ---------- Wincons: hvem bærer hvert hold ----------
+function winconRow(label, e, cls) {
+  if (!e) return null;
+  return el('div', { class: 'wc-row ' + cls },
+    el('div', { class: 'wc-label' }, label),
+    img(e.icon, e.name, 'wc-ic'),
+    el('div', { class: 't' },
+      el('div', { class: 'n' }, e.name, e.me ? el('span', { class: 'pill', style: 'margin-left:6px' }, 'dig') : null,
+        e.state ? el('span', { class: 'wc-state ' + e.state.state }, `${e.state.label} · ${e.state.kda}`) : null),
+      el('div', { class: 'r' }, e.reasons.join(' · '))));
+}
+
+function winconsCard(w) {
+  if (!w || (!w.enemy.wincon && !w.ally.wincon)) return null;
+  const partial = w.enemy.count < 5 || w.ally.count < 5;
+  return el('div', { class: 'card wincons' },
+    el('h2', {}, 'Wincons'),
+    winconRow('Deres wincon', w.enemy.wincon, 'enemy'),
+    winconRow('Farligst tidligt', w.enemy.early, 'enemy'),
+    winconRow('Jeres wincon', w.ally.wincon, 'ally'),
+    w.advice.length ? el('ul', { class: 'notes', style: 'margin-top:10px' }, w.advice.map((l) => el('li', {}, l))) : null,
+    partial && !w.live ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:6px' }, `Ikke alle har valgt endnu (jer ${w.ally.count}/5, dem ${w.enemy.count}/5) - opdateres når de låser.`) : null,
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:8px' },
+      'Regel: carry-klasse (marksman > mage/assassin > fighter > tank > support) + hvor meget championens win rate stiger fra kampe under 25 min til 40+ min (OP.GG). ' +
+      (w.live ? 'Status: items, kills og level mod holdets gennemsnit (TAB).' : 'Et udgangspunkt, ikke en spådom.')));
+}
+
+// ---------- Mine runer: rediger din egen rune-side pr. champion ----------
+let runeTrees = null;      // fra /api/rune-trees (hentes første gang editoren åbnes)
+let runeEdit = null;       // { championId, name, icon, page, source, msg, busy }
+let runeSearch = '';
+
+async function loadRuneTrees() {
+  if (!runeTrees) runeTrees = await (await fetch('/api/rune-trees')).json();
+  return runeTrees;
+}
+
+async function openRuneEditor(championId) {
+  try {
+    const t = await loadRuneTrees();
+    const c = t.champions.find((x) => x.id === championId);
+    runeEdit = { championId, name: c ? c.name : String(championId), icon: c && c.icon, page: null, msg: 'Henter startside...', busy: true };
+    render(lastState);
+    const res = await fetch('/api/rune-start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ championId }) });
+    const j = await res.json();
+    if (!runeEdit || runeEdit.championId !== championId) return;
+    const first = t.trees[0];
+    runeEdit.page = j.page || { primary_page_id: first.id, primary_rune_ids: [null, null, null, null], secondary_page_id: t.trees[1].id, secondary_rune_ids: [], stat_mod_ids: [null, null, null] };
+    runeEdit.source = j.source;
+    runeEdit.saved = j.source === 'mine';
+    runeEdit.msg = j.error || (j.source === 'mine' ? 'Din gemte side.' : j.source === 'opgg' ? 'Startet fra OP.GG\'s side - ret den til og gem.' : 'Vælg dine runer.');
+    runeEdit.busy = false;
+  } catch (e) {
+    if (runeEdit) { runeEdit.msg = 'Kunne ikke åbne editoren: ' + e.message; runeEdit.busy = false; }
+  }
+  render(lastState);
+}
+
+function runePageComplete(p) {
+  return p && p.primary_rune_ids.every((x) => x) && p.secondary_rune_ids.length === 2 && p.stat_mod_ids.every((x) => x);
+}
+
+async function saveRuneEdit(body) {
+  runeEdit.busy = true; runeEdit.msg = 'Gemmer...'; render(lastState);
+  const res = await fetch('/api/my-runes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ championId: runeEdit.championId, ...body }) });
+  const j = await res.json().catch(() => ({}));
+  runeEdit.busy = false;
+  if (!res.ok) { runeEdit.msg = j.error || 'Noget gik galt'; render(lastState); return; }
+  if (body.page === null && !body.fromClient) { runeEdit = null; render(lastState); return; }
+  runeEdit.page = j.page;
+  runeEdit.saved = true;
+  runeEdit.source = 'mine';
+  runeEdit.msg = j.applied ? 'Gemt og sat i klienten nu.' : `Gemt - sættes automatisk næste gang du spiller ${runeEdit.name}.`;
+  render(lastState);
+}
+
+function runeEditorCard() {
+  const E = runeEdit;
+  if (!E) return null;
+  const t = runeTrees;
+  const p = E.page;
+  const head = el('div', { class: 'plan-head' }, img(E.icon, E.name, 'plan-ic'), el('h2', { style: 'margin:0' }, `Mine runer: ${E.name}`),
+    el('button', { style: 'margin-left:auto', onclick: () => { runeEdit = null; render(lastState); } }, 'Luk'));
+  if (!t || !p) return el('div', { class: 'card runeedit' }, head, el('div', { class: 'muted' }, E.msg || ''));
+  const tree = (id) => t.trees.find((x) => x.id === id);
+  const set = (fn) => () => { fn(); E.msg = null; render(lastState); };
+  const pick = (r, on, onclick) => el('button', { class: 'rpick' + (on ? ' on' : ''), title: r.name, onclick }, img(r.icon, r.name), el('span', {}, r.name));
+  const treeBtns = (current, exclude, onPick) => el('div', { class: 'rtrees' }, t.trees.filter((x) => x.id !== exclude).map((x) =>
+    el('button', { class: 'rtree' + (x.id === current ? ' on' : ''), title: x.name, onclick: set(() => onPick(x.id)) }, img(x.icon, x.name), x.name)));
+  const prim = tree(p.primary_page_id);
+  const sec = tree(p.secondary_page_id);
+  const setPrimary = (id) => {
+    if (id === p.primary_page_id) return;
+    p.primary_page_id = id;
+    p.primary_rune_ids = [null, null, null, null];
+    if (p.secondary_page_id === id) { p.secondary_page_id = t.trees.find((x) => x.id !== id).id; p.secondary_rune_ids = []; }
+  };
+  const setSecondary = (id) => { if (id !== p.secondary_page_id) { p.secondary_page_id = id; p.secondary_rune_ids = []; } };
+  const rowOf = (id) => sec.slots.findIndex((s, i) => i > 0 && s.some((r) => r.id === id));
+  const toggleSecondary = (id) => {
+    const row = rowOf(id);
+    let list = p.secondary_rune_ids.filter((x) => rowOf(x) !== row);
+    list.push(id);
+    if (list.length > 2) list = list.slice(-2); // den ældste ryger ud
+    p.secondary_rune_ids = list;
+  };
+  const ready = runePageComplete(p);
+  return el('div', { class: 'card runeedit' }, head,
+    el('div', { class: 'plan-sub' }, 'Hovedgren'),
+    treeBtns(p.primary_page_id, null, setPrimary),
+    prim.slots.map((slot, i) => el('div', { class: 'rrow' + (i === 0 ? ' keys' : '') },
+      slot.map((r) => pick(r, p.primary_rune_ids[i] === r.id, set(() => { p.primary_rune_ids[i] = r.id; }))))),
+    el('div', { class: 'plan-sub' }, 'Anden gren (vælg 2 fra forskellige rækker)'),
+    treeBtns(p.secondary_page_id, p.primary_page_id, setSecondary),
+    sec.slots.slice(1).map((slot) => el('div', { class: 'rrow' },
+      slot.map((r) => pick(r, p.secondary_rune_ids.includes(r.id), set(() => toggleSecondary(r.id)))))),
+    el('div', { class: 'plan-sub' }, 'Shards'),
+    t.shards.map((row, i) => el('div', { class: 'rrow shards-row' }, row.map((r) =>
+      el('button', { class: 'pill rshard' + (p.stat_mod_ids[i] === r.id ? ' on' : ''), onclick: set(() => { p.stat_mod_ids[i] = r.id; }) }, r.name)))),
+    E.msg ? el('div', { class: 'muted', style: 'font-size:12px;margin:10px 0 0' }, E.msg) : null,
+    el('div', { class: 'row', style: 'gap:8px;margin-top:12px;flex-wrap:wrap' },
+      el('button', { class: 'primary', disabled: !ready || E.busy, onclick: () => saveRuneEdit({ page: p }) }, ready ? `Gem som min ${E.name}-side` : 'Vælg alle runer først'),
+      el('button', { disabled: E.busy, title: 'Ret auto-siden i League-klienten og gem den herfra', onclick: () => saveRuneEdit({ fromClient: true }) }, 'Gem siden fra klienten i stedet'),
+      E.saved ? el('button', { disabled: E.busy, onclick: () => { if (confirm(`Slet din ${E.name}-side? Så bruges OP.GG's igen.`)) saveRuneEdit({ page: null }); } }, 'Slet min side') : null),
+    el('div', { class: 'muted', style: 'font-size:11px;margin-top:8px' }, 'Din side sættes automatisk, når du låser championen (før OP.GG\'s). OP.GG\'s sider ligger stadig som faner.'));
+}
+
+function myRunesCard(s) {
+  const list = s.myRunes || [];
+  const champs = runeTrees ? runeTrees.champions : [];
+  const q = runeSearch.trim().toLowerCase();
+  const hits = q ? champs.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 8) : [];
+  return el('div', { class: 'card' }, el('h2', {}, 'Mine runer'),
+    list.length ? el('div', { class: 'clist' }, list.map((r) => el('div', { class: 'crow' },
+      img(r.champion.icon, r.champion.name),
+      el('div', { class: 't' }, el('div', { class: 'n' }, r.champion.name),
+        el('div', { class: 'r' }, img(r.keystone.icon, r.keystone.name, 'mini'), ' ', r.keystone.name, ' + ', r.secondary.name, ' · ', r.runes.join(', '))),
+      el('button', { onclick: () => openRuneEditor(r.championId) }, 'Ret'))))
+      : el('div', { class: 'muted', style: 'font-size:13px' }, 'Ingen endnu. Find en champion og lav din egen side - den sættes automatisk i stedet for OP.GG\'s.'),
+    el('div', { class: 'row', style: 'gap:8px;margin-top:10px;flex-wrap:wrap' },
+      el('input', { class: 'rsearch', placeholder: 'Champion (fx LeBlanc)', value: runeSearch,
+        onfocus: () => { if (!runeTrees) loadRuneTrees().then(() => render(lastState)).catch(() => {}); },
+        oninput: (e) => { runeSearch = e.target.value; render(lastState); } })),
+    hits.length ? el('div', { class: 'rhits' }, hits.map((c) => el('button', { onclick: () => { runeSearch = ''; openRuneEditor(c.id); } }, img(c.icon, c.name), c.name))) : null);
 }
 
 function spellsCard(s) {
@@ -1114,6 +1291,7 @@ function renderLive(s) {
         el('div', { class: 'meta' }, `${clock(L.gameTime)} · ${L.gameMode || ''} · ${L.me.kills}/${L.me.deaths}/${L.me.assists}`), statusLine(s), obsLine(s), matchupLine(L.matchup), skillLine(L)),
       el('div', { class: 'right' }, el('div', { class: 'gold' }, gold(L.gold)), el('div', { class: 'meta' }, 'dit guld'))),
     adviceCard(L),
+    winconsCard(s.wincons),
     scoutCard(L.scout),
     L.gameTime < 240 ? enemyJungleCard(s.enemyJungle) : null, // de første 4 min
     L.gameTime < 300 ? jungleCard(s.jungle, L.side) : null, // de første 5 min
@@ -1202,7 +1380,9 @@ function renderInto(s) {
         el('p', { class: 'muted' }, 'I champion select får du ban- og counterpick-forslag; når du låser, sætter jeg runer, summoners og items. Under kampen kommer købsforslag og scoreboard her.'), obsLine(s)),
       s.draftStatus ? enemyJungleCard(s.enemyJungle) : null,
       guardBox(s.climbGuard),
+      runeEditorCard(),
       reviewCard(s),
+      myRunesCard(s),
       poolCard(s.pool),
       coachCard(s.coach, s),
       climbCard(s.climb),
@@ -1227,6 +1407,8 @@ function renderInto(s) {
     coachPickCard(s.coachPick),
     climbPickCard(s.climbPick),
     patternsPickCard(s.patternsPick),
+    runeEditorCard(),
+    winconsCard(s.wincons),
     gameplanCard(s.plan),
     enemyJungleCard(s.enemyJungle),
     jungleCard(s.jungle),
